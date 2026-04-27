@@ -271,11 +271,11 @@ class CloudMailClient:
 
     def wait_for_email(self, to_email, timeout=None, sender_keyword=None):
         """轮询等待邮件到达（用 admin API 按收件人搜索）"""
-        timeout = timeout or EMAIL_POLL_TIMEOUT
-        logger.info("[CloudMail] 等待邮件到达 %s... (超时 %ds)", to_email, timeout)
+        timeout = EMAIL_POLL_TIMEOUT if timeout is None else timeout
+        logger.info("[CloudMail] 等待邮件到达 %s... (超时 %ss)", to_email, "不限" if timeout == 0 else timeout)
         start = time.time()
 
-        while time.time() - start < timeout:
+        while timeout == 0 or time.time() - start < timeout:
             # 用 admin 全局搜索，不受 accountId 限制
             emails = self.search_emails_by_recipient(to_email)
             for email in emails:

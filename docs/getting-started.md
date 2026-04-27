@@ -9,7 +9,7 @@
 | 服务 | 说明 | 获取方式 |
 |------|------|---------|
 | **ChatGPT Team 订阅** | 管理员主号，需要有 Team 订阅 | [chatgpt.com](https://chatgpt.com) |
-| **CloudMail** | 临时邮箱服务，用于自动注册与收验证码 | 自建 [cloud-mail](https://github.com/maillab/cloud-mail) |
+| **临时邮箱服务** | 推荐 Mo Email；也可使用 CloudMail / Cloudflare Temp Email | 自建或已有 API |
 | **CLIProxyAPI** | Codex 代理与认证文件同步目标 | 自建 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) |
 | **VPS / 本地机器** | 推荐 Ubuntu 22.04+；也支持 Windows / macOS | 任意云服务商 / 本地电脑 |
 | **域名** | 用于 CloudMail 临时邮箱与 Verified Domains | 任意域名注册商 |
@@ -18,14 +18,15 @@
 
 ## 准备工作
 
-### 1. 搭建 CloudMail
+### 1. 准备临时邮箱服务
 
-参考 CloudMail 官方文档完成搭建：https://doc.skymail.ink/guide/dashboard
+推荐先使用 Mo Email。你需要准备：
 
-搭建完成后你会得到：
-- CloudMail API 地址（如 `https://your-domain.com/api`）
-- 管理员邮箱和密码
-- 邮箱域名（如 `@your-domain.com`）
+- API 地址（如 `https://mo.gymbro.cloud`）
+- API Key
+- 邮箱域名（如 `gymbro.cloud`）
+
+如果继续使用 CloudMail，可参考 CloudMail 官方文档完成搭建：https://doc.skymail.ink/guide/dashboard
 
 ### 2. 设置 OpenAI Verified Domains
 
@@ -94,15 +95,15 @@ uv run autoteam api
 ```text
 === AutoTeam 首次配置 ===
 
-  CloudMail API 地址: https://your-cloudmail.com/api
-  CloudMail 登录邮箱: admin@your-domain.com
-  CloudMail 登录密码: your_password
-  CloudMail 邮箱域名（如 @example.com）: @your-domain.com
+  Mo Email API 地址: https://mo.gymbro.cloud
+  Mo Email API Key: your_api_key
+  Mo Email 邮箱域名（如 gymbro.cloud）: gymbro.cloud
+  Mo Email 邮箱名前缀（如 abc）: abc
   CPA 管理密钥: your_cpa_key
   API 鉴权密钥 [回车自动生成]:
 ```
 
-配置会自动验证 CloudMail 和 CPA 的连通性，失败会提示具体原因。
+配置会自动验证邮箱服务和 CPA 的连通性，失败会提示具体原因。
 
 ### Docker 部署
 

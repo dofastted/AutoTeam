@@ -362,11 +362,13 @@ class CloudflareTempEmailClient:
         return None
 
     def wait_for_email(self, to_email, timeout=None, sender_keyword=None):
-        timeout = timeout or EMAIL_POLL_TIMEOUT
-        logger.info("[CloudflareTempEmail] 等待邮件到达 %s... (超时 %ds)", to_email, timeout)
+        timeout = EMAIL_POLL_TIMEOUT if timeout is None else timeout
+        logger.info(
+            "[CloudflareTempEmail] 等待邮件到达 %s... (超时 %ss)", to_email, "不限" if timeout == 0 else timeout
+        )
         start = time.time()
 
-        while time.time() - start < timeout:
+        while timeout == 0 or time.time() - start < timeout:
             emails = self.search_emails_by_recipient(to_email)
             for email_item in emails:
                 sender = str(email_item.get("sendEmail") or "")

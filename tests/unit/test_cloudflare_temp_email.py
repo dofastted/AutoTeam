@@ -85,3 +85,21 @@ def test_extract_invite_link_prefers_ai_extract_metadata():
     }
 
     assert client.extract_invite_link(email_data) == "https://chatgpt.com/auth/login?invite=abc"
+
+
+def test_wait_for_email_allows_zero_timeout_as_indefinite(monkeypatch):
+    client = cloudflare_temp_email.CloudflareTempEmailClient()
+    calls = {"count": 0}
+
+    monkeypatch.setattr(cloudflare_temp_email, "EMAIL_POLL_INTERVAL", 0)
+
+    def fake_search(to_email):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return []
+        return [{"sendEmail": "noreply@tm.openai.com", "subject": "Code"}]
+
+    monkeypatch.setattr(client, "search_emails_by_recipient", fake_search)
+
+    assert client.wait_for_email("tmp@example.com", timeout=0)["subject"] == "Code"
+    assert calls["count"] == 2

@@ -30,12 +30,20 @@ CLOUDMAIL_PASSWORD = os.environ.get("CLOUDMAIL_PASSWORD", "")
 CLOUDMAIL_DOMAIN = os.environ.get("CLOUDMAIL_DOMAIN", "")
 
 # 邮箱提供者配置
-MAIL_PROVIDER = os.environ.get("MAIL_PROVIDER", "cloudmail").strip().lower() or "cloudmail"
+MAIL_PROVIDER = os.environ.get("MAIL_PROVIDER", "mo_email").strip().lower() or "mo_email"
 
 # Cloudflare Temp Email 配置
 CF_TEMP_EMAIL_BASE_URL = os.environ.get("CF_TEMP_EMAIL_BASE_URL", "")
 CF_TEMP_EMAIL_ADMIN_PASSWORD = os.environ.get("CF_TEMP_EMAIL_ADMIN_PASSWORD", "")
 CF_TEMP_EMAIL_DOMAIN = os.environ.get("CF_TEMP_EMAIL_DOMAIN", "")
+
+# mo.gymbro.cloud 邮箱配置
+MO_EMAIL_BASE_URL = os.environ.get("MO_EMAIL_BASE_URL", "https://mo.gymbro.cloud")
+MO_EMAIL_API_KEY = os.environ.get("MO_EMAIL_API_KEY", "")
+MO_EMAIL_DOMAIN = os.environ.get("MO_EMAIL_DOMAIN", "gymbro.cloud")
+MO_EMAIL_NAME_PREFIX = os.environ.get("MO_EMAIL_NAME_PREFIX", "abc")
+MO_EMAIL_START_INDEX = _get_int_env("MO_EMAIL_START_INDEX", 1)
+MO_EMAIL_EXPIRY_TIME = _get_int_env("MO_EMAIL_EXPIRY_TIME", 3600000)
 
 # ChatGPT Team 配置
 CHATGPT_ACCOUNT_ID = os.environ.get("CHATGPT_ACCOUNT_ID", "")

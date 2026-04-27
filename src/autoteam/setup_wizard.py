@@ -9,6 +9,7 @@ import sys
 from autoteam.config import PROJECT_ROOT
 from autoteam.mail_provider import (
     MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL,
+    MAIL_PROVIDER_MO_EMAIL,
     get_mail_provider_name,
 )
 from autoteam.textio import parse_env_line, read_text, write_text
@@ -25,7 +26,13 @@ STARTUP_REQUIRED_CONFIGS = [
 
 # 可在配置面板中编辑的配置项（key, 提示, 默认值, 是否可选）
 REQUIRED_CONFIGS = [
-    ("MAIL_PROVIDER", "邮箱服务提供者（cloudmail/cloudflare_temp_email）", "cloudmail", True),
+    ("MAIL_PROVIDER", "邮箱服务提供者（mo_email/cloudmail/cloudflare_temp_email）", "mo_email", True),
+    ("MO_EMAIL_BASE_URL", "Mo Email API 地址", "https://mo.gymbro.cloud", True),
+    ("MO_EMAIL_API_KEY", "Mo Email API Key", "", True),
+    ("MO_EMAIL_DOMAIN", "Mo Email 邮箱域名（如 gymbro.cloud）", "gymbro.cloud", True),
+    ("MO_EMAIL_NAME_PREFIX", "Mo Email 邮箱名前缀（如 abc）", "abc", True),
+    ("MO_EMAIL_START_INDEX", "Mo Email 起始序号", "1", True),
+    ("MO_EMAIL_EXPIRY_TIME", "Mo Email 有效期毫秒数", "3600000", True),
     ("CLOUDMAIL_BASE_URL", "CloudMail API 地址", "", True),
     ("CLOUDMAIL_EMAIL", "CloudMail 登录邮箱", "", True),
     ("CLOUDMAIL_PASSWORD", "CloudMail 登录密码", "", True),
@@ -163,6 +170,12 @@ def check_and_setup(interactive: bool = True) -> bool:
     except Exception:
         pass
     try:
+        import autoteam.mo_email
+
+        importlib.reload(autoteam.mo_email)
+    except Exception:
+        pass
+    try:
         import autoteam.mail_provider
 
         importlib.reload(autoteam.mail_provider)
@@ -261,8 +274,49 @@ def _verify_cloudflare_temp_email():
     return True
 
 
+def _verify_mo_email():
+    """验证 Mo Email 配置是否正确：鉴权 + 创建测试邮箱。"""
+    base_url = os.environ.get("MO_EMAIL_BASE_URL", "")
+    api_key = os.environ.get("MO_EMAIL_API_KEY", "")
+    domain = os.environ.get("MO_EMAIL_DOMAIN", "")
+    name_prefix = os.environ.get("MO_EMAIL_NAME_PREFIX", "")
+    start_index = os.environ.get("MO_EMAIL_START_INDEX", "")
+    expiry_time = os.environ.get("MO_EMAIL_EXPIRY_TIME", "")
+
+    if not all([base_url, api_key, domain, name_prefix, start_index, expiry_time]):
+        return
+
+    logger.info("[验证] Mo Email 配置...")
+
+    try:
+        from autoteam.mo_email import MoEmailClient
+
+        client = MoEmailClient()
+        client.login()
+        logger.info("[验证] Mo Email 连接成功")
+    except Exception as e:
+        logger.error("[验证] Mo Email 连接失败: %s", e)
+        logger.error("[验证] 请检查 MO_EMAIL_BASE_URL、MO_EMAIL_API_KEY、MO_EMAIL_DOMAIN")
+        return False
+
+    try:
+        import uuid as _uuid
+
+        _test_account_id, test_email = client.create_temp_email(prefix=f"at-test-{_uuid.uuid4().hex[:6]}")
+        logger.info("[验证] Mo Email 创建测试邮箱成功: %s", test_email)
+    except Exception as e:
+        logger.error("[验证] Mo Email 创建邮箱失败: %s", e)
+        logger.error("[验证] 请检查 MO_EMAIL_DOMAIN、MO_EMAIL_EXPIRY_TIME 是否正确")
+        return False
+
+    logger.info("[验证] Mo Email 配置验证通过")
+    return True
+
+
 def _verify_mail_provider(provider: str | None = None):
     resolved = provider or get_mail_provider_name()
+    if resolved == MAIL_PROVIDER_MO_EMAIL:
+        return _verify_mo_email()
     if resolved == MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL:
         return _verify_cloudflare_temp_email()
     return _verify_cloudmail()

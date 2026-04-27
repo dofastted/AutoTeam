@@ -46,6 +46,7 @@ export const api = {
   saveRuntimeConfig: (config) => request('PUT', '/config/runtime', config),
   getRuntimeConfigSource: () => request('GET', '/config/source'),
   saveRuntimeConfigSource: (payload) => request('PUT', '/config/source', payload),
+  getMoEmailDomains: () => request('GET', '/mail/mo-email/domains'),
 
   getStatus: () => request('GET', '/status'),
   getAdminStatus: () => request('GET', '/admin/status'),

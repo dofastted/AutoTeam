@@ -10,6 +10,13 @@ cp .env.example .env
 
 | 配置项 | 说明 | 何时需要 |
 |--------|------|------|
+| `MAIL_PROVIDER` | 邮箱服务提供者，可选 `mo_email`、`cloudmail`、`cloudflare_temp_email` | 账号池操作时必填 |
+| `MO_EMAIL_BASE_URL` | Mo Email API 地址，默认 `https://mo.gymbro.cloud` | 使用 Mo Email 时必填 |
+| `MO_EMAIL_API_KEY` | Mo Email API Key | 使用 Mo Email 时必填 |
+| `MO_EMAIL_DOMAIN` | Mo Email 邮箱域名（如 `gymbro.cloud`） | 使用 Mo Email 时必填 |
+| `MO_EMAIL_NAME_PREFIX` | Mo Email 邮箱名前缀（如 `abc`） | 使用 Mo Email 时必填 |
+| `MO_EMAIL_START_INDEX` | Mo Email 起始序号 | 使用 Mo Email 时必填 |
+| `MO_EMAIL_EXPIRY_TIME` | Mo Email 有效期毫秒数，可填 `3600000`、`86400000`、`604800000`、`0` | 使用 Mo Email 时必填 |
 | `CLOUDMAIL_BASE_URL` | CloudMail API 地址 | 账号池操作时必填 |
 | `CLOUDMAIL_EMAIL` | CloudMail 登录邮箱 | 账号池操作时必填 |
 | `CLOUDMAIL_PASSWORD` | CloudMail 登录密码 | 账号池操作时必填 |
@@ -102,6 +109,18 @@ AUTO_CHECK_INTERVAL=300  # 5 分钟
 ```
 
 Windows / macOS 下也会按 UTF-8 正常读取。
+
+### Mo Email
+
+`MAIL_PROVIDER=mo_email` 时，系统会用 `MO_EMAIL_BASE_URL` 和 `MO_EMAIL_API_KEY` 调用 Mo Email API。`MO_EMAIL_DOMAIN` 可填写 `/api/config` 返回的任一域名。
+
+自动创建邮箱时，系统会读取远端邮箱列表和本地账号记录，按 `MO_EMAIL_NAME_PREFIX` 查找已有最大序号，再加 1。例如已存在 `abc-1@gymbro.cloud`，下一个邮箱会是 `abc-2@gymbro.cloud`。
+
+Mo Email 当前公开接口没有删除邮箱或删除邮件端点，所以删除账号时只会删除本地账号记录和远端同步目标中的认证文件，不会误报邮箱已从 Mo Email 删除。
+
+### 邮件等待
+
+`EMAIL_POLL_INTERVAL` 是刷新间隔，单位秒。`EMAIL_POLL_TIMEOUT` 是最多等待多久；设置为 `0` 时会一直刷新，直到收到目标邮件。
 
 ## 管理员登录态
 

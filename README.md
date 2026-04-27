@@ -24,7 +24,7 @@
 
 | | 功能 | 描述 |
 |---|---|---|
-| 📧 | **自动注册** | 支持 CloudMail / Cloudflare Temp Email + Playwright 自动注册 |
+| 📧 | **自动注册** | 支持 Mo Email / CloudMail / Cloudflare Temp Email + Playwright 自动注册 |
 | 🔐 | **Codex OAuth** | 自动登录 Codex，无密码时可走邮箱验证码 |
 | 🔑 | **手动 OAuth 导入** | 支持 localhost 自动回调，也支持手动粘贴回调 URL |
 | 🔄 | **智能轮转** | 额度不足自动移出，旧号恢复后优先复用 |
@@ -123,7 +123,7 @@ PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:3333
 
 ### 配置面板说明
 
-- **邮箱服务**：统一管理 CloudMail / Cloudflare Temp Email
+- **邮箱服务**：统一管理 Mo Email / CloudMail / Cloudflare Temp Email
 - **远端同步**：统一管理 CPA / Sub2API 开关和连接信息
 - **代理 / 高级**：低频 Playwright 代理配置，默认折叠
 - **安全 / 访问控制**：单独管理 `API_KEY`
@@ -133,12 +133,32 @@ PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:3333
 
 ### 邮箱服务提供者
 
-当前支持两种邮箱后端：
+当前支持三种邮箱后端：
 
+- **Mo Email**（推荐）
 - **CloudMail**
 - **Cloudflare Temp Email**
 
 通过下面的配置切换默认新建账号使用的邮箱服务：
+
+```env
+MAIL_PROVIDER=mo_email
+```
+
+Mo Email 需要配置 API 地址、API Key、邮箱域名、邮箱名前缀、起始序号和有效期：
+
+```env
+MO_EMAIL_BASE_URL=https://mo.gymbro.cloud
+MO_EMAIL_API_KEY=your_api_key
+MO_EMAIL_DOMAIN=gymbro.cloud
+MO_EMAIL_NAME_PREFIX=abc
+MO_EMAIL_START_INDEX=1
+MO_EMAIL_EXPIRY_TIME=3600000
+```
+
+`MO_EMAIL_DOMAIN` 可使用 `/api/config` 返回的域名。自动创建邮箱时会按 `MO_EMAIL_NAME_PREFIX` 递增，例如先创建 `abc-1@gymbro.cloud`，下次创建 `abc-2@gymbro.cloud`。
+
+旧服务仍可继续使用：
 
 ```env
 MAIL_PROVIDER=cloudmail
@@ -154,7 +174,11 @@ MAIL_PROVIDER=cloudflare_temp_email
 
 - **新建账号**：始终使用当前 `MAIL_PROVIDER`
 - **复用旧账号**：按账号自身保存的 `mail_provider` 选择原来的邮箱后端
-- 因此两套配置可以同时保留，便于账号池混合复用
+- 因此多套配置可以同时保留，便于账号池混合复用
+
+#### 邮件等待设置
+
+`EMAIL_POLL_INTERVAL` 控制刷新间隔，单位秒。`EMAIL_POLL_TIMEOUT` 控制最多等待多久；设置为 `0` 时会一直刷新，直到收到目标邮件。
 
 #### Cloudflare Temp Email 注意事项
 

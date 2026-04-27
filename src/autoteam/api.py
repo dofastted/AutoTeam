@@ -73,7 +73,13 @@ def check_auth(request: Request):
 
 
 class SetupConfig(BaseModel):
-    MAIL_PROVIDER: str = "cloudmail"
+    MAIL_PROVIDER: str = "mo_email"
+    MO_EMAIL_BASE_URL: str = "https://mo.gymbro.cloud"
+    MO_EMAIL_API_KEY: str = ""
+    MO_EMAIL_DOMAIN: str = "gymbro.cloud"
+    MO_EMAIL_NAME_PREFIX: str = "abc"
+    MO_EMAIL_START_INDEX: str = "1"
+    MO_EMAIL_EXPIRY_TIME: str = "3600000"
     CLOUDMAIL_BASE_URL: str = ""
     CLOUDMAIL_EMAIL: str = ""
     CLOUDMAIL_PASSWORD: str = ""
@@ -109,12 +115,26 @@ _CF_TEMP_EMAIL_REQUIRED_KEYS = (
     "CF_TEMP_EMAIL_ADMIN_PASSWORD",
     "CF_TEMP_EMAIL_DOMAIN",
 )
+_MO_EMAIL_REQUIRED_KEYS = (
+    "MO_EMAIL_BASE_URL",
+    "MO_EMAIL_API_KEY",
+    "MO_EMAIL_DOMAIN",
+    "MO_EMAIL_NAME_PREFIX",
+    "MO_EMAIL_START_INDEX",
+    "MO_EMAIL_EXPIRY_TIME",
+)
 _CPA_REQUIRED_KEYS = ("CPA_URL", "CPA_KEY")
 _SUB2API_REQUIRED_KEYS = ("SUB2API_URL", "SUB2API_EMAIL", "SUB2API_PASSWORD")
 _SYNC_TARGET_TOGGLE_KEYS = ("SYNC_TARGET_CPA", "SYNC_TARGET_SUB2API")
 
 _ALL_RUNTIME_ENV_KEYS = [
     "MAIL_PROVIDER",
+    "MO_EMAIL_BASE_URL",
+    "MO_EMAIL_API_KEY",
+    "MO_EMAIL_DOMAIN",
+    "MO_EMAIL_NAME_PREFIX",
+    "MO_EMAIL_START_INDEX",
+    "MO_EMAIL_EXPIRY_TIME",
     "CLOUDMAIL_BASE_URL",
     "CLOUDMAIL_EMAIL",
     "CLOUDMAIL_PASSWORD",
@@ -326,6 +346,7 @@ def _reload_runtime_config_modules():
     for module_name in (
         "autoteam.cloudmail",
         "autoteam.cloudflare_temp_email",
+        "autoteam.mo_email",
         "autoteam.mail_provider",
         "autoteam.cpa_sync",
         "autoteam.sub2api_sync",
@@ -598,6 +619,16 @@ def get_runtime_config_source():
     """获取 .env 源文件内容。"""
     content, path = _read_runtime_source_text()
     return {"path": path, "content": content}
+
+
+@app.get("/api/mail/mo-email/domains")
+def get_mo_email_domains():
+    """读取 Mo Email 当前可用邮箱域名。"""
+    from autoteam.mo_email import MoEmailClient
+
+    client = MoEmailClient()
+    domains, payload = client._available_domains()
+    return {"domains": domains, "config": payload}
 
 
 @app.put("/api/config/runtime")

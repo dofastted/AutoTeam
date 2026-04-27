@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from autoteam.admin_state import get_admin_email
-from autoteam.mail_provider import build_account_mail_fields, get_mail_provider_name
+from autoteam.mail_provider import MAIL_PROVIDER_CLOUDMAIL, build_account_mail_fields, get_mail_provider_name
 from autoteam.textio import read_text, write_text
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -56,7 +56,14 @@ def add_account(email, password, cloudmail_account_id=None, *, mail_provider=Non
 
     if mail_account_id is None:
         mail_account_id = cloudmail_account_id
-    resolved_mail_provider = mail_provider or (get_mail_provider_name() if mail_account_id is not None else "")
+    if mail_provider:
+        resolved_mail_provider = mail_provider
+    elif cloudmail_account_id is not None:
+        resolved_mail_provider = MAIL_PROVIDER_CLOUDMAIL
+    elif mail_account_id is not None:
+        resolved_mail_provider = get_mail_provider_name()
+    else:
+        resolved_mail_provider = ""
     mail_fields = (
         build_account_mail_fields(mail_account_id, provider=resolved_mail_provider)
         if mail_account_id is not None

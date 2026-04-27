@@ -7,8 +7,10 @@ from typing import Any
 
 MAIL_PROVIDER_CLOUDMAIL = "cloudmail"
 MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL = "cloudflare_temp_email"
+MAIL_PROVIDER_MO_EMAIL = "mo_email"
 
 SUPPORTED_MAIL_PROVIDERS = (
+    MAIL_PROVIDER_MO_EMAIL,
     MAIL_PROVIDER_CLOUDMAIL,
     MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL,
 )
@@ -25,10 +27,18 @@ _MAIL_PROVIDER_REQUIRED_KEYS = {
         "CF_TEMP_EMAIL_ADMIN_PASSWORD",
         "CF_TEMP_EMAIL_DOMAIN",
     ),
+    MAIL_PROVIDER_MO_EMAIL: (
+        "MO_EMAIL_BASE_URL",
+        "MO_EMAIL_API_KEY",
+        "MO_EMAIL_DOMAIN",
+        "MO_EMAIL_NAME_PREFIX",
+        "MO_EMAIL_START_INDEX",
+        "MO_EMAIL_EXPIRY_TIME",
+    ),
 }
 
 
-def normalize_mail_provider(value: object | None, default: str = MAIL_PROVIDER_CLOUDMAIL) -> str:
+def normalize_mail_provider(value: object | None, default: str = MAIL_PROVIDER_MO_EMAIL) -> str:
     provider = str(value or "").strip().lower()
     if provider in SUPPORTED_MAIL_PROVIDERS:
         return provider
@@ -47,6 +57,8 @@ def get_mail_provider_required_keys(provider: str | None = None) -> tuple[str, .
 
 def get_mail_provider_prompt(provider: str | None = None) -> str:
     resolved = normalize_mail_provider(provider or get_mail_provider_name())
+    if resolved == MAIL_PROVIDER_MO_EMAIL:
+        return "Mo Email"
     if resolved == MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL:
         return "Cloudflare Temp Email"
     return "CloudMail"
@@ -55,6 +67,8 @@ def get_mail_provider_prompt(provider: str | None = None) -> str:
 def get_mail_domain(provider: str | None = None, env: dict[str, Any] | None = None) -> str:
     source = env or os.environ
     resolved = normalize_mail_provider(provider or source.get("MAIL_PROVIDER"))
+    if resolved == MAIL_PROVIDER_MO_EMAIL:
+        return str(source.get("MO_EMAIL_DOMAIN", "") or "").strip()
     if resolved == MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL:
         return str(source.get("CF_TEMP_EMAIL_DOMAIN", "") or "").strip()
     return str(source.get("CLOUDMAIL_DOMAIN", "") or "").strip()
@@ -94,6 +108,10 @@ def build_account_mail_fields(account_id, provider: str | None = None) -> dict[s
 
 def get_mail_client(provider: str | None = None):
     resolved = normalize_mail_provider(provider or get_mail_provider_name())
+    if resolved == MAIL_PROVIDER_MO_EMAIL:
+        from autoteam.mo_email import MoEmailClient
+
+        return MoEmailClient()
     if resolved == MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL:
         from autoteam.cloudflare_temp_email import CloudflareTempEmailClient
 

@@ -92,7 +92,9 @@ http://localhost:1455/auth/callback
 | `chatgpt_api.py` | 通过浏览器上下文调用 ChatGPT 内部接口 |
 | `codex_auth.py` | Codex OAuth、refresh、额度检查 |
 | `invite.py` | 自动注册流程 |
+| `mo_email.py` | Mo Email 临时邮箱客户端 |
 | `cloudmail.py` | CloudMail 临时邮箱客户端 |
+| `cloudflare_temp_email.py` | Cloudflare Temp Email 客户端 |
 | `cpa_sync.py` | CPA 双向同步与去重 |
 | `manual_account.py` | 手动 OAuth 导入（自动 / 手动回调） |
 
@@ -110,7 +112,9 @@ autoteam/
 │   ├── accounts.py             # 账号池持久化
 │   ├── account_ops.py          # 删除 / 清理 / 对账
 │   ├── chatgpt_api.py          # ChatGPT Team 内部 API 调用
+│   ├── mo_email.py             # Mo Email 客户端
 │   ├── cloudmail.py            # CloudMail 客户端
+│   ├── cloudflare_temp_email.py # Cloudflare Temp Email 客户端
 │   ├── codex_auth.py           # Codex OAuth 与 token 管理
 │   ├── cpa_sync.py             # CPA 正反向同步
 │   ├── manual_account.py       # 手动 OAuth 导入

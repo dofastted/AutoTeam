@@ -12,6 +12,7 @@ from autoteam import api
 def _set_pool_runtime_config(monkeypatch):
     monkeypatch.setattr(api, "_maybe_reload_runtime_config_from_env_file", lambda *args, **kwargs: False)
     monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
+    monkeypatch.setenv("MAIL_PROVIDER", "cloudmail")
     monkeypatch.setenv("CLOUDMAIL_BASE_URL", "http://mail.example.com")
     monkeypatch.setenv("CLOUDMAIL_EMAIL", "admin@example.com")
     monkeypatch.setenv("CLOUDMAIL_PASSWORD", "secret")
@@ -99,6 +100,8 @@ def test_post_setup_save_only_requires_api_key_and_generates_one(monkeypatch):
     monkeypatch.setattr("importlib.reload", lambda module: module)
     monkeypatch.setattr(api, "API_KEY", "")
     monkeypatch.delenv("CPA_URL", raising=False)
+    monkeypatch.delenv("MAIL_PROVIDER", raising=False)
+    monkeypatch.delenv("MO_EMAIL_API_KEY", raising=False)
     monkeypatch.delenv("CLOUDMAIL_BASE_URL", raising=False)
     monkeypatch.delenv("CLOUDMAIL_EMAIL", raising=False)
     monkeypatch.delenv("CLOUDMAIL_PASSWORD", raising=False)
@@ -154,6 +157,7 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
         "\n".join(
             [
                 "CLOUDMAIL_BASE_URL=http://mail.example.com",
+                "MAIL_PROVIDER=cloudmail",
                 "CLOUDMAIL_EMAIL=admin@example.com",
                 "CLOUDMAIL_PASSWORD=secret",
                 "CLOUDMAIL_DOMAIN=@example.com",
@@ -170,6 +174,8 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
     monkeypatch.setattr("autoteam.setup_wizard.ENV_FILE", env_file)
     for key in (
         "CLOUDMAIL_BASE_URL",
+        "MAIL_PROVIDER",
+        "MO_EMAIL_API_KEY",
         "CLOUDMAIL_EMAIL",
         "CLOUDMAIL_PASSWORD",
         "CLOUDMAIL_DOMAIN",
@@ -194,6 +200,52 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
     assert fields["PLAYWRIGHT_PROXY_BYPASS"]["value"] == "localhost,127.0.0.1"
     assert fields["API_KEY"]["value"] == "runtime-key"
     assert fields["API_KEY"]["runtime_required"] is True
+
+
+def test_get_runtime_config_switches_required_mail_fields_to_mo_email(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "MAIL_PROVIDER=mo_email",
+                "MO_EMAIL_BASE_URL=https://mo.gymbro.cloud",
+                "MO_EMAIL_API_KEY=secret",
+                "MO_EMAIL_DOMAIN=gymbro.cloud",
+                "MO_EMAIL_NAME_PREFIX=abc",
+                "MO_EMAIL_START_INDEX=1",
+                "MO_EMAIL_EXPIRY_TIME=3600000",
+                "API_KEY=runtime-key",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("autoteam.setup_wizard.ENV_FILE", env_file)
+    for key in (
+        "MAIL_PROVIDER",
+        "MO_EMAIL_BASE_URL",
+        "MO_EMAIL_API_KEY",
+        "MO_EMAIL_DOMAIN",
+        "MO_EMAIL_NAME_PREFIX",
+        "MO_EMAIL_START_INDEX",
+        "MO_EMAIL_EXPIRY_TIME",
+        "CLOUDMAIL_BASE_URL",
+        "CLOUDMAIL_EMAIL",
+        "CF_TEMP_EMAIL_BASE_URL",
+        "CF_TEMP_EMAIL_ADMIN_PASSWORD",
+        "API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    result = api.get_runtime_config()
+    fields = {field["key"]: field for field in result["fields"]}
+
+    assert result["configured"] is True
+    assert fields["MAIL_PROVIDER"]["value"] == "mo_email"
+    assert fields["MO_EMAIL_API_KEY"]["runtime_required"] is True
+    assert fields["MO_EMAIL_DOMAIN"]["runtime_required"] is True
+    assert fields["CLOUDMAIL_BASE_URL"]["runtime_required"] is False
+    assert fields["CF_TEMP_EMAIL_BASE_URL"]["runtime_required"] is False
 
 
 def test_get_runtime_config_switches_required_mail_fields_by_provider(tmp_path, monkeypatch):
@@ -346,6 +398,7 @@ def test_runtime_env_file_hot_reload_updates_current_process_without_restart(tmp
 )
 def test_pool_task_endpoints_require_cloudmail_config_first(monkeypatch, endpoint, args, action_label):
     monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
+    monkeypatch.setenv("MAIL_PROVIDER", "cloudmail")
     for key in (
         "CLOUDMAIL_BASE_URL",
         "CLOUDMAIL_EMAIL",
@@ -376,6 +429,7 @@ def test_pool_task_endpoints_require_cloudmail_config_first(monkeypatch, endpoin
 )
 def test_pool_task_endpoints_require_enabled_sync_target_after_cloudmail(monkeypatch, endpoint, args, action_label):
     monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
+    monkeypatch.setenv("MAIL_PROVIDER", "cloudmail")
     monkeypatch.setenv("CLOUDMAIL_BASE_URL", "http://mail.example.com")
     monkeypatch.setenv("CLOUDMAIL_EMAIL", "admin@example.com")
     monkeypatch.setenv("CLOUDMAIL_PASSWORD", "secret")
@@ -426,6 +480,7 @@ def test_cpa_endpoints_require_cpa_config(monkeypatch, endpoint, action_label):
 
 
 def test_post_sync_supports_sub2api_only(monkeypatch):
+    monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
     monkeypatch.setenv("SYNC_TARGET_SUB2API", "true")
     monkeypatch.setenv("SUB2API_URL", "http://sub2api.example.com")
     monkeypatch.setenv("SUB2API_EMAIL", "admin@example.com")
@@ -443,6 +498,7 @@ def test_post_sync_supports_sub2api_only(monkeypatch):
 
 def test_pool_task_endpoint_accepts_sub2api_only_config(monkeypatch):
     monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
+    monkeypatch.setenv("MAIL_PROVIDER", "cloudmail")
     monkeypatch.setenv("CLOUDMAIL_BASE_URL", "http://mail.example.com")
     monkeypatch.setenv("CLOUDMAIL_EMAIL", "admin@example.com")
     monkeypatch.setenv("CLOUDMAIL_PASSWORD", "secret")
@@ -473,6 +529,8 @@ def test_put_runtime_config_source_applies_env_and_updates_api_key(tmp_path, mon
     monkeypatch.setattr(api, "API_KEY", "old-key")
 
     for key in (
+        "MAIL_PROVIDER",
+        "MO_EMAIL_API_KEY",
         "CLOUDMAIL_BASE_URL",
         "CLOUDMAIL_EMAIL",
         "CLOUDMAIL_PASSWORD",
@@ -520,6 +578,7 @@ def test_auto_check_skips_rotate_when_pool_configs_are_missing(tmp_path, monkeyp
     monkeypatch.setattr(api, "_maybe_reload_runtime_config_from_env_file", lambda *args, **kwargs: False)
     monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
     monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
+    monkeypatch.setenv("MAIL_PROVIDER", "cloudmail")
     for key in (
         "CLOUDMAIL_BASE_URL",
         "CLOUDMAIL_EMAIL",

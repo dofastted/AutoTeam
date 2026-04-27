@@ -114,16 +114,50 @@
               </div>
             </div>
             <div class="status-badge text-xs text-slate-400">
-              {{ selectedMailProvider === 'cloudflare_temp_email' ? 'Cloudflare Temp Email' : 'CloudMail' }}
+              {{ mailProviderLabel(selectedMailProvider) }}
             </div>
           </div>
           <select v-model="runtimeForm.MAIL_PROVIDER" class="input-dark">
+            <option value="mo_email">Mo Email</option>
             <option value="cloudmail">CloudMail</option>
             <option value="cloudflare_temp_email">Cloudflare Temp Email</option>
           </select>
         </div>
 
-        <div v-if="selectedMailProvider === 'cloudmail'" class="rounded-2xl border border-white/10 bg-white/5 p-5">
+        <div v-if="selectedMailProvider === 'mo_email'" class="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div class="mb-4">
+            <div class="text-sm font-medium text-white">Mo Email</div>
+            <div class="mt-1 text-xs leading-5 text-slate-400">
+              填写 mo.gymbro.cloud 地址、API Key、邮箱域名和自动命名规则。
+            </div>
+          </div>
+          <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div v-for="field in moEmailProviderFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+              <label class="mb-2 block text-sm font-medium text-slate-300">
+                {{ field.prompt }}
+                <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+              </label>
+              <select
+                v-if="field.key === 'MO_EMAIL_DOMAIN' && moEmailDomains.length"
+                v-model="runtimeForm[field.key]"
+                class="input-dark"
+              >
+                <option v-for="domain in moEmailDomains" :key="domain" :value="domain">
+                  {{ domain }}
+                </option>
+              </select>
+              <input
+                v-else
+                v-model="runtimeForm[field.key]"
+                :type="fieldInputType(field.key)"
+                :placeholder="field.default || ''"
+                class="input-dark"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div v-else-if="selectedMailProvider === 'cloudmail'" class="rounded-2xl border border-white/10 bg-white/5 p-5">
           <div class="mb-4">
             <div class="text-sm font-medium text-white">CloudMail</div>
             <div class="mt-1 text-xs leading-5 text-slate-400">
@@ -448,7 +482,7 @@ defineProps({
 const emit = defineEmits(['refresh', 'admin-progress'])
 
 const runtimeCategoryKeys = {
-  cloudmail: ['MAIL_PROVIDER', 'CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN', 'CF_TEMP_EMAIL_BASE_URL', 'CF_TEMP_EMAIL_ADMIN_PASSWORD', 'CF_TEMP_EMAIL_DOMAIN'],
+  cloudmail: ['MAIL_PROVIDER', 'MO_EMAIL_BASE_URL', 'MO_EMAIL_API_KEY', 'MO_EMAIL_DOMAIN', 'MO_EMAIL_NAME_PREFIX', 'MO_EMAIL_START_INDEX', 'MO_EMAIL_EXPIRY_TIME', 'CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN', 'CF_TEMP_EMAIL_BASE_URL', 'CF_TEMP_EMAIL_ADMIN_PASSWORD', 'CF_TEMP_EMAIL_DOMAIN'],
   sync: ['SYNC_TARGET_CPA', 'SYNC_TARGET_SUB2API', 'CPA_URL', 'CPA_KEY', 'SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP'],
   proxy: ['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS'],
   security: ['API_KEY'],
@@ -459,7 +493,7 @@ const runtimeCategoryMeta = {
     icon: '📧',
     badge: 'Mail Provider',
     title: '邮箱服务配置',
-    description: '配置自动注册和收验证码所需的邮箱后端。可以在 CloudMail 和 Cloudflare Temp Email 之间切换。',
+    description: '配置自动注册和收验证码所需的邮箱后端。可以在 Mo Email、CloudMail 和 Cloudflare Temp Email 之间切换。',
     note: '带 * 的项会直接影响账号池操作；只有当前选中的邮箱提供者配置会被视为运行时必填。',
     footer: '邮箱提供者配置保存后会立即热加载；之后的注册、复用和验证码轮询会直接使用新配置。',
   },
@@ -502,6 +536,7 @@ const proxyExpanded = ref(false)
 
 const runtimeFields = ref([])
 const runtimeForm = reactive({})
+const moEmailDomains = ref([])
 const runtimeLoading = ref(false)
 const runtimeSaving = ref(false)
 const runtimeSaved = ref(false)
@@ -533,7 +568,11 @@ function fieldsByKeys(keys) {
 const securityFields = computed(() => fieldsByKeys(runtimeCategoryKeys.security))
 const proxyFields = computed(() => fieldsByKeys(runtimeCategoryKeys.proxy))
 const syncToggleFields = computed(() => fieldsByKeys(['SYNC_TARGET_CPA', 'SYNC_TARGET_SUB2API']))
-const selectedMailProvider = computed(() => String(runtimeForm.MAIL_PROVIDER || 'cloudmail').toLowerCase() === 'cloudflare_temp_email' ? 'cloudflare_temp_email' : 'cloudmail')
+const selectedMailProvider = computed(() => {
+  const value = String(runtimeForm.MAIL_PROVIDER || 'mo_email').toLowerCase()
+  return ['mo_email', 'cloudmail', 'cloudflare_temp_email'].includes(value) ? value : 'mo_email'
+})
+const moEmailProviderFields = computed(() => fieldsByKeys(['MO_EMAIL_BASE_URL', 'MO_EMAIL_API_KEY', 'MO_EMAIL_DOMAIN', 'MO_EMAIL_NAME_PREFIX', 'MO_EMAIL_START_INDEX', 'MO_EMAIL_EXPIRY_TIME']))
 const cloudmailProviderFields = computed(() => fieldsByKeys(['CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN']))
 const cfTempEmailFields = computed(() => fieldsByKeys(['CF_TEMP_EMAIL_BASE_URL', 'CF_TEMP_EMAIL_ADMIN_PASSWORD', 'CF_TEMP_EMAIL_DOMAIN']))
 
@@ -544,9 +583,13 @@ const syncSub2apiFields = computed(() => syncSub2apiEnabled.value ? fieldsByKeys
 
 const currentRuntimeFields = computed(() => {
   if (selectedRuntimeCategory.value === 'cloudmail') {
-    return selectedMailProvider.value === 'cloudflare_temp_email'
-      ? cfTempEmailFields.value
-      : cloudmailProviderFields.value
+    if (selectedMailProvider.value === 'mo_email') {
+      return moEmailProviderFields.value
+    }
+    if (selectedMailProvider.value === 'cloudflare_temp_email') {
+      return cfTempEmailFields.value
+    }
+    return cloudmailProviderFields.value
   }
   if (selectedRuntimeCategory.value === 'security') {
     return securityFields.value
@@ -608,9 +651,11 @@ const currentRuntimeStatus = computed(() => {
   }
 
   if (selectedRuntimeCategory.value === 'cloudmail') {
-    const providerFields = selectedMailProvider.value === 'cloudflare_temp_email'
-      ? cfTempEmailFields.value
-      : cloudmailProviderFields.value
+    const providerFields = selectedMailProvider.value === 'mo_email'
+      ? moEmailProviderFields.value
+      : selectedMailProvider.value === 'cloudflare_temp_email'
+        ? cfTempEmailFields.value
+        : cloudmailProviderFields.value
     const configured = providerFields.length > 0 && providerFields.every(field => !isRuntimeRequired(field) || field.configured)
     return configured
       ? {
@@ -636,6 +681,12 @@ const currentRuntimeStatus = computed(() => {
         class: 'border-red-400/20 bg-red-500/10 text-red-200',
       }
 })
+
+function mailProviderLabel(provider) {
+  if (provider === 'mo_email') return 'Mo Email'
+  if (provider === 'cloudflare_temp_email') return 'Cloudflare Temp Email'
+  return 'CloudMail'
+}
 
 function setRuntimeMessage(text, type = 'success') {
   runtimeMessage.value = text
@@ -693,11 +744,26 @@ async function loadRuntimeConfig() {
     for (const field of runtimeFields.value) {
       runtimeForm[field.key] = normalizeRuntimeFieldValue(field)
     }
+    if (selectedMailProvider.value === 'mo_email') {
+      await loadMoEmailDomains()
+    }
   } catch (e) {
     console.error('加载运行时配置失败:', e)
     setRuntimeMessage('加载运行时配置失败: ' + e.message, 'error')
   } finally {
     runtimeLoading.value = false
+  }
+}
+
+async function loadMoEmailDomains() {
+  try {
+    const result = await api.getMoEmailDomains()
+    moEmailDomains.value = Array.isArray(result.domains) ? result.domains : []
+    if (!runtimeForm.MO_EMAIL_DOMAIN && moEmailDomains.value.length) {
+      runtimeForm.MO_EMAIL_DOMAIN = moEmailDomains.value[0]
+    }
+  } catch (e) {
+    moEmailDomains.value = []
   }
 }
 
@@ -762,6 +828,12 @@ async function saveSourceConfig() {
 watch(visualCategory, async (next) => {
   if (next === 'source' && !sourceLoaded.value) {
     await loadSourceConfig()
+  }
+})
+
+watch(selectedMailProvider, async (next) => {
+  if (next === 'mo_email' && moEmailDomains.value.length === 0) {
+    await loadMoEmailDomains()
   }
 })
 
