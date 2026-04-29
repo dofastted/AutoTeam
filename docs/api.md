@@ -41,6 +41,7 @@ Authorization: Bearer <API_KEY>
 | PUT | `/api/config/auto-check` | 修改巡检配置（运行时生效） |
 | POST | `/api/sync` | 同步 active 认证文件到已启用远端 |
 | POST | `/api/sync/cpa` | 只同步 active 认证文件到 CPA |
+| POST | `/api/sync/sub2api` | 只同步 active 认证文件到 Sub2API |
 | POST | `/api/sync/from-cpa` | 从 CPA 反向同步认证文件到本地（含去重） |
 | POST | `/api/sync/accounts` | 从 Team / auths 对账到本地账号池 |
 | POST | `/api/sync/main-codex/saved` | 只推送本地已有主号 Codex 凭证 |

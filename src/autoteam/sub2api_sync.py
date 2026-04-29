@@ -229,6 +229,26 @@ def _dedupe_managed_accounts(token: str, items: list[dict], *, kind: str) -> tup
     return deduped, duplicates_deleted
 
 
+def _existing_openai_accounts_by_email(items: list[dict], emails: set[str]) -> tuple[dict[str, dict], int]:
+    matched: dict[str, dict] = {}
+    unmanaged_matches = 0
+
+    for item in items:
+        email = _managed_email(item)
+        if not email or email not in emails:
+            continue
+
+        previous = matched.get(email)
+        if previous is None or int(item.get("id") or 0) > int(previous.get("id") or 0):
+            matched[email] = item
+
+    for item in matched.values():
+        if not _is_managed_account(item, kind=_KIND_POOL):
+            unmanaged_matches += 1
+
+    return matched, unmanaged_matches
+
+
 def _parse_jwt_payload(token: str) -> dict:
     parts = (token or "").split(".")
     if len(parts) < 2:
@@ -641,11 +661,17 @@ def sync_to_sub2api():
     group_ids, group_names = _resolve_group_binding(token)
     remote_accounts = _list_openai_oauth_accounts(token)
     existing_by_email, duplicates_deleted = _dedupe_managed_accounts(token, remote_accounts, kind=_KIND_POOL)
+    any_existing_by_email, unmanaged_matches = _existing_openai_accounts_by_email(
+        remote_accounts,
+        set(active_targets),
+    )
+    any_existing_by_email.update(existing_by_email)
 
     logger.info(
-        "[Sub2API] active 账号: %d, Sub2API 管理账号: %d",
+        "[Sub2API] active 账号: %d, Sub2API 管理账号: %d, 同邮箱已存在: %d",
         len(active_targets),
         len(existing_by_email),
+        len(any_existing_by_email),
     )
     if group_ids:
         logger.info(
@@ -665,7 +691,7 @@ def sync_to_sub2api():
             quota_info=target.get("quota_info"),
         )
         _attach_group_metadata(desired_extra, group_ids, group_names)
-        existing = existing_by_email.get(email)
+        existing = any_existing_by_email.get(email)
 
         if existing:
             merged_credentials = dict(existing.get("credentials") or {})
@@ -704,11 +730,12 @@ def sync_to_sub2api():
     final_accounts = _list_openai_oauth_accounts(token)
     final_managed = [item for item in final_accounts if _is_managed_account(item, kind=_KIND_POOL)]
     logger.info(
-        "[Sub2API] 同步完成: 创建 %d, 更新 %d, 删除 %d, 远端去重 %d",
+        "[Sub2API] 同步完成: 创建 %d, 更新 %d, 删除 %d, 远端去重 %d, 复用同邮箱账号 %d",
         created,
         updated,
         deleted,
         duplicates_deleted,
+        unmanaged_matches,
     )
     logger.info("[Sub2API] Sub2API 中本地管理: %d, 本地 active: %d", len(final_managed), len(active_targets))
     return {
@@ -716,6 +743,7 @@ def sync_to_sub2api():
         "updated": updated,
         "deleted": deleted,
         "remote_duplicates_deleted": duplicates_deleted,
+        "existing_email_matches": unmanaged_matches,
     }
 
 

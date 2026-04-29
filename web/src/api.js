@@ -81,6 +81,7 @@ export const api = {
 
   postSync: () => request('POST', '/sync'),
   postSyncCpa: () => request('POST', '/sync/cpa'),
+  postSyncSub2api: () => request('POST', '/sync/sub2api'),
   postSyncFromCpa: () => request('POST', '/sync/from-cpa'),
   postSyncAccounts: () => request('POST', '/sync/accounts'),
   postSyncMainCodex: () => request('POST', '/sync/main-codex'),

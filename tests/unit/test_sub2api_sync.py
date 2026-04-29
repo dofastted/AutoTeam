@@ -133,3 +133,66 @@ def test_remote_auth_file_candidates_include_legacy_and_prefixed_names():
         "codex-a.json",
         "sub2api-codex-a.json",
     }
+
+
+def test_sync_to_sub2api_updates_existing_same_email_oauth_account(tmp_path, monkeypatch):
+    auth_file = tmp_path / "codex-user@example.com-team.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "access_token": "new-access",
+                "id_token": _jwt({"email": "user@example.com"}),
+                "expired": 2_000_000_000,
+                "email": "user@example.com",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "user@example.com",
+                "status": "active",
+                "auth_file": str(auth_file),
+            }
+        ],
+    )
+    monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
+    monkeypatch.setattr(sub2api_sync, "_resolve_group_binding", lambda token: ([], []))
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_list_openai_oauth_accounts",
+        lambda token: [
+            {
+                "id": 42,
+                "name": "Existing User",
+                "credentials": {"email": "user@example.com", "access_token": "old-access"},
+                "extra": {},
+                "group_ids": [3],
+            }
+        ],
+    )
+    created = []
+    updated = []
+    deleted = []
+    monkeypatch.setattr(sub2api_sync, "_create_account", lambda *args, **kwargs: created.append(kwargs))
+    monkeypatch.setattr(sub2api_sync, "_delete_account", lambda *args, **kwargs: deleted.append(args[1]))
+
+    def fake_update(_token, account, **kwargs):
+        updated.append({"account": account, **kwargs})
+        return {"id": account["id"]}
+
+    monkeypatch.setattr(sub2api_sync, "_update_account", fake_update)
+
+    result = sub2api_sync.sync_to_sub2api()
+
+    assert result["created"] == 0
+    assert result["updated"] == 1
+    assert result["existing_email_matches"] == 1
+    assert created == []
+    assert deleted == []
+    assert updated[0]["account"]["id"] == 42
+    assert updated[0]["credentials"]["access_token"] == "new-access"
+    assert updated[0]["extra"]["autoteam_email"] == "user@example.com"
+    assert updated[0]["group_ids"] == [3]

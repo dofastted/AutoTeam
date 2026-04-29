@@ -276,6 +276,10 @@ def _require_cpa_configs(action_label: str):
     _require_runtime_configs(_CPA_REQUIRED_KEYS, action_label)
 
 
+def _require_sub2api_configs(action_label: str):
+    _require_runtime_configs(_SUB2API_REQUIRED_KEYS, action_label)
+
+
 def _require_sync_target_configs(action_label: str):
     from autoteam.sync_targets import get_enabled_sync_targets
 
@@ -2097,6 +2101,17 @@ def post_sync_cpa():
 
     result = sync_to_cpa()
     return {"message": "已同步到 CPA", "result": result}
+
+
+@app.post("/api/sync/sub2api")
+def post_sync_sub2api():
+    """只同步账号池认证文件到 Sub2API。"""
+    _require_sub2api_configs("同步 Sub2API")
+
+    from autoteam.sub2api_sync import sync_to_sub2api
+
+    result = sync_to_sub2api()
+    return {"message": "已同步到 Sub2API", "result": result}
 
 
 @app.post("/api/sync/from-cpa")

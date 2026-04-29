@@ -60,6 +60,16 @@
             {{ syncSubmitting ? '推送中...' : 'CPA 推送云端' }}
           </button>
           <button
+            @click="pushSub2api"
+            :disabled="syncDisabled || sub2apiSubmitting"
+            class="px-4 py-2 rounded-lg text-sm font-medium border transition"
+            :class="syncDisabled || sub2apiSubmitting
+              ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+              : 'bg-indigo-600/10 text-indigo-300 border-indigo-500/30 hover:bg-indigo-600/20'"
+          >
+            {{ sub2apiSubmitting ? '推送中...' : 'Sub2API 推送云端' }}
+          </button>
+          <button
             @click="pushOAuth"
             :disabled="syncDisabled || oauthSubmitting"
             class="px-4 py-2 rounded-lg text-sm font-medium border transition"
@@ -199,6 +209,7 @@ const loadingRuns = ref(false)
 const submitting = ref(false)
 const pauseSubmitting = ref(false)
 const syncSubmitting = ref(false)
+const sub2apiSubmitting = ref(false)
 const oauthSubmitting = ref(false)
 const message = ref('')
 const messageClass = ref('')
@@ -335,6 +346,20 @@ async function pushCpa() {
     setMessage(e.message, 'error')
   } finally {
     syncSubmitting.value = false
+  }
+}
+
+async function pushSub2api() {
+  if (syncDisabled.value || sub2apiSubmitting.value) return
+  sub2apiSubmitting.value = true
+  try {
+    const result = await api.postSyncSub2api()
+    setMessage(result.message || 'Sub2API 已推送到云端')
+    emit('refresh')
+  } catch (e) {
+    setMessage(e.message, 'error')
+  } finally {
+    sub2apiSubmitting.value = false
   }
 }
 

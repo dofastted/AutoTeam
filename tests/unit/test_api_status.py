@@ -517,6 +517,36 @@ def test_post_sync_cpa_uses_cpa_only(monkeypatch):
     assert result["result"] == {"uploaded": 1}
 
 
+def test_post_sync_sub2api_uses_sub2api_only(monkeypatch):
+    monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
+    monkeypatch.setenv("SUB2API_URL", "http://sub2api.example.com")
+    monkeypatch.setenv("SUB2API_EMAIL", "admin@example.com")
+    monkeypatch.setenv("SUB2API_PASSWORD", "secret")
+    monkeypatch.delenv("CPA_URL", raising=False)
+    monkeypatch.delenv("CPA_KEY", raising=False)
+    monkeypatch.setattr("autoteam.sub2api_sync.sync_to_sub2api", lambda: {"created": 0, "updated": 1})
+
+    result = api.post_sync_sub2api()
+
+    assert result["message"] == "已同步到 Sub2API"
+    assert result["result"] == {"created": 0, "updated": 1}
+
+
+def test_post_sync_sub2api_requires_sub2api_config(monkeypatch):
+    monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
+    for key in ("SUB2API_URL", "SUB2API_EMAIL", "SUB2API_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+
+    with pytest.raises(HTTPException) as exc:
+        api.post_sync_sub2api()
+
+    assert exc.value.status_code == 400
+    assert "同步 Sub2API" in exc.value.detail
+    assert "SUB2API_URL" in exc.value.detail
+    assert "SUB2API_EMAIL" in exc.value.detail
+    assert "SUB2API_PASSWORD" in exc.value.detail
+
+
 def test_post_sync_saved_main_codex_requires_saved_auth(monkeypatch):
     monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
     monkeypatch.setenv("SYNC_TARGET_CPA", "true")
