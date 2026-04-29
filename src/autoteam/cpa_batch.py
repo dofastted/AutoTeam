@@ -151,6 +151,11 @@ def _create_direct_account(mail_client, hooks: CpaBatchHooks | None = None, batc
     email = _normalized_email(email)
     password = f"Tmp_{uuid.uuid4().hex[:12]}!"
     provider_name = getattr(mail_client, "provider_name", "")
+    session_bundle: dict[str, object] = {}
+
+    def capture_session_bundle(bundle: dict) -> None:
+        session_bundle.clear()
+        session_bundle.update(bundle or {})
 
     add_account(
         email,
@@ -186,7 +191,13 @@ def _create_direct_account(mail_client, hooks: CpaBatchHooks | None = None, batc
                 status="running",
             )
         logger.info("[直接注册] 开始第 %d/3 次注册尝试: %s", attempt + 1, email)
-        success = _register_direct_once(mail_client, email, password, mail_account_id=account_id)
+        success = _register_direct_once(
+            mail_client,
+            email,
+            password,
+            mail_account_id=account_id,
+            session_bundle_callback=capture_session_bundle,
+        )
         if success:
             break
 
@@ -214,6 +225,31 @@ def _create_direct_account(mail_client, hooks: CpaBatchHooks | None = None, batc
         except Exception as exc:
             logger.warning("[直接注册] 删除失败临时邮箱异常: %s", exc)
         raise AccountFlowError(email, "连续 3 次直注注册失败")
+
+    if session_bundle:
+        plan_type = (session_bundle.get("plan_type") or "unknown").strip().lower()
+        auth_path = save_auth_file(session_bundle)
+        update_account(email, auth_file=auth_path, plan_type=plan_type)
+        if hooks:
+            hooks.account_event(
+                email,
+                batch_index=batch_index,
+                stage="session_auth",
+                message=f"已从 ChatGPT session 保存 CPA 凭证，plan={plan_type}",
+                status="running",
+                plan_type=plan_type,
+                auth_file=str(auth_path),
+                auth_name=Path(auth_path).name,
+            )
+    elif hooks:
+        hooks.account_event(
+            email,
+            batch_index=batch_index,
+            stage="session_auth",
+            message="注册会话未返回可保存的 CPA 凭证",
+            error_level="warn",
+            status="running",
+        )
 
     _record_account_runtime(
         email,
@@ -332,6 +368,7 @@ def _ensure_team_auth(
     *,
     hooks: CpaBatchHooks | None = None,
     batch_index: int | None = None,
+    allow_browser_oauth: bool = True,
 ) -> tuple[str, str, dict]:
     acc = _account_for_email(email)
     if not acc:
@@ -342,6 +379,8 @@ def _ensure_team_auth(
     auth_data = _load_auth_data(auth_path) if auth_path and Path(auth_path).exists() else {}
 
     if not auth_data:
+        if not allow_browser_oauth:
+            raise RuntimeError("未获取到 ChatGPT session CPA 凭证，已跳过浏览器 OAuth")
         account_mail = _ensure_mail_client_for_account(acc, mail_client_cache)
         if hooks:
             hooks.account_event(
@@ -397,7 +436,7 @@ def _verify_and_upload_cpa(
     batch_index: int | None = None,
 ) -> dict:
     auth_path, plan_type, auth_data = _ensure_team_auth(
-        email, mail_client_cache, hooks=hooks, batch_index=batch_index
+        email, mail_client_cache, hooks=hooks, batch_index=batch_index, allow_browser_oauth=False
     )
     token = auth_data.get("access_token")
     if not token:

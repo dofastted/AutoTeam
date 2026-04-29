@@ -148,6 +148,8 @@ def _bundle_from_auth_data(auth_data, fallback_name=""):
         "plan_type": plan_type,
         "expired": _parse_expired_timestamp(auth_data.get("expired")),
         "last_refresh_ts": _parse_optional_timestamp(auth_data.get("last_refresh")),
+        "session_token": auth_data.get("session_token", ""),
+        "credential_source": auth_data.get("credential_source", ""),
     }
 
 
@@ -190,6 +192,10 @@ def _write_auth_file(filepath, bundle):
         "expired": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(bundle.get("expired", 0))),
         "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(bundle.get("last_refresh_ts", time.time()))),
     }
+    if bundle.get("session_token"):
+        auth_data["session_token"] = bundle.get("session_token", "")
+    if bundle.get("credential_source"):
+        auth_data["credential_source"] = bundle.get("credential_source", "")
     write_text(filepath, json.dumps(auth_data, indent=2))
     ensure_auth_file_permissions(filepath)
     return filepath

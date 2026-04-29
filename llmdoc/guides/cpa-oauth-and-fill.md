@@ -41,13 +41,20 @@
 - `src/autoteam/flow_runs.py`: 读写 `flow_runs.json`，保存运行记录、账号阶段、错误等级和 CPA 上传状态。
 - `web/src/components/PoolPage.vue`: 账号池操作页提供直注 / 邀请选择、启动按钮、运行记录和账号明细。
 
-直注和邀请流程创建邮箱后，会立刻把真实邮箱写入账号池和 `flow_runs.json`。后续注册、OAuth、额度检查、CPA 上传各自写阶段事件，避免浏览器流程卡住时页面只看到 `attempt-*` 占位记录。
+直注和邀请流程创建邮箱后，会立刻把真实邮箱写入账号池和 `flow_runs.json`。后续注册、凭证保存、额度检查、CPA 上传各自写阶段事件，避免浏览器流程卡住时页面只看到 `attempt-*` 占位记录。
+
+直注流程注册成功后优先保存 ChatGPT Web session 凭证：
+
+- `src/autoteam/manager.py` (`_register_direct_once`): 注册完成后在关闭浏览器前回传 session bundle。
+- `src/autoteam/codex_auth.py` (`build_chatgpt_session_auth_bundle`): 读取 `/api/auth/session` 的 `accessToken`、session cookie、账号 ID 和 `plan_type`。
+- `src/autoteam/cpa_batch.py` (`_create_direct_account`): 将 session bundle 保存为 `auths/codex-{email}-{plan_type}-{hash}.json`。
+- `src/autoteam/cpa_batch.py` (`_verify_and_upload_cpa`): 批量流程不再回退到浏览器 Codex OAuth；没有 session 凭证时直接失败并记录原因。
 
 成功条件：
 
 - 账号已注册并进入 Team。
 - 本地状态为 `active`。
-- Codex OAuth 或认证文件解析出的 `plan_type` 是 `team`。
+- session 凭证或认证文件解析出的 `plan_type` 是 `team`。
 - `check_codex_quota` 返回 `ok`。
 - `upload_to_cpa` 返回成功。
 

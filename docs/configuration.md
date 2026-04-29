@@ -171,9 +171,13 @@ codex-{email}-{plan_type}-{hash}.json
   "account_id": "...",
   "email": "...",
   "expired": "2026-04-20T10:00:00Z",
-  "last_refresh": "2026-04-10T10:00:00Z"
+  "last_refresh": "2026-04-10T10:00:00Z",
+  "session_token": "...",
+  "credential_source": "chatgpt_session"
 }
 ```
+
+直注批量流程可能没有 OAuth `refresh_token`。这类文件会带 `credential_source=chatgpt_session`，`access_token` 来自 ChatGPT Web session，`session_token` 用于保留注册完成后的登录凭证。
 
 反向同步 (`pull-cpa`) 时，CPA 中下载回来的文件也会被重新整理成这个命名规范。
 

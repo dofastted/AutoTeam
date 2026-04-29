@@ -36,6 +36,7 @@ HTTP 入口：
 单账号 CPA 认证入口：
 
 - `src/autoteam/api.py` (`post_account_cpa_auth`): 面向 Web OAuth 页。仅允许 active 席位账号。若本地有 auth 文件则上传；若没有则自动执行 Codex OAuth，确认 `plan_type=team` 后上传。
+- `src/autoteam/cpa_batch.py` (`run_cpa_batch`): 批量直注账号在注册成功后优先使用 ChatGPT Web session 生成本地 auth 文件，再上传 CPA；该批量路径不依赖 Codex OAuth callback。
 
 ## Sub2API
 

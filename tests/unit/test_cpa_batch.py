@@ -150,3 +150,57 @@ def test_direct_account_records_email_before_register_failure(tmp_path, monkeypa
     assert run["accounts"][0]["email"] == "new@example.com"
     assert run["accounts"][0]["stage"] in {"register_retry", "register"}
     assert accounts.load_accounts()[0]["email"] == "new@example.com"
+
+
+def test_direct_account_saves_chatgpt_session_auth(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    flow_runs.create_flow_run("run-session", target=1, batch_size=20, join_mode="direct")
+    auth_path = tmp_path / "codex-new@example.com-team-acc.json"
+
+    def fake_register(_mail_client, email, _password, mail_account_id=None, session_bundle_callback=None):
+        assert mail_account_id == "mail-1"
+        session_bundle_callback(
+            {
+                "email": email,
+                "account_id": "acc-1",
+                "plan_type": "team",
+                "access_token": "access-token",
+                "id_token": "id-token",
+                "refresh_token": "",
+                "expired": 2000000000,
+                "credential_source": "chatgpt_session",
+            }
+        )
+        return True
+
+    monkeypatch.setattr("autoteam.manager._register_direct_once", fake_register)
+    monkeypatch.setattr("autoteam.manager._is_email_in_team", lambda _email: False)
+    monkeypatch.setattr(cpa_batch, "save_auth_file", lambda _bundle: str(auth_path))
+
+    hooks = cpa_batch.CpaBatchHooks("run-session")
+    email = cpa_batch._create_direct_account(_FakeMailClient(), hooks=hooks, batch_index=1)
+
+    assert email == "new@example.com"
+    acc = accounts.load_accounts()[0]
+    assert acc["auth_file"] == str(auth_path)
+    assert acc["plan_type"] == "team"
+    run = flow_runs.get_flow_run("run-session")
+    assert any(event["stage"] == "session_auth" for event in run["accounts"][0]["events"])
+
+
+def test_cpa_verify_skips_browser_oauth_when_session_auth_missing(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    accounts.add_account("new@example.com", "pw")
+    accounts.update_account("new@example.com", status=accounts.STATUS_ACTIVE)
+    monkeypatch.setattr(
+        cpa_batch,
+        "login_codex_via_browser",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("browser OAuth should not run")),
+    )
+
+    try:
+        cpa_batch._verify_and_upload_cpa("new@example.com", {})
+    except RuntimeError as exc:
+        assert "已跳过浏览器 OAuth" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")

@@ -45,6 +45,7 @@ from autoteam.codex_auth import (
     MainCodexSyncFlow,
     _click_primary_auth_button,
     _is_google_redirect,
+    build_chatgpt_session_auth_bundle,
     check_codex_quota,
     get_quota_exhausted_info,
     get_saved_main_auth_file,
@@ -1217,7 +1218,7 @@ def _complete_direct_about_you(page):
     return False
 
 
-def _register_direct_once(mail_client, email, password, mail_account_id=None):
+def _register_direct_once(mail_client, email, password, mail_account_id=None, session_bundle_callback=None):
     """执行一次直接注册，返回是否完成注册并进入 Team。"""
     from playwright.sync_api import sync_playwright
 
@@ -1485,6 +1486,17 @@ def _register_direct_once(mail_client, email, password, mail_account_id=None):
         success = "chatgpt.com" in current_url and "auth" not in current_url and not _is_google_redirect(page)
         if success:
             logger.info("[直接注册] 注册成功并已加入 workspace!")
+            if session_bundle_callback:
+                try:
+                    session_bundle_callback(
+                        build_chatgpt_session_auth_bundle(
+                            page,
+                            email=email,
+                            account_id=get_chatgpt_account_id(),
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("[直接注册] 注册成功，但提取 ChatGPT session 凭证失败: %s", exc)
         else:
             logger.warning("[直接注册] 注册可能未完成，URL: %s", current_url)
 

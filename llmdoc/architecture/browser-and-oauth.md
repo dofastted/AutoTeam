@@ -34,9 +34,11 @@ API 模式下，Playwright 相关操作通过 `src/autoteam/api.py` (`_Playwrigh
 
 ## Codex OAuth
 
-`src/autoteam/codex_auth.py`: 负责 PKCE、OAuth URL、token 交换、认证文件保存、额度查询和 refresh。
+`src/autoteam/codex_auth.py`: 负责 PKCE、OAuth URL、token 交换、ChatGPT session 凭证提取、认证文件保存、额度查询和 refresh。
 
 账号池自动 OAuth 入口是 `login_codex_via_browser`。它登录账号后打开 Codex OAuth URL，捕获 callback code，换 token 并保存 CPA 兼容 JSON。
+
+批量直注账号优先使用 `build_chatgpt_session_auth_bundle`。直注注册完成后，`src/autoteam/manager.py` (`_register_direct_once`) 会在关闭浏览器前读取 `https://chatgpt.com/api/auth/session` 的 `accessToken` 和 session cookie，保存为 CPA 兼容 JSON，避免再进入 Codex OAuth consent/callback 页面。
 
 主号 OAuth 入口是 `SessionCodexAuthFlow`、`MainCodexLoginFlow`、`MainCodexSyncFlow`。主号认证文件保存为 `auths/codex-main-*.json`，不进入账号池。
 

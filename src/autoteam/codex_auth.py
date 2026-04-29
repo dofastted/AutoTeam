@@ -131,11 +131,121 @@ def _write_auth_file(filepath, bundle):
         "expired": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(bundle.get("expired", 0))),
         "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if bundle.get("session_token"):
+        auth_data["session_token"] = bundle.get("session_token", "")
+    if bundle.get("credential_source"):
+        auth_data["credential_source"] = bundle.get("credential_source", "")
 
     write_text(filepath, json.dumps(auth_data, indent=2))
     ensure_auth_file_permissions(filepath)
     logger.info("[Codex] 认证文件已保存: %s", filepath)
     return str(filepath)
+
+
+def _extract_session_token_from_cookies(cookies):
+    session_parts = {}
+    session_token = ""
+    for cookie in cookies or []:
+        name = cookie.get("name", "")
+        if name == "__Secure-next-auth.session-token":
+            session_token = cookie.get("value", "")
+        elif name.startswith("__Secure-next-auth.session-token."):
+            suffix = name.rsplit(".", 1)[-1]
+            session_parts[suffix] = cookie.get("value", "")
+
+    if not session_token and session_parts:
+        session_token = "".join(session_parts[key] for key in sorted(session_parts))
+    return session_token
+
+
+def build_chatgpt_session_auth_bundle(page, *, email="", account_id=""):
+    """
+    从已登录的 ChatGPT 页面提取 Web session 凭证，生成 CPA 兼容 bundle。
+
+    这条路径参考 `docs/cpa/register.js` 的注册后 session-first 做法：
+    注册完成后直接读取 `/api/auth/session` 的 accessToken，而不是再打开 Codex OAuth
+    consent/callback 页面。
+    """
+    logger.info("[Codex] 从 ChatGPT session 提取 CPA 凭证: %s", email)
+    try:
+        page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:
+        pass
+
+    result = page.evaluate(
+        """async () => {
+            const out = { ok: false, data: null, error: "" };
+            try {
+                const resp = await fetch("/api/auth/session", { credentials: "include" });
+                out.status = resp.status;
+                out.data = await resp.json();
+                out.ok = resp.ok;
+            } catch (e) {
+                out.error = String(e && e.message ? e.message : e);
+            }
+            return out;
+        }"""
+    )
+    if not result.get("ok"):
+        raise RuntimeError(f"ChatGPT session 读取失败: {result.get('status') or result.get('error')}")
+
+    session_data = result.get("data") or {}
+    access_token = session_data.get("accessToken") or session_data.get("access_token") or ""
+    if not access_token:
+        raise RuntimeError("ChatGPT session 未返回 accessToken")
+
+    claims = _parse_jwt_payload(access_token)
+    auth_claims = claims.get("https://api.openai.com/auth", {}) if isinstance(claims, dict) else {}
+    user_data = session_data.get("user") if isinstance(session_data.get("user"), dict) else {}
+
+    resolved_email = (
+        email
+        or claims.get("email", "")
+        or user_data.get("email", "")
+        or session_data.get("email", "")
+    )
+    resolved_account_id = (
+        account_id
+        or auth_claims.get("chatgpt_account_id", "")
+        or claims.get("chatgpt_account_id", "")
+        or session_data.get("accountId", "")
+        or session_data.get("account_id", "")
+    )
+    plan_type = (
+        auth_claims.get("chatgpt_plan_type", "")
+        or claims.get("chatgpt_plan_type", "")
+        or session_data.get("plan_type", "")
+        or "unknown"
+    )
+    expired = claims.get("exp") or 0
+    if not expired:
+        expires = session_data.get("expires") or session_data.get("expires_at") or ""
+        if isinstance(expires, (int, float)):
+            expired = float(expires)
+        else:
+            try:
+                from datetime import datetime
+
+                expired = datetime.fromisoformat(str(expires).replace("Z", "+00:00")).timestamp()
+            except Exception:
+                expired = time.time() + 3600
+
+    session_token = _extract_session_token_from_cookies(page.context.cookies())
+    bundle = {
+        "access_token": access_token,
+        # CPA/本地 plan 判断只需要 JWT payload；Web session 没有独立 id_token。
+        "id_token": access_token,
+        "refresh_token": "",
+        "account_id": resolved_account_id,
+        "email": resolved_email,
+        "plan_type": str(plan_type or "unknown").strip().lower(),
+        "expired": float(expired or time.time() + 3600),
+        "session_token": session_token,
+        "credential_source": "chatgpt_session",
+    }
+    logger.info("[Codex] 已从 ChatGPT session 获取凭证: %s (plan: %s)", bundle["email"], bundle["plan_type"])
+    return bundle
 
 
 def _click_primary_auth_button(page, field, labels):
