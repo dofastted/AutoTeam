@@ -43,7 +43,7 @@ HTTP 入口：
 
 `src/autoteam/sub2api_sync.py`: 负责登录 Sub2API、读取 OpenAI OAuth 账号、上传账号池认证文件、同步主号认证文件、处理 `SUB2API_GROUP`。
 
-`SUB2API_GROUP` 可填分组名或分组 ID，多个值用逗号分隔。同步时会保留用户手工绑定的其他分组，只替换 AutoTeam 管理的分组绑定。
+`SUB2API_GROUP` 可填分组名或分组 ID，多个值用逗号分隔。同步时会保留用户手工绑定的其他分组，只替换 AutoTeam 管理的分组绑定。分组不存在时，账号推送和按邮箱去重仍会继续，返回结果的 `warnings` 会说明已跳过分组绑定。
 
 账号池推送到 Sub2API 时，以邮箱为去重键。若远端已有同邮箱 OpenAI OAuth 账号，会更新已有账号而不是新建；AutoTeam 自己标记的重复账号会删除多余项。
 

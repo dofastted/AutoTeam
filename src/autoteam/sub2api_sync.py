@@ -341,6 +341,22 @@ def _resolve_group_binding(token: str, group_spec: str | None = None) -> tuple[l
     return resolved_ids, resolved_names
 
 
+def _resolve_group_binding_for_sync(token: str, group_spec: str | None = None) -> tuple[list[int], list[str], list[str]]:
+    try:
+        if group_spec is None:
+            group_ids, group_names = _resolve_group_binding(token)
+        else:
+            group_ids, group_names = _resolve_group_binding(token, group_spec)
+        return group_ids, group_names, []
+    except RuntimeError as exc:
+        message = str(exc)
+        if message.startswith("[Sub2API] "):
+            message = message[len("[Sub2API] ") :]
+        warning = f"{message}，已跳过分组绑定"
+        logger.warning("[Sub2API] %s", warning)
+        return [], [], [warning]
+
+
 def _extract_organization_id(auth_claims: dict) -> str:
     organizations = auth_claims.get("organizations")
     if not isinstance(organizations, list):
@@ -658,7 +674,7 @@ def sync_to_sub2api():
         }
 
     token = _login()
-    group_ids, group_names = _resolve_group_binding(token)
+    group_ids, group_names, warnings = _resolve_group_binding_for_sync(token)
     remote_accounts = _list_openai_oauth_accounts(token)
     existing_by_email, duplicates_deleted = _dedupe_managed_accounts(token, remote_accounts, kind=_KIND_POOL)
     any_existing_by_email, unmanaged_matches = _existing_openai_accounts_by_email(
@@ -744,6 +760,7 @@ def sync_to_sub2api():
         "deleted": deleted,
         "remote_duplicates_deleted": duplicates_deleted,
         "existing_email_matches": unmanaged_matches,
+        "warnings": warnings,
     }
 
 
@@ -755,7 +772,7 @@ def sync_main_codex_to_sub2api(filepath):
     auth_data = _load_auth_data(auth_path)
     email = (auth_data.get("email") or "").strip().lower()
     token = _login()
-    group_ids, group_names = _resolve_group_binding(token)
+    group_ids, group_names, warnings = _resolve_group_binding_for_sync(token)
     remote_accounts = _list_openai_oauth_accounts(token)
     existing_by_email, duplicates_deleted = _dedupe_managed_accounts(token, remote_accounts, kind=_KIND_MAIN)
 
@@ -808,7 +825,7 @@ def sync_main_codex_to_sub2api(filepath):
         duplicates_deleted,
         len(deleted),
     )
-    return {"uploaded": remote_auth_name, "account_id": account_id, "deleted_old": deleted}
+    return {"uploaded": remote_auth_name, "account_id": account_id, "deleted_old": deleted, "warnings": warnings}
 
 
 def delete_main_codex_from_sub2api():

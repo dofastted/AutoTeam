@@ -116,6 +116,16 @@ def test_resolve_group_binding_supports_name_and_id(monkeypatch):
     assert group_names == ["Team Pool", "Group-9"]
 
 
+def test_resolve_group_binding_for_sync_warns_and_skips_missing_group(monkeypatch):
+    monkeypatch.setattr(sub2api_sync, "_list_openai_groups", lambda token: [])
+
+    group_ids, group_names, warnings = sub2api_sync._resolve_group_binding_for_sync("token", "team")
+
+    assert group_ids == []
+    assert group_names == []
+    assert warnings == ["未找到分组: team，已跳过分组绑定"]
+
+
 def test_merge_group_ids_preserves_manual_groups_and_replaces_previous_managed_group():
     account = {
         "group_ids": [11, 21],
@@ -190,6 +200,7 @@ def test_sync_to_sub2api_updates_existing_same_email_oauth_account(tmp_path, mon
     assert result["created"] == 0
     assert result["updated"] == 1
     assert result["existing_email_matches"] == 1
+    assert result["warnings"] == []
     assert created == []
     assert deleted == []
     assert updated[0]["account"]["id"] == 42
