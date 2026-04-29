@@ -29,7 +29,9 @@ from autoteam.flow_runs import (
     append_flow_event,
     create_flow_run,
     delete_flow_account,
+    get_flow_run,
     is_flow_pause_requested,
+    resume_flow_run,
     update_flow_run,
 )
 from autoteam.invite import register_with_invite
@@ -43,6 +45,8 @@ DEFAULT_TARGET = 100
 DEFAULT_BATCH_SIZE = 20
 MAX_ATTEMPT_MULTIPLIER = 2
 MAX_ACCOUNT_FAILURES = 3
+MIN_COMPLETED_SUCCESS_RATE = 95.0
+SUCCESS_RATE_SAFETY_MARGIN = 1.0
 JOIN_MODE_DIRECT = "direct"
 JOIN_MODE_INVITE = "invite"
 VALID_JOIN_MODES = {JOIN_MODE_DIRECT, JOIN_MODE_INVITE}
@@ -207,6 +211,21 @@ class _CpaUploadWorker:
 
 def _normalized_email(value: str | None) -> str:
     return (value or "").strip().lower()
+
+
+def _completed_success_rate(success_count: int, failed_count: int) -> float:
+    completed = int(success_count) + int(failed_count)
+    if completed <= 0:
+        return 100.0
+    return int(success_count) * 100 / completed
+
+
+def _should_pause_for_success_rate(success_count: int, failed_count: int) -> bool:
+    if failed_count <= 0:
+        return False
+    return _completed_success_rate(success_count, failed_count) < (
+        MIN_COMPLETED_SUCCESS_RATE + SUCCESS_RATE_SAFETY_MARGIN
+    )
 
 
 def _parse_jwt_payload(token: str) -> dict:
@@ -680,21 +699,30 @@ def run_cpa_batch(
     join_mode: str = JOIN_MODE_DIRECT,
     target: int = DEFAULT_TARGET,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    resume: bool = False,
 ) -> dict:
-    join_mode = (join_mode or JOIN_MODE_DIRECT).strip().lower()
+    existing_run = get_flow_run(run_id) if resume else None
+    if resume and not existing_run:
+        raise ValueError(f"任务记录不存在: {run_id}")
+
+    join_mode = (existing_run.get("join_mode") if existing_run else join_mode or JOIN_MODE_DIRECT).strip().lower()
     if join_mode not in VALID_JOIN_MODES:
         raise ValueError(f"未知入席方式: {join_mode}")
 
-    target = max(1, int(target))
-    batch_size = max(1, int(batch_size))
+    target = max(1, int(existing_run.get("target") if existing_run else target))
+    batch_size = max(1, int(existing_run.get("batch_size") if existing_run else batch_size))
     max_attempts = max(target, target * MAX_ATTEMPT_MULTIPLIER)
-    create_flow_run(run_id, target=target, batch_size=batch_size, join_mode=join_mode)
+    if resume:
+        resume_flow_run(run_id)
+    else:
+        create_flow_run(run_id, target=target, batch_size=batch_size, join_mode=join_mode)
     hooks = CpaBatchHooks(run_id)
 
     chatgpt = None
     mail_client = None
-    success_count = 0
-    attempts = 0
+    success_count = int(existing_run.get("success_count") or 0) if existing_run else 0
+    account_failures = int(existing_run.get("failed_count") or 0) if existing_run else 0
+    attempts = int(existing_run.get("attempted_count") or 0) if existing_run else 0
     pending_cpa = 0
     cpa_worker = _CpaUploadWorker(hooks)
 
@@ -815,6 +843,29 @@ def run_cpa_batch(
                     finished_at=time.time(),
                 )
                 logger.warning("[CPA批量] 第 %d 个账号注册失败: %s", attempts, exc)
+                account_failures += 1
+                if _should_pause_for_success_rate(success_count, account_failures):
+                    reason = (
+                        f"成功率保护暂停: 成功 {success_count}, 失败 {account_failures}, "
+                        f"已完成成功率 {_completed_success_rate(success_count, account_failures):.2f}%"
+                    )
+                    hooks.run_update(fatal_error=reason, pause_requested=True)
+                    cpa_worker.finish()
+                    cpa_worker.join()
+                    drain_cpa_results()
+                    hooks.pause()
+                    logger.warning("[CPA批量] %s", reason)
+                    return {
+                        "run_id": run_id,
+                        "status": "paused",
+                        "target": target,
+                        "batch_size": batch_size,
+                        "join_mode": join_mode,
+                        "attempted": attempts,
+                        "succeeded": success_count,
+                        "failed": account_failures,
+                        "halt_reason": reason,
+                    }
                 continue
             except Exception as exc:
                 hooks.account_event(

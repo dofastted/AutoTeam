@@ -100,6 +100,7 @@ export const api = {
   getCpaBatchRuns: () => request('GET', '/cpa-batch/runs'),
   getCpaBatchRun: (runId) => request('GET', `/cpa-batch/runs/${encodeURIComponent(runId)}`),
   pauseCpaBatchRun: (runId) => request('POST', `/cpa-batch/runs/${encodeURIComponent(runId)}/pause`),
+  resumeCpaBatchRun: (runId) => request('POST', `/cpa-batch/runs/${encodeURIComponent(runId)}/resume`),
 
   getTasks: () => request('GET', '/tasks'),
   getTask: (id) => request('GET', `/tasks/${id}`),

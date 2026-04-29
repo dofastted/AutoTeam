@@ -120,6 +120,31 @@ def test_pause_cpa_batch_run_sets_pause_flag(tmp_path, monkeypatch):
     assert run["pause_requested"] is True
 
 
+def test_resume_cpa_batch_run_starts_resume_task(tmp_path, monkeypatch):
+    monkeypatch.setattr(flow_runs, "FLOW_RUNS_FILE", tmp_path / "flow_runs.json")
+    flow_runs.create_flow_run("run-resume", target=100, batch_size=20, join_mode="direct")
+    flow_runs.update_flow_run("run-resume", status="paused", success_count=20, attempted_count=23)
+    captured = {}
+
+    def fake_start_task(command, func, params, *args, **kwargs):
+        captured["command"] = command
+        captured["params"] = params
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"task_id": "task-resume", "command": command, "params": params}
+
+    monkeypatch.setattr(api, "_start_task", fake_start_task)
+
+    result = api.resume_cpa_batch_run("run-resume")
+
+    assert result["task_id"] == "task-resume"
+    assert captured["command"] == "cpa-batch"
+    assert captured["params"]["run_id"] == "run-resume"
+    assert captured["params"]["resume"] is True
+    assert captured["args"] == ("run-resume",)
+    assert captured["kwargs"] == {"resume": True}
+
+
 def test_create_direct_account_retries_current_account_after_browser_error(tmp_path, monkeypatch):
     monkeypatch.setattr(accounts, "ACCOUNTS_FILE", tmp_path / "accounts.json")
     monkeypatch.setattr(cpa_batch, "time", type("FakeTime", (), {"time": staticmethod(lambda: 1000), "sleep": staticmethod(lambda _s: None)})())

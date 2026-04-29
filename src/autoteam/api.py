@@ -2371,6 +2371,36 @@ def pause_cpa_batch_run(run_id: str):
     return {"message": "已请求暂停，当前账号阶段结束后停止继续新账号", "run": run}
 
 
+@app.post("/api/cpa-batch/runs/{run_id}/resume", status_code=202)
+def resume_cpa_batch_run(run_id: str):
+    """从已有批量 CPA JSON 记录继续执行。"""
+    from autoteam.cpa_batch import run_cpa_batch
+    from autoteam.flow_runs import get_flow_run
+
+    run = get_flow_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="任务记录不存在")
+    if run.get("status") == "running":
+        raise HTTPException(status_code=409, detail="任务已经在运行")
+    if int(run.get("success_count") or 0) >= int(run.get("target") or 0):
+        raise HTTPException(status_code=400, detail="任务已达到目标数量")
+
+    task = _start_task(
+        "cpa-batch",
+        run_cpa_batch,
+        {
+            "run_id": run_id,
+            "join_mode": run.get("join_mode") or "direct",
+            "target": run.get("target") or 100,
+            "batch_size": run.get("batch_size") or 20,
+            "resume": True,
+        },
+        run_id,
+        resume=True,
+    )
+    return task
+
+
 # ---------------------------------------------------------------------------
 # 后台任务端点
 # ---------------------------------------------------------------------------

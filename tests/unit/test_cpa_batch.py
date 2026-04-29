@@ -113,6 +113,79 @@ def test_run_cpa_batch_retries_cpa_failure_for_same_account_before_skipping(tmp_
     assert account["events"][-1]["stage"] == "completed"
 
 
+def test_run_cpa_batch_pauses_when_completed_success_rate_is_at_risk(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    created = []
+
+    monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
+    monkeypatch.setattr(cpa_batch, "update_account", lambda *args, **kwargs: None)
+
+    def fake_create_direct(_mail_client, **_kwargs):
+        index = len(created) + 1
+        if index == 22:
+            raise cpa_batch.AccountFlowError("bad@example.com", "连续 3 次直注注册失败")
+        email = f"user{index}@example.com"
+        created.append(email)
+        return email
+
+    monkeypatch.setattr(cpa_batch, "_create_direct_account", fake_create_direct)
+    monkeypatch.setattr(
+        cpa_batch,
+        "_verify_and_upload_cpa",
+        lambda email, _cache, **_kwargs: {
+            "email": email,
+            "plan_type": "team",
+            "auth_file": f"/tmp/codex-{email}-team.json",
+            "auth_name": f"codex-{email}-team.json",
+        },
+    )
+
+    result = cpa_batch.run_cpa_batch("run-rate-guard", target=100, batch_size=20, join_mode="direct")
+    run = flow_runs.get_flow_run("run-rate-guard")
+
+    assert result["status"] == "paused"
+    assert result["succeeded"] == 21
+    assert result["failed"] == 1
+    assert run["status"] == "paused"
+    assert run["fatal_error"].startswith("成功率保护暂停")
+
+
+def test_run_cpa_batch_resume_continues_existing_run(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    flow_runs.create_flow_run("run-resume", target=2, batch_size=1, join_mode="direct")
+    flow_runs.update_flow_run(
+        "run-resume",
+        status="paused",
+        success_count=1,
+        failed_count=0,
+        attempted_count=1,
+        finished_at=1000,
+        pause_requested=True,
+    )
+
+    monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
+    monkeypatch.setattr(cpa_batch, "update_account", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cpa_batch, "_create_direct_account", lambda _mail, **_kwargs: "resume@example.com")
+    monkeypatch.setattr(
+        cpa_batch,
+        "_verify_and_upload_cpa",
+        lambda email, _cache, **_kwargs: {
+            "email": email,
+            "plan_type": "team",
+            "auth_file": f"/tmp/codex-{email}-team.json",
+            "auth_name": f"codex-{email}-team.json",
+        },
+    )
+
+    result = cpa_batch.run_cpa_batch("run-resume", resume=True)
+    run = flow_runs.get_flow_run("run-resume")
+
+    assert result["status"] == "completed"
+    assert result["attempted"] == 2
+    assert result["succeeded"] == 2
+    assert run["success_count"] == 2
+
+
 def test_flow_runs_keep_recent_records_and_account_events(tmp_path, monkeypatch):
     _use_tmp_flow_file(tmp_path, monkeypatch)
 

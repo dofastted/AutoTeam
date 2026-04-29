@@ -37,6 +37,7 @@ Authorization: Bearer <API_KEY>
 | GET | `/api/cpa-batch/runs` | 批量 CPA JSON 运行记录 |
 | GET | `/api/cpa-batch/runs/{run_id}` | 单次批量 CPA JSON 详情 |
 | POST | `/api/cpa-batch/runs/{run_id}/pause` | 请求批量 CPA JSON 任务暂停 |
+| POST | `/api/cpa-batch/runs/{run_id}/resume` | 从已有批量 CPA JSON 记录继续执行 |
 | GET | `/api/config/auto-check` | 巡检配置 |
 | PUT | `/api/config/auto-check` | 修改巡检配置（运行时生效） |
 | POST | `/api/sync` | 同步 active 认证文件到已启用远端 |

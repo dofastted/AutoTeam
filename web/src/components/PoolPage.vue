@@ -50,6 +50,16 @@
             {{ pauseSubmitting ? '提交中...' : '暂停' }}
           </button>
           <button
+            @click="resumeActiveRun"
+            :disabled="!canResume || resumeSubmitting"
+            class="px-4 py-2 rounded-lg text-sm font-medium border transition"
+            :class="!canResume || resumeSubmitting
+              ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+              : 'bg-emerald-600/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-600/20'"
+          >
+            {{ resumeSubmitting ? '提交中...' : '恢复' }}
+          </button>
+          <button
             @click="pushCpa"
             :disabled="syncDisabled || syncSubmitting"
             class="px-4 py-2 rounded-lg text-sm font-medium border transition"
@@ -208,6 +218,7 @@ const selectedRunId = ref('')
 const loadingRuns = ref(false)
 const submitting = ref(false)
 const pauseSubmitting = ref(false)
+const resumeSubmitting = ref(false)
 const syncSubmitting = ref(false)
 const sub2apiSubmitting = ref(false)
 const oauthSubmitting = ref(false)
@@ -224,6 +235,12 @@ const activeRun = computed(() => {
   return runs.value.find(run => run.run_id === preferred) || runs.value[0] || null
 })
 const canPause = computed(() => activeRun.value?.status === 'running')
+const canResume = computed(() => {
+  const run = activeRun.value
+  if (!run || props.runningTask) return false
+  if (!['paused', 'partial', 'failed'].includes(run.status)) return false
+  return (run.success_count || 0) < (run.target || 100)
+})
 const visibleAccounts = computed(() => {
   return (activeRun.value?.accounts || [])
     .filter(acc => acc.status !== 'replaced')
@@ -332,6 +349,21 @@ async function pauseActiveRun() {
     setMessage(e.message, 'error')
   } finally {
     pauseSubmitting.value = false
+  }
+}
+
+async function resumeActiveRun() {
+  if (!canResume.value || resumeSubmitting.value) return
+  resumeSubmitting.value = true
+  try {
+    const result = await api.resumeCpaBatchRun(activeRun.value.run_id)
+    setMessage(`恢复任务已提交: ${result.task_id}`)
+    emit('task-started')
+    await loadRuns()
+  } catch (e) {
+    setMessage(e.message, 'error')
+  } finally {
+    resumeSubmitting.value = false
   }
 }
 
