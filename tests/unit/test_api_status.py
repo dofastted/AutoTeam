@@ -457,6 +457,7 @@ def test_pool_task_endpoints_require_enabled_sync_target_after_cloudmail(monkeyp
     ("endpoint", "action_label"),
     [
         ("post_sync", "同步远端"),
+        ("post_sync_cpa", "同步 CPA"),
         ("post_sync_from_cpa", "拉取 CPA"),
         ("get_cpa_files", "查看 CPA 文件"),
     ],
@@ -494,6 +495,53 @@ def test_post_sync_supports_sub2api_only(monkeypatch):
 
     assert result["message"] == "已同步到 Sub2API"
     assert result["result"] == {"sub2api": {"created": 1}}
+
+
+def test_post_sync_cpa_uses_cpa_only(monkeypatch):
+    monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
+    monkeypatch.setenv("CPA_URL", "http://cpa.example.com")
+    monkeypatch.setenv("CPA_KEY", "secret")
+    monkeypatch.setenv("SYNC_TARGET_SUB2API", "true")
+    monkeypatch.setenv("SUB2API_URL", "http://sub2api.example.com")
+    monkeypatch.setenv("SUB2API_EMAIL", "admin@example.com")
+    monkeypatch.setenv("SUB2API_PASSWORD", "secret")
+    monkeypatch.setattr("autoteam.cpa_sync.sync_to_cpa", lambda: {"uploaded": 1})
+
+    result = api.post_sync_cpa()
+
+    assert result["message"] == "已同步到 CPA"
+    assert result["result"] == {"uploaded": 1}
+
+
+def test_post_sync_saved_main_codex_requires_saved_auth(monkeypatch):
+    monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
+    monkeypatch.setenv("SYNC_TARGET_CPA", "true")
+    monkeypatch.setenv("CPA_URL", "http://cpa.example.com")
+    monkeypatch.setenv("CPA_KEY", "secret")
+    monkeypatch.setattr("autoteam.codex_auth.get_saved_main_auth_file", lambda: "")
+
+    with pytest.raises(HTTPException) as exc:
+        api.post_sync_saved_main_codex()
+
+    assert exc.value.status_code == 400
+    assert "未找到主号 Codex 凭证" in exc.value.detail
+
+
+def test_post_sync_saved_main_codex_pushes_existing_auth(monkeypatch):
+    monkeypatch.setattr("autoteam.setup_wizard._read_env", lambda: {})
+    monkeypatch.setenv("SYNC_TARGET_CPA", "true")
+    monkeypatch.setenv("CPA_URL", "http://cpa.example.com")
+    monkeypatch.setenv("CPA_KEY", "secret")
+    monkeypatch.setattr("autoteam.codex_auth.get_saved_main_auth_file", lambda: "/tmp/codex-main.json")
+    monkeypatch.setattr(
+        "autoteam.sync_targets.sync_main_codex_to_configured_targets",
+        lambda auth_file: {"auth_file": auth_file, "cpa": {"uploaded": 1}},
+    )
+
+    result = api.post_sync_saved_main_codex()
+
+    assert result["message"] == "主号 Codex 凭证已同步到已启用远端"
+    assert result["result"]["auth_file"] == "/tmp/codex-main.json"
 
 
 def test_pool_task_endpoint_accepts_sub2api_only_config(monkeypatch):
@@ -572,7 +620,7 @@ def test_auto_check_skips_rotate_when_pool_configs_are_missing(tmp_path, monkeyp
     updates = []
     started = []
 
-    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 1})
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 1, "target_seats": 5})
     monkeypatch.setattr(api, "_auto_check_stop", threading.Event())
     monkeypatch.setattr(api, "_auto_check_restart", threading.Event())
     monkeypatch.setattr(api, "_maybe_reload_runtime_config_from_env_file", lambda *args, **kwargs: False)
@@ -633,7 +681,7 @@ def test_auto_check_persists_reuse_blocking_metadata_before_rotate(tmp_path, mon
         updates.append((email, kwargs))
 
     _set_pool_runtime_config(monkeypatch)
-    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2})
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2, "target_seats": 5})
     monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
     monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
     monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
@@ -713,7 +761,7 @@ def test_auto_check_falls_back_when_ok_quota_has_no_reset_time(tmp_path, monkeyp
         updates.append((email, kwargs))
 
     _set_pool_runtime_config(monkeypatch)
-    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 1})
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 1, "target_seats": 5})
     monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
     monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
     monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
@@ -758,7 +806,7 @@ def test_auto_check_falls_back_when_exhausted_quota_has_no_reset_time(tmp_path, 
         updates.append((email, kwargs))
 
     _set_pool_runtime_config(monkeypatch)
-    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 1})
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 1, "target_seats": 5})
     monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
     monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
     monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
@@ -825,7 +873,7 @@ def test_auto_check_triggers_rotate_when_active_count_is_below_target(tmp_path, 
         )
 
     _set_pool_runtime_config(monkeypatch)
-    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2})
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2, "target_seats": 5})
     monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
     monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
     monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
@@ -876,7 +924,7 @@ def test_auto_check_skips_shortage_rotate_when_team_is_already_full(tmp_path, mo
     def fake_start_task(command, func, params, *args, **kwargs):
         started.append((command, params, args, kwargs))
 
-    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2})
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2, "target_seats": 5})
     monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
     monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
     monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
@@ -918,7 +966,7 @@ def test_auto_check_logs_threshold_message_when_team_is_full_but_low_accounts_ar
         auth_file.write_text(json.dumps({"access_token": f"token-{idx}"}), encoding="utf-8")
         auth_files.append(auth_file)
 
-    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2})
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2, "target_seats": 5})
     monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
     monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
     monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
@@ -974,7 +1022,7 @@ def test_auto_check_triggers_cleanup_when_team_count_exceeds_target(tmp_path, mo
             }
         )
 
-    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2})
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2, "target_seats": 5})
     monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
     monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
     monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
@@ -1077,3 +1125,101 @@ def test_auto_check_wait_returns_restart_soon_after_config_update(monkeypatch):
 
     assert result == "restart"
     assert elapsed < 0.5
+
+
+def test_post_stop_all_tasks_marks_running_task_stopped(monkeypatch):
+    class FakeThread:
+        def __init__(self):
+            self.joined = False
+
+        def is_alive(self):
+            return True
+
+        def join(self, timeout=None):
+            self.joined = True
+
+    thread = FakeThread()
+    lock = threading.Lock()
+    lock.acquire()
+    task = {
+        "task_id": "task-1",
+        "command": "fill",
+        "status": "running",
+        "created_at": time.time(),
+        "started_at": time.time(),
+        "finished_at": None,
+        "result": None,
+        "error": None,
+    }
+
+    monkeypatch.setattr(api, "_tasks", {"task-1": task})
+    monkeypatch.setattr(api, "_task_threads", {"task-1": thread})
+    monkeypatch.setattr(api, "_current_task_id", "task-1")
+    monkeypatch.setattr(api, "_playwright_lock", lock)
+    monkeypatch.setattr(api, "_admin_login_api", None)
+    monkeypatch.setattr(api, "_main_codex_flow", None)
+    monkeypatch.setattr(api, "_manual_account_flow", None)
+    monkeypatch.setattr(api, "_auto_check_restart", threading.Event())
+    monkeypatch.setattr(api, "_raise_thread_exit", lambda _thread: "requested")
+
+    result = api.post_stop_all_tasks()
+
+    assert result["stopped_tasks"] == [
+        {
+            "task_id": "task-1",
+            "command": "fill",
+            "thread_stop": "requested",
+            "thread_alive": True,
+        }
+    ]
+    assert task["status"] == "stopped"
+    assert task["stop_requested"] is True
+    assert task["error"] == "用户强制停止"
+    assert thread.joined is True
+    assert lock.locked() is True
+
+
+def test_post_stop_all_tasks_stops_pending_flows_and_releases_lock(monkeypatch):
+    class FakeFlow:
+        def __init__(self, name):
+            self.name = name
+            self.stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+    admin = FakeFlow("admin")
+    main = FakeFlow("main")
+    manual = FakeFlow("manual")
+    lock = threading.Lock()
+    lock.acquire()
+
+    monkeypatch.setattr(api, "_tasks", {})
+    monkeypatch.setattr(api, "_task_threads", {})
+    monkeypatch.setattr(api, "_current_task_id", None)
+    monkeypatch.setattr(api, "_playwright_lock", lock)
+    monkeypatch.setattr(api, "_admin_login_api", admin)
+    monkeypatch.setattr(api, "_admin_login_step", "code_required")
+    monkeypatch.setattr(api, "_main_codex_flow", main)
+    monkeypatch.setattr(api, "_main_codex_step", "password_required")
+    monkeypatch.setattr(api, "_main_codex_action", "login")
+    monkeypatch.setattr(api, "_manual_account_flow", manual)
+    monkeypatch.setattr(api, "_auto_check_restart", threading.Event())
+
+    result = api.post_stop_all_tasks()
+
+    assert [item["name"] for item in result["stopped_flows"]] == [
+        "admin-login",
+        "main-codex",
+        "manual-account",
+    ]
+    assert admin.stopped is True
+    assert main.stopped is True
+    assert manual.stopped is True
+    assert api._admin_login_api is None
+    assert api._admin_login_step is None
+    assert api._main_codex_flow is None
+    assert api._main_codex_step is None
+    assert api._main_codex_action is None
+    assert api._manual_account_flow is None
+    assert lock.locked() is False

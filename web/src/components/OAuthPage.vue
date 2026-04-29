@@ -1,6 +1,100 @@
 <template>
   <div class="mt-6 space-y-6">
     <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+      <div class="flex flex-col gap-3 mb-4 md:flex-row md:items-center md:justify-between">
+        <div>
+          <h2 class="text-lg font-semibold text-white">CPA 凭证检查</h2>
+          <p class="text-sm text-gray-400 mt-1">
+            对比 active 席位账号和 CPA 认证文件。缺少凭证时，可直接为该账号完成 Codex 认证并上传到 CPA。
+          </p>
+        </div>
+        <button
+          @click="refreshCpaStatus"
+          :disabled="cpaLoading"
+          class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-xs rounded-lg border border-gray-700 transition disabled:opacity-50 text-gray-300"
+        >
+          {{ cpaLoading ? '刷新中...' : '刷新' }}
+        </button>
+      </div>
+
+      <div v-if="cpaError" class="mb-4 px-4 py-3 rounded-lg text-sm border bg-amber-500/10 text-amber-300 border-amber-500/20">
+        {{ cpaError }}
+      </div>
+
+      <div class="grid grid-cols-3 gap-3 mb-4">
+        <div class="rounded-lg border border-gray-800 bg-gray-950/40 px-3 py-3">
+          <div class="text-xs text-gray-500">active 席位</div>
+          <div class="mt-1 text-xl font-semibold text-white">{{ cpaSummary.active }}</div>
+        </div>
+        <div class="rounded-lg border border-gray-800 bg-gray-950/40 px-3 py-3">
+          <div class="text-xs text-gray-500">CPA 已有</div>
+          <div class="mt-1 text-xl font-semibold text-emerald-300">{{ cpaSummary.ready }}</div>
+        </div>
+        <div class="rounded-lg border border-gray-800 bg-gray-950/40 px-3 py-3">
+          <div class="text-xs text-gray-500">待处理</div>
+          <div class="mt-1 text-xl font-semibold text-amber-300">{{ cpaSummary.missing }}</div>
+        </div>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-gray-400 text-left border-b border-gray-800">
+              <th class="px-4 py-3 font-medium">邮箱</th>
+              <th class="px-4 py-3 font-medium">本地凭证</th>
+              <th class="px-4 py-3 font-medium">CPA 凭证</th>
+              <th class="px-4 py-3 font-medium text-right">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!cpaLoading && cpaRows.length === 0">
+              <td colspan="4" class="px-4 py-6 text-center text-gray-500">暂无 active 席位账号</td>
+            </tr>
+            <tr
+              v-for="row in cpaRows"
+              :key="row.email"
+              class="border-b border-gray-800/50 hover:bg-gray-800/30 transition"
+            >
+              <td class="px-4 py-3 font-mono text-xs text-gray-200">{{ row.email }}</td>
+              <td class="px-4 py-3">
+                <span
+                  class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium border"
+                  :class="row.hasLocalAuth
+                    ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
+                    : 'bg-amber-500/10 text-amber-300 border-amber-500/20'"
+                >
+                  {{ row.hasLocalAuth ? '已有' : '缺少' }}
+                </span>
+              </td>
+              <td class="px-4 py-3">
+                <span
+                  class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium border"
+                  :class="row.hasCpaAuth
+                    ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
+                    : 'bg-amber-500/10 text-amber-300 border-amber-500/20'"
+                >
+                  {{ row.hasCpaAuth ? '已有' : '缺少' }}
+                </span>
+              </td>
+              <td class="px-4 py-3 text-right">
+                <button
+                  @click="startCpaAuth(row.email)"
+                  :disabled="cpaActionDisabled(row)"
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
+                  :class="cpaActionDisabled(row)
+                    ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+                    : 'bg-cyan-600/10 text-cyan-300 border-cyan-500/30 hover:bg-cyan-600/20'"
+                >
+                  {{ cpaActionEmail === row.email ? '提交中...' : row.hasCpaAuth ? '重新上传' : '认证并上传' }}
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
       <div class="flex items-center justify-between gap-4 mb-4">
         <div>
           <h2 class="text-lg font-semibold text-white">OAuth 登录</h2>
@@ -126,10 +220,15 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
+import { onMounted } from 'vue'
 import { api } from '../api.js'
 
 const props = defineProps({
   manualAccountStatus: {
+    type: Object,
+    default: null,
+  },
+  runningTask: {
     type: Object,
     default: null,
   },
@@ -142,8 +241,46 @@ const manualSubmitting = ref(false)
 const manualSubmittingHint = ref('')
 const message = ref('')
 const messageClass = ref('')
+const cpaAccounts = ref([])
+const cpaFiles = ref([])
+const cpaLoading = ref(false)
+const cpaError = ref('')
+const cpaActionEmail = ref('')
 
 const manualAccountBusy = computed(() => !!props.manualAccountStatus?.in_progress)
+const cpaEmailSet = computed(() => {
+  return new Set(
+    cpaFiles.value
+      .map((file) => String(file.email || '').trim().toLowerCase())
+      .filter(Boolean),
+  )
+})
+const cpaRows = computed(() => {
+  return cpaAccounts.value
+    .filter((acc) => acc.status === 'active' && !acc.is_main_account)
+    .map((acc) => {
+      const email = String(acc.email || '').trim().toLowerCase()
+      return {
+        email,
+        hasLocalAuth: !!acc.auth_file,
+        hasCpaAuth: cpaEmailSet.value.has(email),
+      }
+    })
+    .sort((a, b) => {
+      if (a.hasCpaAuth !== b.hasCpaAuth) return a.hasCpaAuth ? 1 : -1
+      if (a.hasLocalAuth !== b.hasLocalAuth) return a.hasLocalAuth ? 1 : -1
+      return a.email.localeCompare(b.email)
+    })
+})
+const cpaSummary = computed(() => {
+  const active = cpaRows.value.length
+  const ready = cpaRows.value.filter((row) => row.hasCpaAuth).length
+  return {
+    active,
+    ready,
+    missing: active - ready,
+  }
+})
 
 watch(
   () => props.manualAccountStatus,
@@ -155,6 +292,19 @@ watch(
   },
   { immediate: true },
 )
+
+watch(
+  () => props.runningTask,
+  (next, prev) => {
+    if (prev && !next) {
+      refreshCpaStatus()
+    }
+  },
+)
+
+onMounted(() => {
+  refreshCpaStatus()
+})
 
 function setMessage(text, type = 'success') {
   message.value = text
@@ -208,6 +358,42 @@ async function cancelManualAccount() {
     setMessage(e.message, 'error')
   } finally {
     manualSubmitting.value = false
+  }
+}
+
+async function refreshCpaStatus() {
+  cpaLoading.value = true
+  cpaError.value = ''
+  try {
+    cpaAccounts.value = await api.getAccounts()
+    try {
+      cpaFiles.value = await api.getCpaFiles()
+    } catch (e) {
+      cpaFiles.value = []
+      cpaError.value = e.message
+    }
+  } catch (e) {
+    cpaError.value = e.message
+  } finally {
+    cpaLoading.value = false
+  }
+}
+
+function cpaActionDisabled(row) {
+  return !!props.runningTask || cpaActionEmail.value === row.email || cpaLoading.value
+}
+
+async function startCpaAuth(email) {
+  if (cpaActionDisabled({ email })) return
+  cpaActionEmail.value = email
+  try {
+    const result = await api.startAccountCpaAuth(email)
+    setMessage(`已提交 ${email} 的 CPA 认证任务: ${result.task_id}`)
+    emit('progress')
+  } catch (e) {
+    setMessage(e.message, 'error')
+  } finally {
+    cpaActionEmail.value = ''
   }
 }
 </script>

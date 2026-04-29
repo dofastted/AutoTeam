@@ -255,7 +255,8 @@ def login_codex_via_browser(email, password, mail_client=None):
     """
     code_verifier, code_challenge = _generate_pkce()
     state = secrets.token_urlsafe(16)
-    _used_email_ids: set[int] = set()  # 记录已尝试过的邮件，避免重复提交同一封验证码邮件
+    _used_email_ids: set[object] = set()  # 记录已尝试过的邮件，避免重复提交同一封验证码邮件
+    _email_ids_before_login: set[object] = set()
 
     chatgpt_account_id = get_chatgpt_account_id()
 
@@ -297,15 +298,24 @@ def login_codex_via_browser(email, password, mail_client=None):
             )
             logger.debug("[Codex] 登录前已注入 _account cookie = %s", chatgpt_account_id)
 
-        # 在登录开始前记录当前最新邮件 ID，后续只接受比这个更新的
+        # 在登录开始前记录现有邮件 ID，后续只接受新邮件。Mo Email 的 ID 可能是字符串。
         _email_id_before_login = 0
         if mail_client:
             try:
-                _pre = mail_client.search_emails_by_recipient(email, size=1)
+                _pre = mail_client.search_emails_by_recipient(email, size=10)
                 if _pre:
+                    _email_ids_before_login = {item.get("emailId", 0) for item in _pre}
                     _email_id_before_login = _pre[0].get("emailId", 0)
             except Exception:
                 pass
+
+        def _is_new_mail_id(email_id):
+            if email_id in _used_email_ids or email_id in _email_ids_before_login:
+                return False
+            try:
+                return int(email_id) > int(_email_id_before_login)
+            except Exception:
+                return True
 
         logger.info("[Codex] 先登录 ChatGPT 选择 Team workspace...")
         _page = context.new_page()
@@ -363,14 +373,14 @@ def login_codex_via_browser(email, password, mail_client=None):
         try:
             ci = _page.locator('input[name="code"]').first
             if ci.is_visible(timeout=5000) and mail_client:
-                logger.info("[Codex] ChatGPT 登录需要验证码，等待 emailId > %d 的新邮件...", _email_id_before_login)
+                logger.info("[Codex] ChatGPT 登录需要验证码，等待 emailId > %s 的新邮件...", _email_id_before_login)
                 otp = None
                 otp_email_id = 0
                 t0 = time.time()
                 while time.time() - t0 < 120:
                     for em in mail_client.search_emails_by_recipient(email, size=5):
                         email_id = em.get("emailId", 0)
-                        if email_id <= _email_id_before_login or email_id in _used_email_ids:
+                        if not _is_new_mail_id(email_id):
                             continue
                         otp = mail_client.extract_verification_code(em)
                         if otp:
@@ -512,7 +522,7 @@ def login_codex_via_browser(email, password, mail_client=None):
             code_input = None
 
         if code_input and mail_client:
-            logger.info("[Codex] 需要登录验证码，等待 emailId > %d 的新邮件...", _email_id_before_login)
+            logger.info("[Codex] 需要登录验证码，等待 emailId > %s 的新邮件...", _email_id_before_login)
 
             start_t = time.time()
             otp_code = None
@@ -521,7 +531,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                 emails = mail_client.search_emails_by_recipient(email, size=5)
                 for em in emails:
                     email_id = em.get("emailId", 0)
-                    if email_id <= _email_id_before_login or email_id in _used_email_ids:
+                    if not _is_new_mail_id(email_id):
                         continue
                     subj = em.get("subject", "").lower()
                     if "invited" in subj or "invitation" in subj:
@@ -739,7 +749,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                 otp_input = page.locator(_OTP_INPUT_SELECTORS).first
                 if otp_input.is_visible(timeout=2000) and mail_client:
                     logger.info(
-                        "[Codex] 需要邮箱验证码 (step %d)，等待 emailId > %d 的新邮件...",
+                        "[Codex] 需要邮箱验证码 (step %d)，等待 emailId > %s 的新邮件...",
                         step + 1,
                         _email_id_before_login,
                     )
@@ -755,7 +765,7 @@ def login_codex_via_browser(email, password, mail_client=None):
                         for em in mail_client.search_emails_by_recipient(email, size=5):
                             # 只接受比快照更新的邮件
                             email_id = em.get("emailId", 0)
-                            if email_id <= _email_id_before_login or email_id in _used_email_ids:
+                            if not _is_new_mail_id(email_id):
                                 continue
                             sender = (em.get("sendEmail") or "").lower()
                             if "openai" not in sender and "chatgpt" not in sender:

@@ -34,11 +34,17 @@ Authorization: Bearer <API_KEY>
 | POST | `/api/team/members/remove` | 移出成员 / 取消邀请 |
 | GET | `/api/logs` | 最近日志（支持 `?limit=100&since=0`） |
 | GET | `/api/cpa/files` | CPA 认证文件列表 |
+| GET | `/api/cpa-batch/runs` | 批量 CPA JSON 运行记录 |
+| GET | `/api/cpa-batch/runs/{run_id}` | 单次批量 CPA JSON 详情 |
+| POST | `/api/cpa-batch/runs/{run_id}/pause` | 请求批量 CPA JSON 任务暂停 |
 | GET | `/api/config/auto-check` | 巡检配置 |
 | PUT | `/api/config/auto-check` | 修改巡检配置（运行时生效） |
 | POST | `/api/sync` | 同步 active 认证文件到已启用远端 |
+| POST | `/api/sync/cpa` | 只同步 active 认证文件到 CPA |
 | POST | `/api/sync/from-cpa` | 从 CPA 反向同步认证文件到本地（含去重） |
 | POST | `/api/sync/accounts` | 从 Team / auths 对账到本地账号池 |
+| POST | `/api/sync/main-codex/saved` | 只推送本地已有主号 Codex 凭证 |
+| POST | `/api/accounts/{email}/cpa-auth` | 为单个 active 席位账号完成 Codex 认证并上传到 CPA |
 | POST | `/api/accounts/{email}/kick` | 将 active 账号移出 Team |
 | DELETE | `/api/accounts/{email}` | 删除本地管理账号及其资源 |
 
@@ -68,7 +74,8 @@ Authorization: Bearer <API_KEY>
 | POST | `/api/tasks/rotate` | 智能轮转 `{"target": 5}` |
 | POST | `/api/tasks/check` | 检查额度 |
 | POST | `/api/tasks/add` | 自动注册并添加新账号 |
-| POST | `/api/tasks/fill` | 补满成员 `{"target": 5}` |
+| POST | `/api/tasks/fill` | 补满成员；未传 `target` 时按 `FILL_BATCH_SIZE` 执行一批 |
+| POST | `/api/tasks/cpa-batch` | 新做 team 账号 CPA JSON；默认 100 个，支持 `{"join_mode": "direct", "target": 1, "batch_size": 1}` |
 | POST | `/api/tasks/cleanup` | 清理成员 `{"max_seats": null}` |
 | GET | `/api/tasks` | 任务列表 |
 | GET | `/api/tasks/{task_id}` | 任务详情 |

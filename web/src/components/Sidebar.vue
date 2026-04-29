@@ -54,11 +54,6 @@
         <span class="text-base">🔄</span>
         {{ loading ? '刷新中...' : '刷新数据' }}
       </button>
-      <button v-if="authRequired" @click="$emit('logout')"
-        class="btn-danger w-full justify-start gap-3 rounded-2xl px-3 py-3 text-left">
-        <span class="text-base">🚪</span>
-        登出
-      </button>
     </div>
   </nav>
 
@@ -82,9 +77,8 @@
 defineProps({
   active: String,
   loading: Boolean,
-  authRequired: Boolean,
 })
-defineEmits(['navigate', 'refresh', 'logout'])
+defineEmits(['navigate', 'refresh'])
 
 const items = [
   { key: 'dashboard', icon: '📊', label: '仪表盘', mobileLabel: '仪表盘', hint: '概览账号池与状态' },

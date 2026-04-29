@@ -69,6 +69,9 @@ API_KEY = os.environ.get("API_KEY", "")
 AUTO_CHECK_INTERVAL = _get_int_env("AUTO_CHECK_INTERVAL", 300)  # 巡检间隔（秒），默认 5 分钟
 AUTO_CHECK_THRESHOLD = _get_int_env("AUTO_CHECK_THRESHOLD", 10)  # 额度低于此百分比触发轮转，默认 10%
 AUTO_CHECK_MIN_LOW = _get_int_env("AUTO_CHECK_MIN_LOW", 2)  # 至少几个账号低于阈值才触发，默认 2
+MAX_TEAM_SEATS = 999
+TEAM_TARGET_SEATS = min(MAX_TEAM_SEATS, max(1, _get_int_env("TEAM_TARGET_SEATS", MAX_TEAM_SEATS)))  # Team 总人数目标
+FILL_BATCH_SIZE = min(MAX_TEAM_SEATS, max(1, _get_int_env("FILL_BATCH_SIZE", 10)))  # 补满成员单次最多新增账号数
 
 # Playwright 代理配置
 PLAYWRIGHT_PROXY_URL = os.environ.get("PLAYWRIGHT_PROXY_URL", "").strip()

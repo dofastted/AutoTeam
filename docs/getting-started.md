@@ -187,6 +187,7 @@ uv run autoteam api
 API 模式下：
 - Web 面板集中管理日常操作
 - 后台自动巡检（默认每 5 分钟）
+- 可在「账号池操作」页新做 100 个 team 账号 CPA JSON，并查看账号明细和错误等级
 - 可在「同步中心」中做对账与双向同步
 - 可在「OAuth 登录」页手动导入账号
 
@@ -196,6 +197,7 @@ API 模式下：
 uv run autoteam status      # 查看状态
 uv run autoteam check       # 检查额度
 uv run autoteam rotate 5    # 智能轮转
+uv run autoteam fill        # 按 FILL_BATCH_SIZE 执行一批补位
 uv run autoteam sync        # 同步到 CPA
 uv run autoteam pull-cpa    # 从 CPA 拉回本地
 ```
@@ -206,6 +208,8 @@ uv run autoteam pull-cpa    # 从 CPA 拉回本地
 
 ```bash
 uv run autoteam rotate 8   # 补满到 8 个总席位
+# 或
+uv run autoteam fill       # 按 FILL_BATCH_SIZE 执行一批补位
 # 或
 uv run autoteam add        # 自动注册并添加一个
 # 或

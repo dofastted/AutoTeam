@@ -93,8 +93,19 @@
     </div>
 
     <!-- 侧边栏 -->
-    <Sidebar :active="currentPage" :loading="loading" :auth-required="authRequired"
-      @navigate="currentPage = $event" @refresh="refresh" @logout="doLogout" />
+    <Sidebar :active="currentPage" :loading="loading"
+      @navigate="currentPage = $event" @refresh="refresh" />
+
+    <div v-if="authRequired" class="fixed right-4 top-4 z-50 md:right-6">
+      <button
+        class="btn-danger min-h-11 gap-2 rounded-xl px-4 shadow-[0_18px_40px_-18px_rgba(244,63,94,0.9)]"
+        title="登出当前面板"
+        @click="doLogout"
+      >
+        <span aria-hidden="true" class="text-base">🚪</span>
+        <span>登出</span>
+      </button>
+    </div>
 
     <!-- 主内容区 -->
     <div class="relative min-w-0 flex-1 overflow-y-auto pb-20 md:pb-8">
@@ -137,13 +148,37 @@
           @task-started="onTaskStarted" @refresh="refresh" />
 
         <OAuthPage v-else-if="currentPage === 'oauth'"
-          :manual-account-status="manualAccountStatus" @refresh="refresh" @progress="onAdminProgress" />
+          :manual-account-status="manualAccountStatus"
+          :running-task="busyTask"
+          @refresh="refresh"
+          @progress="onAdminProgress" />
 
         <TaskHistoryPage v-else-if="currentPage === 'tasks'"
           :tasks="tasks" />
 
         <LogViewer v-else-if="currentPage === 'logs'" />
       </div>
+    </div>
+
+    <div class="fixed bottom-4 left-4 z-50 flex max-w-[calc(100vw-2rem)] flex-col items-start gap-2">
+      <div
+        v-if="stopAllNotice || stopAllError"
+        class="max-w-xs rounded-xl border px-3 py-2 text-xs shadow-lg backdrop-blur"
+        :class="stopAllError
+          ? 'border-rose-500/30 bg-rose-950/80 text-rose-100'
+          : 'border-emerald-500/30 bg-emerald-950/80 text-emerald-100'"
+      >
+        {{ stopAllError || stopAllNotice }}
+      </div>
+      <button
+        class="btn-danger min-h-11 gap-2 rounded-xl px-4 shadow-[0_18px_40px_-18px_rgba(244,63,94,0.9)]"
+        :disabled="stopAllLoading"
+        title="强制停止当前全部工作"
+        @click="forceStopAll"
+      >
+        <span aria-hidden="true" class="h-2.5 w-2.5 rounded-sm bg-current"></span>
+        <span>{{ stopAllLoading ? '停止中...' : '停止全部工作' }}</span>
+      </button>
     </div>
   </div>
 </template>
@@ -177,6 +212,9 @@ const manualAccountStatus = ref(null)
 const tasks = ref([])
 const loading = ref(false)
 const runningTask = ref(null)
+const stopAllLoading = ref(false)
+const stopAllNotice = ref('')
+const stopAllError = ref('')
 const busyTask = computed(() => {
   if (adminStatus.value?.login_in_progress) {
     return { command: 'admin-login' }
@@ -270,6 +308,27 @@ function onTaskStarted() {
 function onAdminProgress() {
   startPolling(10000)
   refresh()
+}
+
+async function forceStopAll() {
+  if (stopAllLoading.value) return
+  stopAllLoading.value = true
+  stopAllNotice.value = ''
+  stopAllError.value = ''
+  try {
+    const result = await api.stopAllTasks()
+    const taskCount = result.stopped_tasks?.length || 0
+    const flowCount = result.stopped_flows?.length || 0
+    stopAllNotice.value = taskCount || flowCount
+      ? `已请求停止 ${taskCount} 个任务、${flowCount} 个流程`
+      : '当前没有需要停止的工作'
+    await refresh()
+    startPolling(10000)
+  } catch (e) {
+    stopAllError.value = e.message || '停止失败'
+  } finally {
+    stopAllLoading.value = false
+  }
 }
 
 function startPolling(interval = 600000) {

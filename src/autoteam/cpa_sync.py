@@ -579,6 +579,13 @@ def sync_to_cpa():
     final_cpa = list_cpa_files()
     final_local_managed = [f for f in final_cpa if f.get("email", "").lower() in local_emails]
     logger.info("[CPA] CPA 中本地管理: %d, 本地 active: %d", len(final_local_managed), len(active_files))
+    return {
+        "uploaded": uploaded,
+        "deleted": deleted,
+        "local_duplicates_deleted": local_duplicates_deleted,
+        "local_active": len(active_files),
+        "cpa_local_managed": len(final_local_managed),
+    }
 
 
 def sync_main_codex_to_cpa(filepath):

@@ -1599,7 +1599,7 @@ def reinvite_account(chatgpt_api, mail_client, acc):
     return True
 
 
-def cmd_rotate(target_seats=5):
+def cmd_rotate(target_seats=None):
     """
     智能轮转 - 保持 Team 始终有 target_seats 个可用成员，尽量少创建新账号。
 
@@ -1610,7 +1610,14 @@ def cmd_rotate(target_seats=5):
     4. 优先从 standby 中选额度已恢复的旧账号填补
     5. 仅当所有旧账号都不可用时，才创建新账号
     """
-    TARGET = target_seats
+    if target_seats is None:
+        from autoteam.config import TEAM_TARGET_SEATS
+
+        target_seats = TEAM_TARGET_SEATS
+
+    from autoteam.config import MAX_TEAM_SEATS
+
+    TARGET = min(MAX_TEAM_SEATS, max(1, int(target_seats)))
 
     from autoteam.config import AUTO_CHECK_THRESHOLD
 
@@ -2106,8 +2113,12 @@ def get_team_member_count(chatgpt_api):
     return len(members)
 
 
-def cmd_fill(target=5):
+def cmd_fill(target=None):
     """检测 Team 成员数，不足 target 则自动添加新账号补满"""
+    from autoteam.config import FILL_BATCH_SIZE, MAX_TEAM_SEATS, TEAM_TARGET_SEATS
+
+    configured_target = min(MAX_TEAM_SEATS, max(1, int(TEAM_TARGET_SEATS)))
+    configured_batch = max(1, int(FILL_BATCH_SIZE))
     chatgpt = ChatGPTTeamAPI()
     chatgpt.start()
     mail_client = CloudMailClient()
@@ -2129,23 +2140,45 @@ def cmd_fill(target=5):
             logger.error("[填充] 获取成员列表失败")
             return
 
-        logger.info("[填充] 当前 Team 成员数: %d，目标: %d", current, target)
+        if target is None:
+            target = min(configured_target, current + configured_batch)
+            logger.info(
+                "[填充] 当前 Team 成员数: %d，总目标: %d，本次最多新增: %d，本次目标: %d",
+                current,
+                configured_target,
+                configured_batch,
+                target,
+            )
+        else:
+            target = min(configured_target, max(1, int(target)))
+            logger.info("[填充] 当前 Team 成员数: %d，目标: %d", current, target)
 
         need = target - current
         if need <= 0:
             logger.info("[填充] 成员数已满足（%d >= %d），无需添加", current, target)
             return
 
-        logger.info("[填充] 需要添加 %d 个账号", need)
+        logger.info("[填充] 需要添加 %d 个账号，按每批最多 %d 个执行", need, configured_batch)
         standby_list = [
             a
             for a in get_standby_accounts()
             if a.get("_quota_recovered") and not _is_main_account_email(a.get("email"))
         ]
         standby_index = 0
+        attempted = 0
+        succeeded = 0
+        failed = 0
+        batch_index = 1
+        batch_attempted = 0
+        batch_succeeded = 0
+        batch_failed = 0
+        batch_reports = []
 
         for i in range(need):
             logger.info("[填充] 添加第 %d/%d 个账号...", i + 1, need)
+            before_count = current
+            attempted += 1
+            batch_attempted += 1
 
             # 优先复用 standby 中额度已恢复的旧账号
             added = False
@@ -2180,16 +2213,72 @@ def cmd_fill(target=5):
             if not chatgpt.browser:
                 chatgpt.start()
             new_count = get_team_member_count(chatgpt)
+            counted_success = bool(added)
             if new_count >= 0:
                 logger.info("[填充] 当前成员数: %d/%d", new_count, target)
+                counted_success = counted_success or new_count > before_count
                 current = new_count
-                if new_count >= target:
-                    logger.info("[填充] 当前成员数已达到目标，停止继续添加")
-                    break
+            if counted_success:
+                succeeded += 1
+                batch_succeeded += 1
+            else:
+                failed += 1
+                batch_failed += 1
 
-        logger.info("[填充] 填充完成")
-        sync_to_cpa()
+            reached_target = current >= target
+            reached_batch_end = batch_attempted >= configured_batch
+            reached_plan_end = i == need - 1
+
+            if reached_batch_end or reached_target or reached_plan_end:
+                success_rate = (batch_succeeded / batch_attempted * 100) if batch_attempted else 0.0
+                logger.info(
+                    "[填充] 第 %d 批完成: 尝试 %d, 成功 %d, 失败 %d, 成功率 %.1f%%",
+                    batch_index,
+                    batch_attempted,
+                    batch_succeeded,
+                    batch_failed,
+                    success_rate,
+                )
+                logger.info("[填充] 第 %d 批开始上传 CPA 认证文件...", batch_index)
+                cpa_result = sync_to_cpa()
+                logger.info("[填充] 第 %d 批 CPA 上传完成: %s", batch_index, cpa_result or {})
+                batch_reports.append(
+                    {
+                        "batch": batch_index,
+                        "attempted": batch_attempted,
+                        "succeeded": batch_succeeded,
+                        "failed": batch_failed,
+                        "success_rate": round(success_rate, 2),
+                        "cpa": cpa_result or {},
+                    }
+                )
+                batch_index += 1
+                batch_attempted = 0
+                batch_succeeded = 0
+                batch_failed = 0
+
+            if reached_target:
+                logger.info("[填充] 当前成员数已达到目标，停止继续添加")
+                break
+
+        total_rate = (succeeded / attempted * 100) if attempted else 0.0
+        logger.info(
+            "[填充] 填充完成: 尝试 %d, 成功 %d, 失败 %d, 成功率 %.1f%%",
+            attempted,
+            succeeded,
+            failed,
+            total_rate,
+        )
         cmd_status()
+        return {
+            "target": target,
+            "current": current,
+            "attempted": attempted,
+            "succeeded": succeeded,
+            "failed": failed,
+            "success_rate": round(total_rate, 2),
+            "batches": batch_reports,
+        }
 
     finally:
         if chatgpt.browser:
@@ -2243,8 +2332,14 @@ def cmd_cleanup(max_seats=None):
 
         # 确定要移除的数量
         if max_seats is None:
-            max_seats = 5
+            from autoteam.config import MAX_TEAM_SEATS, TEAM_TARGET_SEATS
+
+            max_seats = min(MAX_TEAM_SEATS, max(1, int(TEAM_TARGET_SEATS)))
             logger.info("[清理] 未指定上限，使用默认总人数: %d", max_seats)
+        else:
+            from autoteam.config import MAX_TEAM_SEATS
+
+            max_seats = min(MAX_TEAM_SEATS, max(1, int(max_seats)))
         to_remove_count = total - max_seats
         if to_remove_count <= 0:
             logger.info("[清理] 成员数 %d 未超过上限 %d，无需清理", total, max_seats)
@@ -2333,7 +2428,7 @@ def main():
     sub.add_parser("status", help="查看所有账号状态")
     sub.add_parser("check", help="检查活跃账号 Codex 额度")
     rotate_p = sub.add_parser("rotate", help="智能轮转（检查额度 → 移出 → 复用旧号 → 万不得已才创建新号）")
-    rotate_p.add_argument("target", type=int, nargs="?", default=5, help="目标成员数（默认 5）")
+    rotate_p.add_argument("target", type=int, nargs="?", default=None, help="目标成员数（默认读取 TEAM_TARGET_SEATS）")
     sub.add_parser("add", help="手动添加一个新账号")
     sub.add_parser("manual-add", help="手动 OAuth 添加账号（打开链接登录后粘贴回调 URL）")
     admin_login_p = sub.add_parser("admin-login", help="交互式完成管理员主号登录")
@@ -2343,7 +2438,13 @@ def main():
     sub.add_parser("main-codex-sync", help="交互式同步主号 Codex 到已启用远端")
 
     fill_p = sub.add_parser("fill", help="补满 Team 成员到指定数量")
-    fill_p.add_argument("target", type=int, nargs="?", default=5, help="目标成员数（默认 5）")
+    fill_p.add_argument(
+        "target",
+        type=int,
+        nargs="?",
+        default=None,
+        help="目标成员数（默认按 FILL_BATCH_SIZE 分批补到 TEAM_TARGET_SEATS）",
+    )
 
     cleanup_p = sub.add_parser("cleanup", help="清理多余成员（只移除本地管理的）")
     cleanup_p.add_argument("max_seats", type=int, nargs="?", default=None, help="最大席位数")

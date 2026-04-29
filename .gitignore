@@ -7,6 +7,7 @@ screenshots/
 auth_state/
 auths/
 accounts.json
+flow_runs.json
 state.json
 session
 bearer_token

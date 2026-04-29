@@ -60,6 +60,7 @@ export const api = {
   getCodexAuth: (email) => request('GET', `/accounts/${encodeURIComponent(email)}/codex-auth`),
   kickAccount: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/kick`),
   getCpaFiles: () => request('GET', '/cpa/files'),
+  startAccountCpaAuth: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/cpa-auth`),
 
   startAdminLogin: (email) => request('POST', '/admin/login/start', { email }),
   submitAdminSession: (email, sessionToken) => request('POST', '/admin/login/session', { email, session_token: sessionToken }),
@@ -79,18 +80,29 @@ export const api = {
   cancelManualAccount: () => request('POST', '/manual-account/cancel'),
 
   postSync: () => request('POST', '/sync'),
+  postSyncCpa: () => request('POST', '/sync/cpa'),
   postSyncFromCpa: () => request('POST', '/sync/from-cpa'),
   postSyncAccounts: () => request('POST', '/sync/accounts'),
   postSyncMainCodex: () => request('POST', '/sync/main-codex'),
+  postSyncSavedMainCodex: () => request('POST', '/sync/main-codex/saved'),
 
-  startRotate: (target = 5) => request('POST', '/tasks/rotate', { target }),
+  startRotate: (target = null) => request('POST', '/tasks/rotate', target == null ? {} : { target }),
   startCheck: () => request('POST', '/tasks/check'),
   startAdd: () => request('POST', '/tasks/add'),
-  startFill: (target = 5) => request('POST', '/tasks/fill', { target }),
+  startFill: (target = null) => request('POST', '/tasks/fill', target == null ? {} : { target }),
   startCleanup: (maxSeats = null) => request('POST', '/tasks/cleanup', { max_seats: maxSeats }),
+  startCpaBatch: (joinMode = 'direct', target = null, batchSize = null) => request('POST', '/tasks/cpa-batch', {
+    join_mode: joinMode,
+    ...(target == null ? {} : { target }),
+    ...(batchSize == null ? {} : { batch_size: batchSize }),
+  }),
+  getCpaBatchRuns: () => request('GET', '/cpa-batch/runs'),
+  getCpaBatchRun: (runId) => request('GET', `/cpa-batch/runs/${encodeURIComponent(runId)}`),
+  pauseCpaBatchRun: (runId) => request('POST', `/cpa-batch/runs/${encodeURIComponent(runId)}/pause`),
 
   getTasks: () => request('GET', '/tasks'),
   getTask: (id) => request('GET', `/tasks/${id}`),
+  stopAllTasks: () => request('POST', '/tasks/stop-all'),
 
   getAutoCheckConfig: () => request('GET', '/config/auto-check'),
   setAutoCheckConfig: (cfg) => request('PUT', '/config/auto-check', cfg),

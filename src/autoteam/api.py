@@ -98,6 +98,8 @@ class SetupConfig(BaseModel):
     PLAYWRIGHT_PROXY_URL: str = ""
     PLAYWRIGHT_PROXY_BYPASS: str = ""
     API_KEY: str = ""
+    TEAM_TARGET_SEATS: str = "999"
+    FILL_BATCH_SIZE: str = "10"
 
 
 class SourceConfig(BaseModel):
@@ -157,6 +159,8 @@ _ALL_RUNTIME_ENV_KEYS = [
     "AUTO_CHECK_INTERVAL",
     "AUTO_CHECK_THRESHOLD",
     "AUTO_CHECK_MIN_LOW",
+    "TEAM_TARGET_SEATS",
+    "FILL_BATCH_SIZE",
     "PLAYWRIGHT_PROXY_URL",
     "PLAYWRIGHT_PROXY_SERVER",
     "PLAYWRIGHT_PROXY_USERNAME",
@@ -458,11 +462,12 @@ def _sync_runtime_globals():
         return
 
     try:
-        from autoteam.config import AUTO_CHECK_INTERVAL, AUTO_CHECK_MIN_LOW, AUTO_CHECK_THRESHOLD
+        from autoteam.config import AUTO_CHECK_INTERVAL, AUTO_CHECK_MIN_LOW, AUTO_CHECK_THRESHOLD, TEAM_TARGET_SEATS
 
         auto_check_config["interval"] = AUTO_CHECK_INTERVAL
         auto_check_config["threshold"] = AUTO_CHECK_THRESHOLD
         auto_check_config["min_low"] = AUTO_CHECK_MIN_LOW
+        auto_check_config["target_seats"] = TEAM_TARGET_SEATS
         if auto_check_restart is not None:
             auto_check_restart.set()
     except Exception:
@@ -697,6 +702,7 @@ def put_runtime_config_source(config: SourceConfig):
 # ---------------------------------------------------------------------------
 
 _tasks: dict[str, dict] = {}
+_task_threads: dict[str, threading.Thread] = {}
 _playwright_lock = threading.Lock()
 _current_task_id: str | None = None
 _admin_login_api = None
@@ -834,8 +840,115 @@ def _prune_tasks():
         return
     sorted_ids = sorted(_tasks, key=lambda k: _tasks[k]["created_at"])
     for tid in sorted_ids[: len(_tasks) - MAX_TASK_HISTORY]:
-        if _tasks[tid]["status"] in ("completed", "failed"):
+        if _tasks[tid]["status"] in ("completed", "failed", "stopped"):
             del _tasks[tid]
+            _task_threads.pop(tid, None)
+
+
+def _mark_task_stopped(task: dict, reason: str):
+    task["stop_requested"] = True
+    task["status"] = "stopped"
+    task["error"] = reason
+    task["finished_at"] = time.time()
+
+
+def _raise_thread_exit(thread: threading.Thread) -> str:
+    """Best-effort stop for a worker thread used only by the force-stop API."""
+    if not thread.is_alive():
+        return "not_running"
+    if thread.ident is None:
+        return "missing_ident"
+
+    import ctypes
+
+    result = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_ulong(thread.ident),
+        ctypes.py_object(SystemExit),
+    )
+    if result == 0:
+        return "not_found"
+    if result > 1:
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(thread.ident), None)
+        return "failed"
+    return "requested"
+
+
+def _stop_resource_direct(resource, timeout: float = 2.0) -> str:
+    stop = getattr(resource, "stop", None)
+    if not callable(stop):
+        return "not_supported"
+
+    done = threading.Event()
+    result = {"status": "stopped"}
+
+    def _worker():
+        try:
+            stop()
+        except Exception as exc:
+            result["status"] = f"error: {exc}"
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    if not done.wait(timeout):
+        return "timeout"
+    return result["status"]
+
+
+def _stop_pending_flows(reason: str):
+    global _admin_login_api, _admin_login_step, _main_codex_flow, _main_codex_step, _main_codex_action
+    global _manual_account_flow
+
+    stopped = []
+    if _admin_login_api:
+        stopped.append({"name": "admin-login", "stop": _stop_resource_direct(_admin_login_api)})
+        _admin_login_api = None
+        _admin_login_step = None
+
+    if _main_codex_flow:
+        stopped.append({"name": "main-codex", "stop": _stop_resource_direct(_main_codex_flow)})
+        _main_codex_flow = None
+        _main_codex_step = None
+        _main_codex_action = None
+
+    if _manual_account_flow:
+        stopped.append({"name": "manual-account", "stop": _stop_resource_direct(_manual_account_flow)})
+        _manual_account_flow = None
+
+    if stopped and _playwright_lock.locked() and _current_task_id is None:
+        try:
+            _playwright_lock.release()
+        except RuntimeError:
+            pass
+
+    if stopped:
+        logger.warning("[API] 已强制停止等待中的流程: %s", reason)
+    return stopped
+
+
+def _request_stop_all_tasks(reason: str):
+    stopped = []
+    for task_id, task in list(_tasks.items()):
+        if task.get("status") not in ("pending", "running"):
+            continue
+
+        _mark_task_stopped(task, reason)
+        thread = _task_threads.get(task_id)
+        thread_stop = "not_started"
+        if thread:
+            thread_stop = _raise_thread_exit(thread)
+            thread.join(timeout=1)
+        stopped.append(
+            {
+                "task_id": task_id,
+                "command": task.get("command"),
+                "thread_stop": thread_stop,
+                "thread_alive": bool(thread and thread.is_alive()),
+            }
+        )
+
+    return stopped
 
 
 def _run_task(task_id: str, func, *args, **kwargs):
@@ -845,21 +958,44 @@ def _run_task(task_id: str, func, *args, **kwargs):
 
     _playwright_lock.acquire()
     _current_task_id = task_id
+    if task.get("stop_requested"):
+        task["finished_at"] = time.time()
+        _current_task_id = None
+        _task_threads.pop(task_id, None)
+        _playwright_lock.release()
+        return
     task["status"] = "running"
     task["started_at"] = time.time()
 
     try:
         result = func(*args, **kwargs)
-        task["status"] = "completed"
-        task["result"] = result
+        if task.get("stop_requested"):
+            _mark_task_stopped(task, task.get("error") or "任务已停止")
+        else:
+            task["status"] = "completed"
+            task["result"] = result
     except Exception as e:
-        task["status"] = "failed"
-        task["error"] = str(e)
-        logger.error("[API] 任务 %s 失败: %s", task_id[:8], e)
+        if task.get("stop_requested"):
+            _mark_task_stopped(task, task.get("error") or "任务已停止")
+        else:
+            task["status"] = "failed"
+            task["error"] = str(e)
+            logger.error("[API] 任务 %s 失败: %s", task_id[:8], e)
+    except BaseException as e:
+        if task.get("stop_requested"):
+            _mark_task_stopped(task, task.get("error") or "任务已停止")
+        else:
+            task["status"] = "failed"
+            task["error"] = str(e) or e.__class__.__name__
+            logger.error("[API] 任务 %s 异常退出: %s", task_id[:8], task["error"])
     finally:
-        task["finished_at"] = time.time()
-        _current_task_id = None
-        _playwright_lock.release()
+        if task.get("status") not in ("stopped", "failed", "completed"):
+            task["finished_at"] = time.time()
+        if _current_task_id == task_id:
+            _current_task_id = None
+        _task_threads.pop(task_id, None)
+        if _playwright_lock.locked():
+            _playwright_lock.release()
 
 
 def _start_task(command: str, func, params: dict, *args, **kwargs) -> dict:
@@ -884,6 +1020,7 @@ def _start_task(command: str, func, params: dict, *args, **kwargs) -> dict:
     _prune_tasks()
 
     thread = threading.Thread(target=_run_task, args=(task_id, func, *args), kwargs=kwargs, daemon=True)
+    _task_threads[task_id] = thread
     thread.start()
 
     return task
@@ -895,7 +1032,13 @@ def _start_task(command: str, func, params: dict, *args, **kwargs) -> dict:
 
 
 class TaskParams(BaseModel):
-    target: int = 5
+    target: int | None = None
+
+
+class CpaBatchParams(BaseModel):
+    join_mode: str = "direct"
+    target: int | None = None
+    batch_size: int | None = None
 
 
 class CleanupParams(BaseModel):
@@ -1734,6 +1877,93 @@ class LoginAccountParams(BaseModel):
     email: str
 
 
+@app.post("/api/accounts/{email}/cpa-auth", status_code=202)
+def post_account_cpa_auth(email: str):
+    """为单个 Team 席位账号完成 Codex 认证并上传到 CPA。"""
+    from autoteam.accounts import STATUS_ACTIVE, find_account, load_accounts
+
+    email = email.strip().lower()
+    if _is_main_account_email(email):
+        raise HTTPException(status_code=400, detail="主号不属于账号池认证对象")
+
+    accounts = load_accounts()
+    acc = find_account(accounts, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if acc.get("status") != STATUS_ACTIVE:
+        raise HTTPException(status_code=400, detail=f"账号状态为 {acc.get('status')}，不是 active")
+
+    _require_cpa_configs("CPA 认证")
+    auth_file = acc.get("auth_file") or ""
+    if not auth_file or not Path(auth_file).exists():
+        _require_account_mail_configs(acc, "CPA 认证")
+
+    def _run():
+        from autoteam.accounts import STATUS_ACTIVE, STATUS_EXHAUSTED, update_account
+        from autoteam.codex_auth import (
+            check_codex_quota,
+            login_codex_via_browser,
+            quota_result_quota_info,
+            quota_result_resets_at,
+            save_auth_file,
+        )
+        from autoteam.cpa_sync import upload_to_cpa
+        from autoteam.mail_provider import get_mail_client_for_account
+
+        latest = find_account(load_accounts(), email)
+        if not latest:
+            raise RuntimeError(f"账号不存在: {email}")
+
+        auth_path = latest.get("auth_file") or ""
+        plan_type = "unknown"
+        if auth_path and Path(auth_path).exists():
+            logger.info("[CPA认证] 使用已有本地认证文件: %s", email)
+        else:
+            logger.info("[CPA认证] 本地缺少认证文件，开始 Codex 登录: %s", email)
+            mail_client = get_mail_client_for_account(latest)
+            mail_client.login()
+            bundle = login_codex_via_browser(email, latest.get("password", ""), mail_client=mail_client)
+            if not bundle:
+                raise RuntimeError(f"Codex 登录失败: {email}")
+
+            plan_type = bundle.get("plan_type") or "unknown"
+            auth_path = save_auth_file(bundle)
+            update_account(email, auth_file=auth_path)
+
+            if plan_type == "team":
+                update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
+                token = bundle.get("access_token")
+                if token:
+                    st, info = check_codex_quota(token)
+                    if st == "ok" and isinstance(info, dict):
+                        update_account(email, last_quota=info)
+                    elif st == "exhausted":
+                        quota_info = quota_result_quota_info(info)
+                        if quota_info:
+                            update_account(email, last_quota=quota_info)
+                        update_account(
+                            email,
+                            status=STATUS_EXHAUSTED,
+                            quota_exhausted_at=time.time(),
+                            quota_resets_at=quota_result_resets_at(info) or int(time.time() + 18000),
+                        )
+            else:
+                raise RuntimeError(f"{email} 登录后 plan={plan_type}，不是 team")
+
+        if not upload_to_cpa(auth_path):
+            raise RuntimeError(f"上传 CPA 失败: {Path(auth_path).name}")
+
+        return {
+            "email": email,
+            "plan": plan_type,
+            "auth_file": auth_path,
+            "cpa_uploaded": True,
+        }
+
+    task = _start_task(f"cpa-auth:{email}", _run, {"email": email})
+    return task
+
+
 @app.post("/api/accounts/login", status_code=202)
 def post_account_login(params: LoginAccountParams):
     """触发单个账号的 Codex 登录（后台执行）"""
@@ -1853,6 +2083,17 @@ def post_sync():
     targets = get_enabled_sync_targets()
     result = sync_to_configured_targets()
     return {"message": f"已同步到 {describe_sync_targets(targets)}", "result": result}
+
+
+@app.post("/api/sync/cpa")
+def post_sync_cpa():
+    """只同步账号池认证文件到 CPA。"""
+    _require_cpa_configs("同步 CPA")
+
+    from autoteam.cpa_sync import sync_to_cpa
+
+    result = sync_to_cpa()
+    return {"message": "已同步到 CPA", "result": result}
 
 
 @app.post("/api/sync/from-cpa")
@@ -2052,6 +2293,26 @@ def post_sync_main_codex():
     return post_main_codex_start()
 
 
+@app.post("/api/sync/main-codex/saved")
+def post_sync_saved_main_codex():
+    """只推送本地已有的主号 Codex 凭证，不启动浏览器登录。"""
+    _require_sync_target_configs("同步主号 Codex")
+
+    from autoteam.codex_auth import get_saved_main_auth_file
+    from autoteam.sync_targets import sync_main_codex_to_configured_targets
+
+    saved_auth_file = get_saved_main_auth_file()
+    if not saved_auth_file:
+        raise HTTPException(status_code=400, detail="未找到主号 Codex 凭证，请先在配置面板完成主号 Codex 登录")
+
+    result = sync_main_codex_to_configured_targets(saved_auth_file)
+    return {
+        "message": "主号 Codex 凭证已同步到已启用远端",
+        "result": result,
+        "info": {"auth_file": saved_auth_file},
+    }
+
+
 @app.get("/api/cpa/files")
 def get_cpa_files():
     """获取 CPA 中的认证文件列表"""
@@ -2060,6 +2321,36 @@ def get_cpa_files():
     from autoteam.cpa_sync import list_cpa_files
 
     return list_cpa_files()
+
+
+@app.get("/api/cpa-batch/runs")
+def get_cpa_batch_runs():
+    """获取批量 CPA JSON 任务记录。"""
+    from autoteam.flow_runs import load_flow_runs
+
+    return load_flow_runs()
+
+
+@app.get("/api/cpa-batch/runs/{run_id}")
+def get_cpa_batch_run(run_id: str):
+    """获取单次批量 CPA JSON 任务记录。"""
+    from autoteam.flow_runs import get_flow_run
+
+    run = get_flow_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="任务记录不存在")
+    return run
+
+
+@app.post("/api/cpa-batch/runs/{run_id}/pause")
+def pause_cpa_batch_run(run_id: str):
+    """请求批量 CPA JSON 任务暂停。"""
+    from autoteam.flow_runs import request_flow_pause
+
+    run = request_flow_pause(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="任务记录不存在")
+    return {"message": "已请求暂停，当前账号阶段结束后停止继续新账号", "run": run}
 
 
 # ---------------------------------------------------------------------------
@@ -2085,9 +2376,11 @@ def post_rotate(params: TaskParams = TaskParams()):
     """智能轮转（后台执行）"""
     _require_pool_operation_configs("智能轮转")
 
+    from autoteam.config import MAX_TEAM_SEATS, TEAM_TARGET_SEATS
     from autoteam.manager import cmd_rotate
 
-    task = _start_task("rotate", cmd_rotate, {"target": params.target}, params.target)
+    target = min(MAX_TEAM_SEATS, max(1, params.target or TEAM_TARGET_SEATS))
+    task = _start_task("rotate", cmd_rotate, {"target": target}, target)
     return task
 
 
@@ -2107,9 +2400,48 @@ def post_fill(params: TaskParams = TaskParams()):
     """补满 Team 成员（后台执行）"""
     _require_pool_operation_configs("补满 Team 成员")
 
+    from autoteam.config import FILL_BATCH_SIZE, MAX_TEAM_SEATS, TEAM_TARGET_SEATS
     from autoteam.manager import cmd_fill
 
-    task = _start_task("fill", cmd_fill, {"target": params.target}, params.target)
+    task_params = {"target": min(MAX_TEAM_SEATS, max(1, params.target or TEAM_TARGET_SEATS))}
+    if params.target is None:
+        task_params["max_add"] = FILL_BATCH_SIZE
+    task = _start_task("fill", cmd_fill, task_params, params.target)
+    return task
+
+
+@app.post("/api/tasks/cpa-batch", status_code=202)
+def post_cpa_batch(params: CpaBatchParams = CpaBatchParams()):
+    """新做 100 个 team 账号 CPA JSON。"""
+    from autoteam.mail_provider import get_mail_provider_name, get_mail_provider_required_keys
+
+    env = _current_runtime_env()
+    provider = get_mail_provider_name(env)
+    _require_runtime_configs(get_mail_provider_required_keys(provider), "批量 CPA JSON", env=env)
+    _require_cpa_configs("批量 CPA JSON")
+    if not _admin_status().get("configured"):
+        raise HTTPException(status_code=400, detail="批量 CPA JSON 前请先完成管理员登录")
+
+    import uuid
+
+    from autoteam.cpa_batch import DEFAULT_BATCH_SIZE, DEFAULT_TARGET, JOIN_MODE_DIRECT, VALID_JOIN_MODES, run_cpa_batch
+
+    join_mode = (params.join_mode or JOIN_MODE_DIRECT).strip().lower()
+    if join_mode not in VALID_JOIN_MODES:
+        raise HTTPException(status_code=400, detail=f"未知入席方式: {join_mode}")
+
+    target = min(DEFAULT_TARGET, max(1, params.target or DEFAULT_TARGET))
+    batch_size = min(DEFAULT_BATCH_SIZE, max(1, params.batch_size or DEFAULT_BATCH_SIZE))
+    run_id = uuid.uuid4().hex[:12]
+    task = _start_task(
+        "cpa-batch",
+        run_cpa_batch,
+        {"run_id": run_id, "join_mode": join_mode, "target": target, "batch_size": batch_size},
+        run_id,
+        join_mode=join_mode,
+        target=target,
+        batch_size=batch_size,
+    )
     return task
 
 
@@ -2138,6 +2470,25 @@ def get_task(task_id: str):
     return task
 
 
+@app.post("/api/tasks/stop-all")
+def post_stop_all_tasks():
+    """强制停止面板当前已知的任务和等待中的登录/OAuth 流程。"""
+    reason = "用户强制停止"
+    stopped_tasks = _request_stop_all_tasks(reason)
+    stopped_flows = _stop_pending_flows(reason)
+    _auto_check_restart.set()
+    logger.warning(
+        "[API] 用户请求强制停止全部工作: tasks=%d flows=%d",
+        len(stopped_tasks),
+        len(stopped_flows),
+    )
+    return {
+        "message": "已请求停止全部工作",
+        "stopped_tasks": stopped_tasks,
+        "stopped_flows": stopped_flows,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 后台自动巡检
 # ---------------------------------------------------------------------------
@@ -2151,12 +2502,16 @@ from autoteam.config import (
 from autoteam.config import (
     AUTO_CHECK_THRESHOLD as _DEFAULT_THRESHOLD,
 )
+from autoteam.config import (
+    TEAM_TARGET_SEATS as _DEFAULT_TEAM_TARGET_SEATS,
+)
 
 # 运行时可修改的巡检配置
 _auto_check_config = {
     "interval": _DEFAULT_INTERVAL,
     "threshold": _DEFAULT_THRESHOLD,
     "min_low": _DEFAULT_MIN_LOW,
+    "target_seats": _DEFAULT_TEAM_TARGET_SEATS,
 }
 _auto_check_stop = threading.Event()
 _auto_check_restart = threading.Event()  # 配置变更时通知线程重启
@@ -2249,8 +2604,6 @@ def _auto_check_loop():
     from autoteam.accounts import STATUS_ACTIVE, load_accounts
     from autoteam.codex_auth import check_codex_quota
 
-    target_seats = 5
-
     while not _auto_check_stop.is_set():
         try:
             _maybe_reload_runtime_config_from_env_file()
@@ -2258,9 +2611,11 @@ def _auto_check_loop():
             logger.warning("[配置] 自动热加载失败: %s", exc)
 
         cfg = _auto_check_config
+        target_seats = cfg.get("target_seats", _DEFAULT_TEAM_TARGET_SEATS)
         logger.info(
-            "[巡检] 等待 %d 分钟后执行下一轮检查（阈值: %d%%, 触发: >=%d 个）",
+            "[巡检] 等待 %d 分钟后执行下一轮检查（目标: %d, 阈值: %d%%, 触发: >=%d 个）",
             cfg["interval"] // 60,
+            target_seats,
             cfg["threshold"],
             cfg["min_low"],
         )
@@ -2274,6 +2629,7 @@ def _auto_check_loop():
 
         try:
             cfg = _auto_check_config  # 重新读取
+            target_seats = cfg.get("target_seats", _DEFAULT_TEAM_TARGET_SEATS)
             accounts = load_accounts()
             local_active_count = sum(
                 1 for a in accounts if a["status"] == STATUS_ACTIVE and not _is_main_account_email(a.get("email"))
@@ -2483,6 +2839,15 @@ def _start_auto_check():
             logger.info("[启动] 已修复 %d 个 auths 认证文件权限", fixed)
     except Exception as exc:
         logger.warning("[启动] 修复 auths 认证文件权限失败: %s", exc)
+
+    try:
+        from autoteam.flow_runs import mark_interrupted_running_runs
+
+        interrupted = mark_interrupted_running_runs()
+        if interrupted:
+            logger.warning("[启动] 已标记 %d 条未结束的批量流程为失败", interrupted)
+    except Exception as exc:
+        logger.warning("[启动] 标记未结束批量流程失败: %s", exc)
 
     _sync_runtime_env_reload_state()
     thread = threading.Thread(target=_auto_check_loop, daemon=True)

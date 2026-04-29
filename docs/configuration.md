@@ -35,6 +35,8 @@ cp .env.example .env
 | `AUTO_CHECK_THRESHOLD` | 额度低于此百分比触发轮转 | 否（默认 `10`） |
 | `AUTO_CHECK_INTERVAL` | 巡检间隔（秒） | 否（默认 `300`） |
 | `AUTO_CHECK_MIN_LOW` | 至少几个账号低于阈值才触发 | 否（默认 `2`） |
+| `TEAM_TARGET_SEATS` | Team 总人数目标 | 否（默认 `999`） |
+| `FILL_BATCH_SIZE` | 「补满成员」每次最多新增账号数 | 否（默认 `10`） |
 
 ## 配置面板分区
 
@@ -175,12 +177,33 @@ codex-{email}-{plan_type}-{hash}.json
 
 反向同步 (`pull-cpa`) 时，CPA 中下载回来的文件也会被重新整理成这个命名规范。
 
+## Team 补位批次
+
+`TEAM_TARGET_SEATS` 是 Team 总人数目标，默认 `999`。`FILL_BATCH_SIZE` 是「补满成员」一次最多新增的账号数，默认 `10`。
+
+Web 面板点击「补满成员」时，如果不手动传目标人数，后端只会执行一批：当前 Team 人数加上 `FILL_BATCH_SIZE`，且不超过 `TEAM_TARGET_SEATS`。如果通过 CLI 或 API 明确传入较大的目标，执行过程仍会按 `FILL_BATCH_SIZE` 分批记录日志，并在每批结束后上传 CPA 认证文件。
+
+## 批量 CPA JSON
+
+账号池操作页的「批量 CPA JSON」会每次新做 100 个可用 CPA JSON，并固定按 20 个账号为一组处理。页面可选择直注入席或邀请入席。
+
+计入成功必须同时满足：
+- 本地账号状态为 `active`
+- Codex OAuth 返回或认证文件解析为 `plan_type=team`
+- 额度检查返回 `ok`
+- CPA 上传成功
+
+运行记录保存到 `flow_runs.json`。该文件只用于本地查看进度和错误，不应提交。邮箱创建后会立即写入真实邮箱；服务重启时，未结束的批量记录会被标记为失败。
+
+暂停按钮会写入暂停请求。当前账号阶段结束后，任务会停止继续创建新账号，并把运行记录标记为 `paused`。
+
 ## 本地数据文件
 
 | 文件 / 目录 | 作用 |
 |-------------|------|
 | `.env` | 运行配置 |
 | `accounts.json` | 本地账号池状态 |
+| `flow_runs.json` | 批量 CPA JSON 运行记录 |
 | `state.json` | 管理员登录态 |
 | `auths/` | 轮转账号与主号的 Codex 认证文件 |
 | `screenshots/` | 浏览器自动化调试截图 |

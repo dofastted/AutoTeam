@@ -98,7 +98,7 @@ PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:3333
 | `check` | 检查额度 |
 | `add` | 添加新账号 |
 | `manual-add` | 手动 OAuth 添加账号（打开链接登录后粘贴回调 URL） |
-| `fill [N]` | 补满成员 |
+| `fill [N]` | 补满成员；未传 N 时按 `FILL_BATCH_SIZE` 执行一批 |
 | `cleanup [N]` | 清理多余成员 |
 | `sync` | 同步认证文件到已启用远端 |
 | `pull-cpa` | 从 CPA 反向同步认证文件到本地 |
@@ -114,9 +114,9 @@ PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:3333
 |------|------|
 | 📊 仪表盘 | 账号统计 + 状态表格 + 登录/移出/删除/同步操作 |
 | 👥 Team 成员 | 全部 Team 成员（含外部成员） |
-| 🔁 账号池操作 | 轮转、检查、补满、添加、清理等会直接改变账号池状态的操作 |
+| 🔁 账号池操作 | 轮转、检查、补满、添加、清理、批量准备 CPA JSON 等会直接改变账号池状态的操作 |
 | 🔄 同步中心 | 同步账号、同步已启用远端、拉取 CPA 等对账/同步动作 |
-| 🔐 OAuth 登录 | 生成认证链接；优先自动接收 localhost 回调，失败时也可手动粘贴回调 URL |
+| 🔐 OAuth 登录 | 生成认证链接；检查 active 席位账号的 CPA 凭证，缺少时可认证并上传 |
 | 📜 任务历史 | 查看后台任务执行状态、参数、耗时与结果 |
 | 📋 日志 | 实时日志查看器 |
 | ⚙️ 配置面板 | 邮箱服务、远端同步、代理 / 高级、安全 / 访问控制、管理员 / 主号、巡检设置、源文件编辑 |
@@ -179,6 +179,12 @@ MAIL_PROVIDER=cloudflare_temp_email
 #### 邮件等待设置
 
 `EMAIL_POLL_INTERVAL` 控制刷新间隔，单位秒。`EMAIL_POLL_TIMEOUT` 控制最多等待多久；设置为 `0` 时会一直刷新，直到收到目标邮件。
+
+#### Team 补位批次
+
+`TEAM_TARGET_SEATS` 控制 Team 总人数目标，默认 `999`。`FILL_BATCH_SIZE` 控制「补满成员」每次最多新增多少账号，默认 `10`。
+
+Web 面板点击「补满成员」时不再一次性补到总目标，而是按 `FILL_BATCH_SIZE` 执行一批。每批结束后会记录尝试数、成功数、失败数、成功率，并上传 CPA 认证文件。
 
 #### Cloudflare Temp Email 注意事项
 

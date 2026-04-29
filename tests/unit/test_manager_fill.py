@@ -129,6 +129,38 @@ def test_cmd_fill_stops_early_when_refreshed_team_count_hits_target(monkeypatch)
     assert chatgpt.stopped == 1
 
 
+def test_cmd_fill_syncs_cpa_after_each_configured_batch(monkeypatch):
+    chatgpt = _FakeChatGPT()
+    count_values = iter(range(0, 14))
+    events = []
+
+    import autoteam.config as config
+
+    monkeypatch.setattr(config, "FILL_BATCH_SIZE", 10)
+    monkeypatch.setattr(config, "TEAM_TARGET_SEATS", 999)
+    monkeypatch.setattr(config, "MAX_TEAM_SEATS", 999)
+    monkeypatch.setattr(manager, "ChatGPTTeamAPI", lambda: chatgpt)
+    monkeypatch.setattr(manager, "CloudMailClient", lambda: _FakeMailClient())
+    monkeypatch.setattr(manager, "get_team_member_count", lambda _chatgpt: next(count_values))
+    monkeypatch.setattr(manager, "get_standby_accounts", lambda: [])
+    monkeypatch.setattr(
+        manager,
+        "create_new_account",
+        lambda _chatgpt, _mail: events.append(("create", None)) or True,
+    )
+    monkeypatch.setattr(manager, "sync_to_cpa", lambda: events.append(("sync", None)) or {"uploaded": 1})
+    monkeypatch.setattr(manager, "cmd_status", lambda: events.append(("status", None)))
+
+    result = manager.cmd_fill(target=13)
+
+    assert [event for event in events if event[0] == "sync"] == [("sync", None), ("sync", None)]
+    assert events[-1] == ("status", None)
+    assert result["attempted"] == 13
+    assert result["succeeded"] == 13
+    assert [batch["attempted"] for batch in result["batches"]] == [10, 3]
+    assert chatgpt.stopped == 1
+
+
 def test_auto_reuse_skip_reason_detects_google_provider_and_gmail():
     assert manager._auto_reuse_skip_reason({"email": "bubblehuntr@gmail.com"}) == "Google 登录账号暂不支持自动复用"
     assert (

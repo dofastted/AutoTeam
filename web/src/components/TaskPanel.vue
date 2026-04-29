@@ -19,7 +19,7 @@
     <!-- 参数输入 -->
     <div v-if="showParams" class="mt-4 flex items-center gap-3">
       <label class="text-sm text-gray-400">{{ paramLabel }}:</label>
-      <input v-model.number="paramValue" type="number" min="1" max="20"
+      <input v-model.number="paramValue" type="number" min="1" max="999"
         class="w-20 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500" />
       <button @click="confirmAction" :disabled="pendingAction && isDisabled(pendingAction)"
         class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition">
@@ -58,7 +58,7 @@ const emit = defineEmits(['task-started', 'refresh'])
 const actions = [
   { key: 'rotate', group: 'pool', label: '智能轮转', method: 'startRotate', needParam: true, paramName: 'target', style: 'bg-blue-600 text-white border-blue-500' },
   { key: 'check', group: 'pool', label: '检查额度', method: 'startCheck', needParam: false, style: 'bg-emerald-600 text-white border-emerald-500' },
-  { key: 'fill', group: 'pool', label: '补满成员', method: 'startFill', needParam: true, paramName: 'target', style: 'bg-violet-600 text-white border-violet-500' },
+  { key: 'fill', group: 'pool', label: '补满成员', method: 'startFill', needParam: false, style: 'bg-violet-600 text-white border-violet-500' },
   { key: 'add', group: 'pool', label: '添加账号', method: 'startAdd', needParam: false, style: 'bg-amber-600 text-white border-amber-500' },
   { key: 'cleanup', group: 'pool', label: '清理成员', method: 'startCleanup', needParam: false, style: 'bg-rose-600 text-white border-rose-500' },
   { key: 'sync', group: 'sync', label: '同步远端', method: 'postSync', needParam: false, sync: true, allowWithoutAdmin: true, style: 'bg-cyan-600 text-white border-cyan-500' },
@@ -68,7 +68,7 @@ const actions = [
 
 const showParams = ref(false)
 const paramLabel = ref('')
-const paramValue = ref(5)
+const paramValue = ref(999)
 const pendingAction = ref(null)
 const message = ref('')
 const messageClass = ref('')
@@ -102,7 +102,7 @@ async function execute(action) {
   if (action.needParam) {
     pendingAction.value = action
     paramLabel.value = action.paramName === 'target' ? '目标成员数' : '最大席位'
-    paramValue.value = 5
+    paramValue.value = action.key === 'rotate' ? 999 : 5
     showParams.value = true
     return
   }

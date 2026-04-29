@@ -51,6 +51,8 @@ REQUIRED_CONFIGS = [
     ("PLAYWRIGHT_PROXY_URL", "Playwright 浏览器代理 URL（可选，如 socks5://host:port）", "", True),
     ("PLAYWRIGHT_PROXY_BYPASS", "Playwright 代理绕过列表（可选，如 localhost,127.0.0.1）", "", True),
     ("API_KEY", "API 鉴权密钥（回车自动生成）", "", False),
+    ("TEAM_TARGET_SEATS", "Team 总人数目标", "999", True),
+    ("FILL_BATCH_SIZE", "补满成员单次最多新增数", "10", True),
 ]
 
 
