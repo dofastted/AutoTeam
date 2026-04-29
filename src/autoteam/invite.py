@@ -23,6 +23,7 @@ import time
 
 from playwright.sync_api import sync_playwright
 
+from autoteam.browser_runtime import acquire_browser_lease
 from autoteam.chatgpt_api import ChatGPTTeamAPI
 from autoteam.config import get_playwright_launch_options
 from autoteam.mail_provider import get_mail_client as CloudMailClient
@@ -399,8 +400,8 @@ def run():
 
         logger.info("[邀请] 开始注册 ChatGPT 账号")
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(**get_playwright_launch_options())
+        with acquire_browser_lease("invite.run", sync_playwright_factory=sync_playwright) as lease:
+            browser = lease.launch_chromium(**get_playwright_launch_options())
             context = browser.new_context(
                 viewport={"width": 1280, "height": 800},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
@@ -410,7 +411,6 @@ def run():
             result, pwd = register_with_invite(page, invite_link, email, mail_client)
 
             screenshot(page, "final.png")
-            browser.close()
 
         if result:
             logger.info("[邀请] %s 已注册并加入 ChatGPT Team", email)

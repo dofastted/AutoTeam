@@ -1,4 +1,8 @@
-from autoteam import api, flow_runs
+import threading
+
+import pytest
+
+from autoteam import accounts, api, cpa_batch, flow_runs
 
 
 def test_post_cpa_batch_starts_fixed_size_task(monkeypatch):
@@ -114,3 +118,122 @@ def test_pause_cpa_batch_run_sets_pause_flag(tmp_path, monkeypatch):
 
     assert result["run"]["pause_requested"] is True
     assert run["pause_requested"] is True
+
+
+def test_create_direct_account_retries_current_account_after_browser_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(accounts, "ACCOUNTS_FILE", tmp_path / "accounts.json")
+    monkeypatch.setattr(cpa_batch, "time", type("FakeTime", (), {"time": staticmethod(lambda: 1000), "sleep": staticmethod(lambda _s: None)})())
+    monkeypatch.setattr("autoteam.manager._is_email_in_team", lambda _email: False)
+    monkeypatch.setattr(cpa_batch, "save_auth_file", lambda _bundle: str(tmp_path / "codex-a-team.json"))
+
+    calls = []
+
+    def fake_register(_mail_client, email, _password, **kwargs):
+        calls.append(email)
+        if len(calls) == 1:
+            raise RuntimeError("browser closed")
+        kwargs["session_bundle_callback"](
+            {
+                "access_token": "token",
+                "id_token": "token",
+                "email": email,
+                "plan_type": "team",
+                "expired": 2000,
+            }
+        )
+        return True
+
+    monkeypatch.setattr("autoteam.manager._register_direct_once", fake_register)
+
+    class FakeMailClient:
+        provider_name = "mo_email"
+
+        def create_temp_email(self):
+            return "mail-1", "retry@example.com"
+
+        def delete_account(self, _account_id):
+            raise AssertionError("should not delete successful account")
+
+    email = cpa_batch._create_direct_account(FakeMailClient())
+
+    assert email == "retry@example.com"
+    assert calls == ["retry@example.com", "retry@example.com"]
+    saved = accounts.load_accounts()[0]
+    assert saved["status"] == accounts.STATUS_ACTIVE
+    assert saved["auth_file"].endswith("codex-a-team.json")
+
+
+def test_create_direct_account_does_not_accept_team_membership_without_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(accounts, "ACCOUNTS_FILE", tmp_path / "accounts.json")
+    monkeypatch.setattr(cpa_batch.time, "sleep", lambda _s: None)
+    monkeypatch.setattr("autoteam.manager._is_email_in_team", lambda _email: True)
+
+    def fake_register(*_args, **_kwargs):
+        raise RuntimeError("ChatGPT session 提取失败: no token")
+
+    monkeypatch.setattr("autoteam.manager._register_direct_once", fake_register)
+
+    class FakeMailClient:
+        provider_name = "mo_email"
+        deleted = False
+
+        def create_temp_email(self):
+            return "mail-1", "nosession@example.com"
+
+        def delete_account(self, _account_id):
+            self.deleted = True
+
+    mail_client = FakeMailClient()
+
+    with pytest.raises(cpa_batch.AccountFlowError, match="连续 3 次直注注册失败"):
+        cpa_batch._create_direct_account(mail_client)
+
+    assert mail_client.deleted is True
+
+
+def test_run_cpa_batch_processes_cpa_upload_while_registering_next_account(tmp_path, monkeypatch):
+    monkeypatch.setattr(flow_runs, "FLOW_RUNS_FILE", tmp_path / "flow_runs.json")
+    monkeypatch.setattr(accounts, "ACCOUNTS_FILE", tmp_path / "accounts.json")
+
+    class FakeMailClient:
+        def login(self):
+            pass
+
+    monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: FakeMailClient())
+
+    created = []
+    first_upload_started = threading.Event()
+    release_first_upload = threading.Event()
+    second_created_after_upload_started = {"value": False}
+
+    def fake_create_direct(_mail_client, hooks=None, batch_index=None):
+        email = f"user{len(created) + 1}@example.com"
+        created.append(email)
+        accounts.add_account(email, "pw")
+        accounts.update_account(email, status=accounts.STATUS_ACTIVE)
+        if len(created) == 2:
+            second_created_after_upload_started["value"] = first_upload_started.wait(timeout=2)
+            release_first_upload.set()
+        return email
+
+    def fake_verify(email, _mail_cache, **_kwargs):
+        if email == "user1@example.com":
+            first_upload_started.set()
+            assert release_first_upload.wait(timeout=2)
+        return {
+            "email": email,
+            "plan_type": "team",
+            "auth_file": str(tmp_path / f"{email}.json"),
+            "auth_name": f"{email}.json",
+            "quota": {"primary_pct": 1},
+        }
+
+    monkeypatch.setattr(cpa_batch, "_create_direct_account", fake_create_direct)
+    monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", fake_verify)
+
+    result = cpa_batch.run_cpa_batch("run-async", target=2, batch_size=20)
+
+    assert result["status"] == "completed"
+    assert result["succeeded"] == 2
+    assert created == ["user1@example.com", "user2@example.com"]
+    assert second_created_after_upload_started["value"] is True

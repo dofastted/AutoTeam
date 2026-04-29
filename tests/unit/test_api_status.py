@@ -163,6 +163,7 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
                 "CLOUDMAIL_DOMAIN=@example.com",
                 "CPA_URL=http://127.0.0.1:8317",
                 "CPA_KEY=key-1",
+                "PLAYWRIGHT_HEADLESS=false",
                 "PLAYWRIGHT_PROXY_URL=socks5://127.0.0.1:1080",
                 "PLAYWRIGHT_PROXY_BYPASS=localhost,127.0.0.1",
                 "API_KEY=runtime-key",
@@ -181,6 +182,7 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
         "CLOUDMAIL_DOMAIN",
         "CPA_URL",
         "CPA_KEY",
+        "PLAYWRIGHT_HEADLESS",
         "PLAYWRIGHT_PROXY_URL",
         "PLAYWRIGHT_PROXY_BYPASS",
         "API_KEY",
@@ -195,6 +197,8 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
     assert fields["CLOUDMAIL_EMAIL"]["runtime_required"] is True
     assert fields["CPA_KEY"]["value"] == "key-1"
     assert fields["CPA_KEY"]["runtime_required"] is True
+    assert fields["PLAYWRIGHT_HEADLESS"]["value"] == "false"
+    assert fields["PLAYWRIGHT_HEADLESS"]["runtime_required"] is False
     assert fields["PLAYWRIGHT_PROXY_URL"]["value"] == "socks5://127.0.0.1:1080"
     assert fields["PLAYWRIGHT_PROXY_URL"]["runtime_required"] is False
     assert fields["PLAYWRIGHT_PROXY_BYPASS"]["value"] == "localhost,127.0.0.1"

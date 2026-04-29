@@ -23,6 +23,15 @@ def _get_int_env(name: str, default: int) -> int:
     return int(parse_env_value(os.environ.get(name, str(default))))
 
 
+def _get_bool_env(name: str, default: bool) -> bool:
+    raw = parse_env_value(os.environ.get(name, "true" if default else "false")).strip().lower()
+    if raw in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 # CloudMail 配置
 CLOUDMAIL_BASE_URL = os.environ.get("CLOUDMAIL_BASE_URL", "")
 CLOUDMAIL_EMAIL = os.environ.get("CLOUDMAIL_EMAIL", "")
@@ -74,6 +83,7 @@ TEAM_TARGET_SEATS = min(MAX_TEAM_SEATS, max(1, _get_int_env("TEAM_TARGET_SEATS",
 FILL_BATCH_SIZE = min(MAX_TEAM_SEATS, max(1, _get_int_env("FILL_BATCH_SIZE", 10)))  # 补满成员单次最多新增账号数
 
 # Playwright 代理配置
+PLAYWRIGHT_HEADLESS = _get_bool_env("PLAYWRIGHT_HEADLESS", True)
 PLAYWRIGHT_PROXY_URL = os.environ.get("PLAYWRIGHT_PROXY_URL", "").strip()
 PLAYWRIGHT_PROXY_SERVER = os.environ.get("PLAYWRIGHT_PROXY_SERVER", "").strip()
 PLAYWRIGHT_PROXY_USERNAME = os.environ.get("PLAYWRIGHT_PROXY_USERNAME", "").strip()
@@ -111,7 +121,7 @@ def _parse_proxy_url(proxy_url: str):
 def get_playwright_launch_options():
     """统一的 Playwright Chromium 启动参数。"""
     options = {
-        "headless": False,
+        "headless": PLAYWRIGHT_HEADLESS,
         "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
     }
 

@@ -170,7 +170,16 @@
                 {{ field.prompt }}
                 <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
               </label>
+              <select
+                v-if="isToggleField(field.key)"
+                v-model="runtimeForm[field.key]"
+                class="input-dark"
+              >
+                <option value="true">启用</option>
+                <option value="false">关闭</option>
+              </select>
               <input
+                v-else
                 v-model="runtimeForm[field.key]"
                 :type="fieldInputType(field.key)"
                 :placeholder="field.default || ''"
@@ -484,7 +493,7 @@ const emit = defineEmits(['refresh', 'admin-progress'])
 const runtimeCategoryKeys = {
   cloudmail: ['MAIL_PROVIDER', 'MO_EMAIL_BASE_URL', 'MO_EMAIL_API_KEY', 'MO_EMAIL_DOMAIN', 'MO_EMAIL_NAME_PREFIX', 'MO_EMAIL_START_INDEX', 'MO_EMAIL_EXPIRY_TIME', 'CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN', 'CF_TEMP_EMAIL_BASE_URL', 'CF_TEMP_EMAIL_ADMIN_PASSWORD', 'CF_TEMP_EMAIL_DOMAIN'],
   sync: ['SYNC_TARGET_CPA', 'SYNC_TARGET_SUB2API', 'CPA_URL', 'CPA_KEY', 'SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP'],
-  proxy: ['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS'],
+  proxy: ['PLAYWRIGHT_HEADLESS', 'PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS'],
   security: ['API_KEY'],
 }
 
@@ -508,8 +517,8 @@ const runtimeCategoryMeta = {
     icon: '🛰️',
     badge: 'Proxy / Advanced',
     title: '代理 / 高级',
-    description: '用于单独配置 Playwright 浏览器流量代理。属于低频项，默认折叠，避免把主配置界面堆得过满。',
-    note: '只有在代理 ChatGPT / Auth 页面访问时才建议配置；本地回调场景通常还需要设置 bypass。',
+    description: '用于配置 Playwright 无头模式和浏览器流量代理。属于低频项，默认折叠，避免把主配置界面堆得过满。',
+    note: '浏览器默认无头启动；只有在代理 ChatGPT / Auth 页面访问时才建议配置代理和 bypass。',
   },
   security: {
     icon: '🔐',
@@ -639,13 +648,20 @@ const currentRuntimeStatus = computed(() => {
   }
 
   if (selectedRuntimeCategory.value === 'proxy') {
-    return proxyFields.value.some(field => field.configured)
+    const proxyConfigured = fieldsByKeys(['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS']).some(field => field.configured)
+    if (proxyConfigured) {
+      return {
+        label: '已设置',
+        class: 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200',
+      }
+    }
+    return String(runtimeForm.PLAYWRIGHT_HEADLESS || 'true').toLowerCase() === 'false'
       ? {
-          label: '已设置',
-          class: 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200',
+          label: '可见窗口',
+          class: 'border-amber-400/20 bg-amber-500/10 text-amber-200',
         }
       : {
-          label: '未设置',
+          label: '默认无头',
           class: 'border-white/10 bg-white/5 text-slate-400',
         }
   }
@@ -715,7 +731,7 @@ function fieldInputType(key) {
 }
 
 function isToggleField(key) {
-  return key === 'SYNC_TARGET_CPA' || key === 'SYNC_TARGET_SUB2API'
+  return key === 'SYNC_TARGET_CPA' || key === 'SYNC_TARGET_SUB2API' || key === 'PLAYWRIGHT_HEADLESS'
 }
 
 function isRuntimeRequired(field) {

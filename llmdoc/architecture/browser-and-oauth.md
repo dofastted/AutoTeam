@@ -6,8 +6,9 @@
 
 默认行为：
 
-- `headless=False`，会显示浏览器窗口。
+- `headless=True`，默认无头启动；`PLAYWRIGHT_HEADLESS=false` 可显示浏览器窗口。
 - 支持 `PLAYWRIGHT_PROXY_URL`、`PLAYWRIGHT_PROXY_SERVER`、`PLAYWRIGHT_PROXY_USERNAME`、`PLAYWRIGHT_PROXY_PASSWORD`、`PLAYWRIGHT_PROXY_BYPASS`。
+- `src/autoteam/browser_runtime.py` (`acquire_browser_lease`): 同一进程内只允许一个 Chromium 流程；异常退出会关闭浏览器并释放租约。
 - 浏览器流程常写入 `screenshots/` 作为排查证据。
 
 API 模式下，Playwright 相关操作通过 `src/autoteam/api.py` (`_PlaywrightExecutor`) 放到专用线程执行，并由 `_playwright_lock` 限制并发。
@@ -38,7 +39,9 @@ API 模式下，Playwright 相关操作通过 `src/autoteam/api.py` (`_Playwrigh
 
 账号池自动 OAuth 入口是 `login_codex_via_browser`。它登录账号后打开 Codex OAuth URL，捕获 callback code，换 token 并保存 CPA 兼容 JSON。
 
-批量直注账号优先使用 `build_chatgpt_session_auth_bundle`。直注注册完成后，`src/autoteam/manager.py` (`_register_direct_once`) 会在关闭浏览器前读取 `https://chatgpt.com/api/auth/session` 的 `accessToken` 和 session cookie，保存为 CPA 兼容 JSON，避免再进入 Codex OAuth consent/callback 页面。
+批量直注账号优先使用 `build_chatgpt_session_auth_bundle`。直注注册完成并进入 Team 后，`src/autoteam/manager.py` (`_register_direct_once`) 会在关闭同一个浏览器前读取 `https://chatgpt.com/api/auth/session` 的 `accessToken` 和 session cookie，保存为 CPA 兼容 JSON，避免再进入 Codex OAuth consent/callback 页面。
+
+批量 CPA 路径要求拿到 session bundle。浏览器异常或 session 提取失败时，`src/autoteam/cpa_batch.py` (`_create_direct_account`) 会关闭浏览器并重试当前邮箱账号，不把“远端已入席但缺少 session 凭证”的账号当作成功。
 
 主号 OAuth 入口是 `SessionCodexAuthFlow`、`MainCodexLoginFlow`、`MainCodexSyncFlow`。主号认证文件保存为 `auths/codex-main-*.json`，不进入账号池。
 

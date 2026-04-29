@@ -40,6 +40,7 @@ from autoteam.accounts import (
     update_account,
 )
 from autoteam.admin_state import get_admin_email, get_admin_state_summary, get_chatgpt_account_id
+from autoteam.browser_runtime import acquire_browser_lease
 from autoteam.chatgpt_api import ChatGPTTeamAPI
 from autoteam.codex_auth import (
     MainCodexSyncFlow,
@@ -724,15 +725,14 @@ def _complete_registration(email, password, invite_link, mail_client):
     from autoteam.invite import register_with_invite
 
     logger.info("[注册] 开始注册 %s...", email)
-    with sync_playwright() as p:
-        browser = p.chromium.launch(**get_playwright_launch_options())
+    with acquire_browser_lease("manager._complete_registration", sync_playwright_factory=sync_playwright) as lease:
+        browser = lease.launch_chromium(**get_playwright_launch_options())
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
         )
         page = context.new_page()
         result, password = register_with_invite(page, invite_link, email, mail_client, password=password)
-        browser.close()
 
     if not result:
         logger.error("[注册] 注册 %s 失败", email)
@@ -1218,18 +1218,25 @@ def _complete_direct_about_you(page):
     return False
 
 
-def _register_direct_once(mail_client, email, password, mail_account_id=None, session_bundle_callback=None):
+def _register_direct_once(
+    mail_client,
+    email,
+    password,
+    mail_account_id=None,
+    session_bundle_callback=None,
+    require_session_bundle=False,
+):
     """执行一次直接注册，返回是否完成注册并进入 Team。"""
     from playwright.sync_api import sync_playwright
 
     logger.info("[直接注册] %s", email)
     signup_url = "https://chatgpt.com/auth/login"
 
-    with sync_playwright() as p:
+    with acquire_browser_lease("manager._register_direct_once", sync_playwright_factory=sync_playwright) as lease:
         launch_kwargs = get_playwright_launch_options()
         if sys.platform.startswith("win"):
             launch_kwargs["slow_mo"] = 100
-        browser = p.chromium.launch(**launch_kwargs)
+        browser = lease.launch_chromium(**launch_kwargs)
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
@@ -1497,10 +1504,11 @@ def _register_direct_once(mail_client, email, password, mail_account_id=None, se
                     )
                 except Exception as exc:
                     logger.warning("[直接注册] 注册成功，但提取 ChatGPT session 凭证失败: %s", exc)
+                    if require_session_bundle:
+                        raise RuntimeError(f"ChatGPT session 提取失败: {exc}") from exc
         else:
             logger.warning("[直接注册] 注册可能未完成，URL: %s", current_url)
 
-        browser.close()
         return success
 
 

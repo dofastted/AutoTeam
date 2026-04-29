@@ -30,6 +30,7 @@ cp .env.example .env
 | `SUB2API_PASSWORD` | Sub2API 管理员密码 | 启用 Sub2API 时必填 |
 | `SUB2API_GROUP` | Sub2API 分组名或分组 ID，多个用逗号分隔 | 启用 Sub2API 且希望自动加入分组时填写 |
 | `API_KEY` | Web 面板 / API 鉴权密钥 | 启动时必填（首次启动可自动生成） |
+| `PLAYWRIGHT_HEADLESS` | Playwright 是否无头启动（`true/false`） | 否（默认 `true`） |
 | `PLAYWRIGHT_PROXY_URL` | Playwright 浏览器代理 URL，如 `socks5://host:port` 或 `http://user:pass@host:port` | 否 |
 | `PLAYWRIGHT_PROXY_BYPASS` | Playwright 代理绕过列表，如 `localhost,127.0.0.1` | 否 |
 | `AUTO_CHECK_THRESHOLD` | 额度低于此百分比触发轮转 | 否（默认 `10`） |
@@ -55,7 +56,7 @@ cp .env.example .env
 - `API_KEY` 单独放在 **安全 / 访问控制**
 - CPA / Sub2API 开关和连接信息放在 **远端同步**
 - `.env` 原文编辑保留在 **源文件编辑**
-- 代理配置属于低频项，默认折叠
+- 浏览器无头和代理配置属于低频项，默认放在 **代理 / 高级**
 
 ## Sub2API 分组
 
@@ -79,9 +80,13 @@ SUB2API_GROUP=12,Team Pool
 - 同步主号 Codex 到 Sub2API 时也会自动带上这些分组
 - 更新时会保留账号原本手动绑定的其他分组，只替换 AutoTeam 自己管理的分组绑定
 
-## Playwright 代理
+## Playwright 浏览器运行
 
-AutoTeam 的浏览器流量（ChatGPT 登录、邀请接受、Codex OAuth 等）现在支持单独配置代理。
+AutoTeam 的浏览器流量（ChatGPT 登录、邀请接受、Codex OAuth 等）默认无头启动，并在同一进程内限制为一个 Chromium 流程。若需要观察窗口，可以临时设置：
+
+```dotenv
+PLAYWRIGHT_HEADLESS=false
+```
 
 推荐优先使用一个环境变量：
 

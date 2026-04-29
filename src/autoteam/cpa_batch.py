@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import queue
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -12,6 +14,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 from autoteam.accounts import STATUS_ACTIVE, STATUS_EXHAUSTED, add_account, find_account, load_accounts, update_account
+from autoteam.browser_runtime import acquire_browser_lease
 from autoteam.chatgpt_api import ChatGPTTeamAPI
 from autoteam.codex_auth import (
     check_codex_quota,
@@ -72,6 +75,105 @@ class CpaBatchHooks:
 
     def pause(self) -> None:
         update_flow_run(self.run_id, status="paused", finished_at=time.time())
+
+
+class _CpaUploadWorker:
+    def __init__(self, hooks: CpaBatchHooks):
+        self.hooks = hooks
+        self.jobs: queue.Queue[dict | None] = queue.Queue()
+        self.results: queue.Queue[dict] = queue.Queue()
+        self.thread = threading.Thread(target=self._run, name=f"cpa-upload-{hooks.run_id}", daemon=True)
+        self._started = False
+        self._finished = False
+
+    def start(self) -> None:
+        if not self._started:
+            self.thread.start()
+            self._started = True
+
+    def enqueue(self, email: str, *, batch_index: int | None = None) -> None:
+        self.jobs.put({"email": _normalized_email(email), "batch_index": batch_index})
+
+    def finish(self) -> None:
+        if self._started and not self._finished:
+            self.jobs.put(None)
+            self._finished = True
+
+    def join(self, timeout: float | None = None) -> None:
+        if self._started:
+            self.thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        account_mail_cache: dict[str, object] = {}
+        while True:
+            job = self.jobs.get()
+            try:
+                if job is None:
+                    return
+                email = str(job.get("email") or "")
+                batch_index = job.get("batch_index")
+                try:
+                    update_account(
+                        email,
+                        flow_status="running",
+                        flow_stage="cpa_auth",
+                        flow_error_level="info",
+                        flow_error_message="",
+                    )
+                    self.hooks.account_event(
+                        email,
+                        batch_index=batch_index,
+                        stage="cpa_auth",
+                        message="开始 Codex 认证、额度检查和 CPA 上传",
+                        status="running",
+                    )
+                    result = _verify_and_upload_cpa(
+                        email,
+                        account_mail_cache,
+                        hooks=self.hooks,
+                        batch_index=batch_index,
+                    )
+                    update_account(
+                        email,
+                        flow_status="success",
+                        flow_stage="completed",
+                        flow_error_level="info",
+                        flow_error_message="",
+                        plan_type=result["plan_type"],
+                    )
+                    self.hooks.account_event(
+                        email,
+                        batch_index=batch_index,
+                        stage="completed",
+                        message="CPA JSON 已可用",
+                        status="success",
+                        plan_type=result["plan_type"],
+                        auth_file=result["auth_file"],
+                        auth_name=result["auth_name"],
+                        cpa_uploaded=True,
+                        finished_at=time.time(),
+                    )
+                    self.results.put({"ok": True, "email": email, "result": result})
+                except Exception as exc:
+                    update_account(
+                        email,
+                        flow_status="failed",
+                        flow_stage="cpa_auth",
+                        flow_error_level="error",
+                        flow_error_message=str(exc),
+                    )
+                    self.hooks.account_event(
+                        email,
+                        batch_index=batch_index,
+                        stage="cpa_auth",
+                        message=str(exc),
+                        error_level="error",
+                        status="failed",
+                        finished_at=time.time(),
+                    )
+                    self.results.put({"ok": False, "email": email, "error": str(exc)})
+            finally:
+                self.jobs.task_done()
 
 
 def _normalized_email(value: str | None) -> str:
@@ -191,20 +293,72 @@ def _create_direct_account(mail_client, hooks: CpaBatchHooks | None = None, batc
                 status="running",
             )
         logger.info("[直接注册] 开始第 %d/3 次注册尝试: %s", attempt + 1, email)
-        success = _register_direct_once(
-            mail_client,
-            email,
-            password,
-            mail_account_id=account_id,
-            session_bundle_callback=capture_session_bundle,
-        )
-        if success:
+        session_bundle.clear()
+        try:
+            try:
+                success = _register_direct_once(
+                    mail_client,
+                    email,
+                    password,
+                    mail_account_id=account_id,
+                    session_bundle_callback=capture_session_bundle,
+                    require_session_bundle=True,
+                )
+            except TypeError as exc:
+                if "require_session_bundle" not in str(exc):
+                    raise
+                success = _register_direct_once(
+                    mail_client,
+                    email,
+                    password,
+                    mail_account_id=account_id,
+                    session_bundle_callback=capture_session_bundle,
+                )
+        except Exception as exc:
+            success = False
+            message = str(exc)
+            if hooks:
+                hooks.account_event(
+                    email,
+                    batch_index=batch_index,
+                    stage="browser_restart",
+                    message=f"浏览器流程异常，已关闭并准备重试当前账号: {message}",
+                    error_level="warn",
+                    status="running",
+                )
+            logger.warning("[直接注册] 浏览器流程异常，重试当前账号 %s: %s", email, exc)
+            session_failed = message.startswith("ChatGPT session 提取失败")
+        else:
+            session_failed = False
+        if success and session_bundle:
             break
+        if success:
+            success = False
+            if hooks:
+                hooks.account_event(
+                    email,
+                    batch_index=batch_index,
+                    stage="session_auth",
+                    message="注册完成但未获取 ChatGPT session CPA 凭证，重试当前账号",
+                    error_level="warn",
+                    status="running",
+                )
 
-        if _is_email_in_team(email):
+        if not session_failed and _is_email_in_team(email):
             logger.info("[直接注册] 远端确认账号已在 Team 中，视为注册成功: %s", email)
             success = True
-            break
+            if session_bundle:
+                break
+            success = False
+            if hooks:
+                hooks.account_event(
+                    email,
+                    batch_index=batch_index,
+                    stage="session_auth",
+                    message="远端已入席但缺少 session CPA 凭证，继续重试当前账号",
+                    error_level="warn",
+                    status="running",
+                )
 
         if attempt < 2:
             if hooks:
@@ -326,15 +480,14 @@ def _create_invited_account(
     if chatgpt.browser:
         chatgpt.stop()
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(**get_playwright_launch_options())
+    with acquire_browser_lease("cpa_batch._create_invited_account", sync_playwright_factory=sync_playwright) as lease:
+        browser = lease.launch_chromium(**get_playwright_launch_options())
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
         )
         page = context.new_page()
         success, final_password = register_with_invite(page, invite_link, email, mail_client, password=password)
-        browser.close()
 
     if not success:
         raise AccountFlowError(email, "邀请注册未完成")
@@ -511,19 +664,49 @@ def run_cpa_batch(
 
     chatgpt = None
     mail_client = None
-    account_mail_cache: dict[str, object] = {}
     success_count = 0
     attempts = 0
+    pending_cpa = 0
+    cpa_worker = _CpaUploadWorker(hooks)
+
+    def consume_cpa_result(*, block: bool = False, timeout: float = 1) -> bool:
+        nonlocal pending_cpa, success_count
+        try:
+            result = cpa_worker.results.get(timeout=timeout if block else 0)
+        except queue.Empty:
+            return False
+
+        pending_cpa = max(0, pending_cpa - 1)
+        email = result.get("email", "")
+        if result.get("ok"):
+            success_count += 1
+            payload = result.get("result") or {}
+            hooks.run_update(success_count=success_count)
+            logger.info("[CPA批量] 成功 %d/%d: %s", success_count, target, email)
+            if payload:
+                logger.debug("[CPA批量] CPA 文件已可用: %s", payload.get("auth_name"))
+        else:
+            logger.warning("[CPA批量] %s 认证失败: %s", email, result.get("error"))
+        return True
+
+    def drain_cpa_results() -> None:
+        while consume_cpa_result(block=False):
+            pass
 
     try:
+        cpa_worker.start()
         mail_client = get_mail_client()
         mail_client.login()
         if join_mode == JOIN_MODE_INVITE:
             chatgpt = ChatGPTTeamAPI()
             chatgpt.start()
 
-        while success_count < target and attempts < max_attempts:
+        while success_count < target and (attempts < max_attempts or pending_cpa > 0):
+            drain_cpa_results()
             if hooks.pause_requested():
+                cpa_worker.finish()
+                cpa_worker.join()
+                drain_cpa_results()
                 hooks.pause()
                 return {
                     "run_id": run_id,
@@ -534,6 +717,16 @@ def run_cpa_batch(
                     "attempted": attempts,
                     "succeeded": success_count,
                 }
+
+            if success_count >= target:
+                break
+
+            if pending_cpa and (attempts >= max_attempts or success_count + pending_cpa >= target):
+                consume_cpa_result(block=True)
+                continue
+
+            if attempts >= max_attempts:
+                continue
 
             attempts += 1
             batch_index = ((attempts - 1) // batch_size) + 1
@@ -608,6 +801,9 @@ def run_cpa_batch(
                 continue
 
             if hooks.pause_requested():
+                cpa_worker.finish()
+                cpa_worker.join()
+                drain_cpa_results()
                 hooks.pause()
                 return {
                     "run_id": run_id,
@@ -619,63 +815,16 @@ def run_cpa_batch(
                     "succeeded": success_count,
                 }
 
-            try:
-                update_account(
-                    email,
-                    flow_status="running",
-                    flow_stage="cpa_auth",
-                    flow_error_level="info",
-                    flow_error_message="",
-                )
-                hooks.account_event(
-                    email,
-                    batch_index=batch_index,
-                    stage="cpa_auth",
-                    message="开始 Codex 认证、额度检查和 CPA 上传",
-                    status="running",
-                )
-                result = _verify_and_upload_cpa(email, account_mail_cache, hooks=hooks, batch_index=batch_index)
-                success_count += 1
-                update_account(
-                    email,
-                    flow_status="success",
-                    flow_stage="completed",
-                    flow_error_level="info",
-                    flow_error_message="",
-                    plan_type=result["plan_type"],
-                )
-                hooks.account_event(
-                    email,
-                    batch_index=batch_index,
-                    stage="completed",
-                    message="CPA JSON 已可用",
-                    status="success",
-                    plan_type=result["plan_type"],
-                    auth_file=result["auth_file"],
-                    auth_name=result["auth_name"],
-                    cpa_uploaded=True,
-                    finished_at=time.time(),
-                )
-                hooks.run_update(success_count=success_count)
-                logger.info("[CPA批量] 成功 %d/%d: %s", success_count, target, email)
-            except Exception as exc:
-                update_account(
-                    email,
-                    flow_status="failed",
-                    flow_stage="cpa_auth",
-                    flow_error_level="error",
-                    flow_error_message=str(exc),
-                )
-                hooks.account_event(
-                    email,
-                    batch_index=batch_index,
-                    stage="cpa_auth",
-                    message=str(exc),
-                    error_level="error",
-                    status="failed",
-                    finished_at=time.time(),
-                )
-                logger.warning("[CPA批量] %s 认证失败: %s", email, exc)
+            hooks.account_event(
+                email,
+                batch_index=batch_index,
+                stage="cpa_queued",
+                message="已提交 CPA JSON 检查和上传，继续处理后续账号",
+                status="running",
+            )
+            cpa_worker.enqueue(email, batch_index=batch_index)
+            pending_cpa += 1
+            consume_cpa_result(block=True, timeout=0.05)
 
         status = "completed" if success_count >= target else "partial"
         if status == "partial":
@@ -702,5 +851,8 @@ def run_cpa_batch(
         logger.error("[CPA批量] 任务失败: %s", exc)
         raise
     finally:
+        cpa_worker.finish()
+        cpa_worker.join()
+        drain_cpa_results()
         if chatgpt and chatgpt.browser:
             chatgpt.stop()

@@ -17,6 +17,7 @@ from autoteam.admin_state import (
     get_chatgpt_workspace_name,
     update_admin_state,
 )
+from autoteam.browser_runtime import acquire_browser_lease
 from autoteam.config import get_playwright_launch_options
 from autoteam.textio import read_text
 
@@ -128,6 +129,7 @@ class ChatGPTTeamAPI:
         self.browser = None
         self.context = None
         self.page = None
+        self.browser_lease = None
         self.access_token = None
         self.session_token = None
         self.account_id = get_chatgpt_account_id()
@@ -161,8 +163,13 @@ class ChatGPTTeamAPI:
             self.stop()
 
         try:
-            self.playwright = sync_playwright().start()
-            self.browser = self.playwright.chromium.launch(**get_playwright_launch_options())
+            self.browser_lease = acquire_browser_lease(
+                "ChatGPTTeamAPI",
+                sync_playwright_factory=sync_playwright,
+            )
+            lease = self.browser_lease.__enter__()
+            self.playwright = lease.start_playwright()
+            self.browser = lease.launch_chromium(**get_playwright_launch_options())
             self.context = self.browser.new_context(
                 viewport={"width": 1280, "height": 800},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
@@ -1372,7 +1379,9 @@ class ChatGPTTeamAPI:
         except Exception:
             pass
         try:
-            if self.playwright:
+            if self.browser_lease:
+                self.browser_lease.__exit__(None, None, None)
+            elif self.playwright:
                 self.playwright.stop()
         except Exception:
             pass
@@ -1380,3 +1389,4 @@ class ChatGPTTeamAPI:
         self.context = None
         self.page = None
         self.playwright = None
+        self.browser_lease = None

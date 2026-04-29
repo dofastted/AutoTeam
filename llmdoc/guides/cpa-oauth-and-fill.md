@@ -47,8 +47,9 @@
 
 - `src/autoteam/manager.py` (`_register_direct_once`): 注册完成后在关闭浏览器前回传 session bundle。
 - `src/autoteam/codex_auth.py` (`build_chatgpt_session_auth_bundle`): 读取 `/api/auth/session` 的 `accessToken`、session cookie、账号 ID 和 `plan_type`。
-- `src/autoteam/cpa_batch.py` (`_create_direct_account`): 将 session bundle 保存为 `auths/codex-{email}-{plan_type}-{hash}.json`。
+- `src/autoteam/cpa_batch.py` (`_create_direct_account`): 将 session bundle 保存为 `auths/codex-{email}-{plan_type}-{hash}.json`。浏览器异常或 session 提取失败时重试当前邮箱账号。
 - `src/autoteam/cpa_batch.py` (`_verify_and_upload_cpa`): 批量流程不再回退到浏览器 Codex OAuth；没有 session 凭证时直接失败并记录原因。
+- `src/autoteam/cpa_batch.py` (`_CpaUploadWorker`): session 凭证保存后，CPA 额度检查和上传在内部 worker 线程执行；主线程可以继续注册后续账号。
 
 成功条件：
 
@@ -63,7 +64,7 @@
 暂停规则：
 
 - 暂停请求由 `/api/cpa-batch/runs/{run_id}/pause` 写入 `flow_runs.json`。
-- 当前浏览器阶段不强制中断。
+- 当前浏览器阶段不强制中断；已提交的 CPA worker 会完成当前账号检查和上传。
 - 阶段结束后不再创建下一个账号，运行记录标记为 `paused`。
 - 服务启动时会把上次遗留的 `running` 批量记录标记为失败，并把仍在运行的账号记录写成严重错误。
 
