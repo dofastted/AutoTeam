@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TARGET = 100
 DEFAULT_BATCH_SIZE = 20
 MAX_ATTEMPT_MULTIPLIER = 2
+MAX_ACCOUNT_FAILURES = 3
 JOIN_MODE_DIRECT = "direct"
 JOIN_MODE_INVITE = "invite"
 VALID_JOIN_MODES = {JOIN_MODE_DIRECT, JOIN_MODE_INVITE}
@@ -85,6 +86,7 @@ class _CpaUploadWorker:
         self.thread = threading.Thread(target=self._run, name=f"cpa-upload-{hooks.run_id}", daemon=True)
         self._started = False
         self._finished = False
+        self.failures: dict[str, int] = {}
 
     def start(self) -> None:
         if not self._started:
@@ -153,14 +155,40 @@ class _CpaUploadWorker:
                         cpa_uploaded=True,
                         finished_at=time.time(),
                     )
+                    self.failures.pop(email, None)
                     self.results.put({"ok": True, "email": email, "result": result})
                 except Exception as exc:
+                    failure_count = self.failures.get(email, 0) + 1
+                    self.failures[email] = failure_count
+                    if failure_count < MAX_ACCOUNT_FAILURES:
+                        message = f"CPA 认证失败第 {failure_count}/{MAX_ACCOUNT_FAILURES} 次，继续重试当前账号: {exc}"
+                        update_account(
+                            email,
+                            flow_status="running",
+                            flow_stage="cpa_retry",
+                            flow_error_level="warn",
+                            flow_error_message=message,
+                            flow_failure_count=failure_count,
+                        )
+                        self.hooks.account_event(
+                            email,
+                            batch_index=batch_index,
+                            stage="cpa_retry",
+                            message=message,
+                            error_level="warn",
+                            status="running",
+                            failure_count=failure_count,
+                        )
+                        self.jobs.put(job)
+                        continue
+
                     update_account(
                         email,
                         flow_status="failed",
                         flow_stage="cpa_auth",
                         flow_error_level="error",
                         flow_error_message=str(exc),
+                        flow_failure_count=failure_count,
                     )
                     self.hooks.account_event(
                         email,
@@ -170,8 +198,9 @@ class _CpaUploadWorker:
                         error_level="error",
                         status="failed",
                         finished_at=time.time(),
+                        failure_count=failure_count,
                     )
-                    self.results.put({"ok": False, "email": email, "error": str(exc)})
+                    self.results.put({"ok": False, "email": email, "error": str(exc), "failure_count": failure_count})
             finally:
                 self.jobs.task_done()
 

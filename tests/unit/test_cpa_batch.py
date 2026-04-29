@@ -79,6 +79,40 @@ def test_run_cpa_batch_continues_after_account_error_until_target_is_met(tmp_pat
     assert failed[0]["error_level"] == "error"
 
 
+def test_run_cpa_batch_retries_cpa_failure_for_same_account_before_skipping(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    attempts = {"count": 0}
+
+    monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
+    monkeypatch.setattr(cpa_batch, "update_account", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cpa_batch, "_create_direct_account", lambda _mail, **_kwargs: "retry@example.com")
+
+    def fake_verify(email, _cache, **_kwargs):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise RuntimeError("temporary cpa error")
+        return {
+            "email": email,
+            "plan_type": "team",
+            "auth_file": f"/tmp/codex-{email}-team.json",
+            "auth_name": f"codex-{email}-team.json",
+        }
+
+    monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", fake_verify)
+
+    result = cpa_batch.run_cpa_batch("run-retry-cpa", target=1, batch_size=1, join_mode="direct")
+    run = flow_runs.get_flow_run("run-retry-cpa")
+    account = run["accounts"][0]
+
+    assert result["status"] == "completed"
+    assert result["attempted"] == 1
+    assert result["succeeded"] == 1
+    assert attempts["count"] == 3
+    assert account["status"] == "success"
+    assert [event["stage"] for event in account["events"]].count("cpa_retry") == 2
+    assert account["events"][-1]["stage"] == "completed"
+
+
 def test_flow_runs_keep_recent_records_and_account_events(tmp_path, monkeypatch):
     _use_tmp_flow_file(tmp_path, monkeypatch)
 

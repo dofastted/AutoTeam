@@ -80,6 +80,7 @@ SUB2API_GROUP=12,Team Pool
 - 同步主号 Codex 到 Sub2API 时也会自动带上这些分组
 - 找不到分组时，账号仍会推送到 Sub2API，并在返回结果的 `warnings` 中提示已跳过分组绑定
 - 更新时会保留账号原本手动绑定的其他分组，只替换 AutoTeam 自己管理的分组绑定
+- 账号 payload 按 `C:\Users\Administrator\Downloads\sub2api示列.json` 的 OpenAI OAuth 账号结构写入，包含默认模型映射、隐私模式和基础调度字段
 
 ## Playwright 浏览器运行
 

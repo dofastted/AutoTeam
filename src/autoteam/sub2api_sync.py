@@ -36,6 +36,15 @@ _DEFAULT_CONCURRENCY = 10
 _DEFAULT_PRIORITY = 1
 _DEFAULT_RATE_MULTIPLIER = 1
 _REMOTE_AUTH_FILE_PREFIX = "sub2api-"
+_DEFAULT_MODEL_MAPPING = {
+    "gpt-5.3-codex": "gpt-5.3-codex",
+    "gpt-5.4": "gpt-5.4",
+    "gpt-5.4-mini": "gpt-5.4-mini",
+    "gpt-5.4-pro": "gpt-5.4-pro",
+    "gpt-5.5": "gpt-5.5",
+}
+_DEFAULT_PRIVACY_MODE = "training_off"
+_DEFAULT_WEBSOCKETS_V2_MODE = "off"
 
 
 def _excerpt(text: str | bytes | None, limit: int = 200) -> str:
@@ -484,7 +493,7 @@ def _build_credentials(auth_data: dict) -> dict:
     if organization_id:
         credentials["organization_id"] = organization_id
 
-    plan_type = auth_claims.get("chatgpt_plan_type") or ""
+    plan_type = auth_data.get("plan_type") or auth_claims.get("chatgpt_plan_type") or ""
     if plan_type:
         credentials["plan_type"] = plan_type
 
@@ -494,7 +503,9 @@ def _build_credentials(auth_data: dict) -> dict:
 
     model_mapping = auth_data.get("model_mapping")
     if isinstance(model_mapping, dict) and model_mapping:
-        credentials["model_mapping"] = model_mapping
+        credentials["model_mapping"] = {**_DEFAULT_MODEL_MAPPING, **model_mapping}
+    else:
+        credentials["model_mapping"] = dict(_DEFAULT_MODEL_MAPPING)
 
     return credentials
 
@@ -508,6 +519,9 @@ def _build_extra(email: str, auth_file_name: str, *, kind: str, quota_info: dict
         _EXTRA_SOURCE: "autoteam",
         _EXTRA_LAST_SYNC_AT: int(time.time()),
         "email": email.lower(),
+        "openai_oauth_responses_websockets_v2_enabled": False,
+        "openai_oauth_responses_websockets_v2_mode": _DEFAULT_WEBSOCKETS_V2_MODE,
+        "privacy_mode": _DEFAULT_PRIVACY_MODE,
     }
     extra.update(_quota_extra_fields(quota_info))
     return extra
@@ -563,8 +577,14 @@ def _merge_group_ids(account: dict, desired_group_ids: list[int] | None) -> list
     return sorted(merged)
 
 
-def _create_account(
-    token: str, *, name: str, credentials: dict, extra: dict, label: str, group_ids: list[int] | None = None
+def _build_account_payload(
+    *,
+    name: str,
+    credentials: dict,
+    extra: dict,
+    account: dict | None = None,
+    status: str | None = None,
+    group_ids: list[int] | None = None,
 ) -> dict:
     payload = {
         "name": name,
@@ -576,8 +596,21 @@ def _create_account(
         "priority": _DEFAULT_PRIORITY,
         "rate_multiplier": _DEFAULT_RATE_MULTIPLIER,
         "auto_pause_on_expired": True,
-        "group_ids": list(group_ids or []),
     }
+    if status:
+        payload["status"] = status
+    if group_ids is not None:
+        payload["group_ids"] = list(group_ids)
+    proxy_key = str((account or {}).get("proxy_key") or "").strip()
+    if proxy_key:
+        payload["proxy_key"] = proxy_key
+    return payload
+
+
+def _create_account(
+    token: str, *, name: str, credentials: dict, extra: dict, label: str, group_ids: list[int] | None = None
+) -> dict:
+    payload = _build_account_payload(name=name, credentials=credentials, extra=extra, group_ids=group_ids or [])
     return _request(
         "POST",
         "/admin/accounts",
@@ -597,13 +630,14 @@ def _update_account(
     status: str | None = None,
     group_ids: list[int] | None = None,
 ):
-    payload = {"credentials": credentials, "extra": extra}
-    if name:
-        payload["name"] = name
-    if status:
-        payload["status"] = status
-    if group_ids is not None:
-        payload["group_ids"] = list(group_ids)
+    payload = _build_account_payload(
+        name=name or _managed_email(account) or str(account.get("name") or account.get("id") or ""),
+        credentials=credentials,
+        extra=extra,
+        account=account,
+        status=status,
+        group_ids=group_ids,
+    )
     return _request(
         "PUT",
         f"/admin/accounts/{account['id']}",
@@ -710,15 +744,12 @@ def sync_to_sub2api():
         existing = any_existing_by_email.get(email)
 
         if existing:
-            merged_credentials = dict(existing.get("credentials") or {})
-            merged_credentials.update(desired_credentials)
-            merged_extra = dict(existing.get("extra") or {})
-            merged_extra.update(desired_extra)
             _update_account(
                 token,
                 existing,
-                credentials=merged_credentials,
-                extra=merged_extra,
+                credentials=desired_credentials,
+                extra=desired_extra,
+                name=target["name"],
                 status="active" if existing.get("status") != "active" else None,
                 group_ids=_merge_group_ids(existing, group_ids),
             )
@@ -783,15 +814,11 @@ def sync_main_codex_to_sub2api(filepath):
 
     current = existing_by_email.get(email) if email else None
     if current:
-        merged_credentials = dict(current.get("credentials") or {})
-        merged_credentials.update(desired_credentials)
-        merged_extra = dict(current.get("extra") or {})
-        merged_extra.update(desired_extra)
         _update_account(
             token,
             current,
-            credentials=merged_credentials,
-            extra=merged_extra,
+            credentials=desired_credentials,
+            extra=desired_extra,
             name=name,
             status="active",
             group_ids=_merge_group_ids(current, group_ids),

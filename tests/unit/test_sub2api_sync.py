@@ -50,7 +50,13 @@ def test_build_credentials_matches_openai_oauth_shape():
         "organization_id": "org-1",
         "plan_type": "team",
         "subscription_expires_at": "2026-05-05T15:55:38+00:00",
-        "model_mapping": {"gpt-5.4": "gpt-5.4"},
+        "model_mapping": {
+            "gpt-5.3-codex": "gpt-5.3-codex",
+            "gpt-5.4": "gpt-5.4",
+            "gpt-5.4-mini": "gpt-5.4-mini",
+            "gpt-5.4-pro": "gpt-5.4-pro",
+            "gpt-5.5": "gpt-5.5",
+        },
     }
 
 
@@ -75,6 +81,9 @@ def test_build_extra_includes_codex_usage_snapshot(monkeypatch):
     assert extra["autoteam_auth_file"] == "sub2api-codex-tmp@example.com-team-123.json"
     assert extra["autoteam_source"] == "autoteam"
     assert extra["email"] == "tmp@example.com"
+    assert extra["openai_oauth_responses_websockets_v2_enabled"] is False
+    assert extra["openai_oauth_responses_websockets_v2_mode"] == "off"
+    assert extra["privacy_mode"] == "training_off"
     assert extra["codex_5h_used_percent"] == 42
     assert extra["codex_5h_reset_after_seconds"] == 3600
     assert extra["codex_5h_reset_at"] == sub2api_sync._to_local_iso(1_700_003_600)
@@ -145,6 +154,45 @@ def test_remote_auth_file_candidates_include_legacy_and_prefixed_names():
     }
 
 
+def test_update_account_overwrites_sub2api_account_shape_and_preserves_proxy_key(monkeypatch):
+    captured = {}
+
+    def fake_request(method, path, **kwargs):
+        captured["method"] = method
+        captured["path"] = path
+        captured["json"] = kwargs["json"]
+        return {"id": 42}
+
+    monkeypatch.setattr(sub2api_sync, "_request", fake_request)
+
+    sub2api_sync._update_account(
+        "token",
+        {"id": 42, "name": "old", "proxy_key": "proxy-1"},
+        name="user@example.com",
+        credentials={"access_token": "new"},
+        extra={"email": "user@example.com"},
+        status="active",
+        group_ids=[7],
+    )
+
+    assert captured["method"] == "PUT"
+    assert captured["path"] == "/admin/accounts/42"
+    assert captured["json"] == {
+        "name": "user@example.com",
+        "platform": "openai",
+        "type": "oauth",
+        "credentials": {"access_token": "new"},
+        "extra": {"email": "user@example.com"},
+        "concurrency": 10,
+        "priority": 1,
+        "rate_multiplier": 1,
+        "auto_pause_on_expired": True,
+        "status": "active",
+        "group_ids": [7],
+        "proxy_key": "proxy-1",
+    }
+
+
 def test_sync_to_sub2api_updates_existing_same_email_oauth_account(tmp_path, monkeypatch):
     auth_file = tmp_path / "codex-user@example.com-team.json"
     auth_file.write_text(
@@ -204,6 +252,9 @@ def test_sync_to_sub2api_updates_existing_same_email_oauth_account(tmp_path, mon
     assert created == []
     assert deleted == []
     assert updated[0]["account"]["id"] == 42
+    assert updated[0]["name"] == "user@example.com"
     assert updated[0]["credentials"]["access_token"] == "new-access"
+    assert updated[0]["credentials"]["model_mapping"]["gpt-5.5"] == "gpt-5.5"
     assert updated[0]["extra"]["autoteam_email"] == "user@example.com"
+    assert updated[0]["extra"]["privacy_mode"] == "training_off"
     assert updated[0]["group_ids"] == [3]
