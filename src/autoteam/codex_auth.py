@@ -24,7 +24,7 @@ from autoteam.admin_state import (
 from autoteam.auth_storage import AUTH_DIR, ensure_auth_dir, ensure_auth_file_permissions
 from autoteam.browser_runtime import acquire_browser_lease
 from autoteam.config import get_playwright_launch_options
-from autoteam.textio import write_text
+from autoteam.textio import read_text, write_text
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +142,46 @@ def _write_auth_file(filepath, bundle):
     ensure_auth_file_permissions(filepath)
     logger.info("[Codex] 认证文件已保存: %s", filepath)
     return str(filepath)
+
+
+def load_auth_file_data(auth_path: str | Path) -> dict:
+    """读取认证文件 JSON，失败时返回空 dict。"""
+    try:
+        data = json.loads(read_text(Path(auth_path)))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def is_oauth_rt_auth_data(auth_data: dict | None) -> bool:
+    """判断认证数据是否是可上传的 OAuth RT 凭证。"""
+    if not isinstance(auth_data, dict) or not auth_data:
+        return False
+    if auth_data.get("credential_source") == "chatgpt_session":
+        return False
+    return bool(auth_data.get("refresh_token"))
+
+
+def is_uploadable_oauth_rt_file(auth_path: str | Path) -> bool:
+    """判断本地认证文件是否是可上传的 OAuth RT 文件。"""
+    path = Path(str(auth_path or "").strip())
+    if not path.exists() or not path.is_file():
+        return False
+    return is_oauth_rt_auth_data(load_auth_file_data(path))
+
+
+def select_oauth_rt_auth_file(account: dict) -> str:
+    """
+    从账号记录里选择可上传的 OAuth RT 文件。
+
+    `rt_auth_file` 是主字段。`auth_file` 只作为迁移期兼容候选，并且必须通过
+    文件内容校验；`session_auth_file` 不参与候选。
+    """
+    for key in ("rt_auth_file", "auth_file"):
+        auth_path = str((account or {}).get(key) or "").strip()
+        if auth_path and is_uploadable_oauth_rt_file(auth_path):
+            return auth_path
+    return ""
 
 
 def _extract_session_token_from_cookies(cookies):
