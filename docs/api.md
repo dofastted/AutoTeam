@@ -40,14 +40,15 @@ Authorization: Bearer <API_KEY>
 | POST | `/api/cpa-batch/runs/{run_id}/resume` | 从已有批量 CPA JSON 记录继续执行 |
 | GET | `/api/config/auto-check` | 巡检配置 |
 | PUT | `/api/config/auto-check` | 修改巡检配置（运行时生效） |
-| POST | `/api/sync` | 同步 active 认证文件到已启用远端 |
-| POST | `/api/sync/cpa` | 只同步 active 认证文件到 CPA |
-| POST | `/api/sync/sub2api` | 只同步 active 认证文件到 Sub2API |
-| POST | `/api/sync/from-cpa` | 从 CPA 反向同步认证文件到本地（含去重） |
+| POST | `/api/sync` | 上传 active 账号的本地 OAuth RT 文件到已启用远端 |
+| POST | `/api/sync/cpa` | 只上传 active 账号的本地 OAuth RT 文件到 CPA |
+| POST | `/api/sync/sub2api` | 只上传 active 账号的本地 OAuth RT 文件到 Sub2API |
+| POST | `/api/sync/from-cpa` | 从 CPA 反向导入认证文件到本地，用于恢复和去重 |
 | POST | `/api/sync/accounts` | 从 Team / auths 对账到本地账号池 |
 | POST | `/api/sync/main-codex/saved` | 只推送本地已有主号 Codex 凭证 |
 | POST | `/api/accounts/{email}/cpa-auth` | 为单个 active 席位账号完成 Codex 认证并上传到 CPA |
 | POST | `/api/accounts/login` | 对单个账号执行本地 Codex OAuth 登录验证，保存 OAuth RT 文件，不自动同步远端 |
+| POST | `/api/accounts/migrate-auth-metadata` | dry-run 或写入旧账号 `rt_auth_file` 元数据，只迁移有效 OAuth RT 文件 |
 | POST | `/api/accounts/{email}/kick` | 将 active 账号移出 Team |
 | POST | `/api/accounts/check-deactivated-mail` | 检查邮箱是否有 `deactivated` 邮件，命中后标记失效并释放席位 |
 | DELETE | `/api/accounts/{email}` | 删除本地管理账号及其资源 |
@@ -91,6 +92,52 @@ Authorization: Bearer <API_KEY>
 - `release_team = true` 时，命中且仍在 Team 中的账号会尝试移出 Team。
 - `dispose_mailbox = true` 时，会尝试调用对应邮箱 provider 的删除接口。
 - 命中后本地账号会写入 `status=unavailable`、`sync_disabled=true`、`unavailable_reason=account_deactivated`。
+
+### 单账号 OAuth 登录验证
+
+`POST /api/accounts/login`
+
+请求体：
+
+```json
+{
+  "email": "user@example.com",
+  "force": false
+}
+```
+
+- 默认拒绝已售出账号和 `sync_disabled=true` 的账号。
+- `force = true` 仅用于排查已标记失效账号，会重新执行本地 Codex OAuth 登录验证。
+- 登录成功后写入 `rt_auth_file`，兼容保留 `auth_file`，并保留已有 `session_auth_file`。
+- 该接口不上传 CPA / Sub2API，也不释放 Team 席位。
+- OAuth 页面返回 `account_deactivated` 时，会把本地账号写为 `status=unavailable`、`sync_disabled=true`、`unavailable_reason=account_deactivated`。
+
+### 单账号 CPA 认证
+
+`POST /api/accounts/{email}/cpa-auth`
+
+- 只允许账号池里的 active 席位账号。
+- 本地已有 OAuth RT 文件时直接上传 CPA。
+- 只有 session 备份或缺少 OAuth RT 文件时，才执行 Codex OAuth 生成 RT 文件。
+- `session_auth_file` 不会被上传到 CPA。
+- 成功后写入 `rt_auth_file`、`cpa_uploaded_at`，并保留已有 `session_auth_file`。
+
+### 账号认证元数据迁移
+
+`POST /api/accounts/migrate-auth-metadata`
+
+请求体：
+
+```json
+{
+  "apply": false
+}
+```
+
+- `apply = false` 时只返回报告。
+- `apply = true` 时，只把有效旧 OAuth `auth_file` 补写到 `rt_auth_file`。
+- `credential_source=chatgpt_session` 或缺少 `refresh_token` 的文件不会被迁移。
+- 该接口只改 `accounts.json` 元数据，不修改 token 文件内容。
 
 ## 后台任务接口
 

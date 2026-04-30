@@ -160,8 +160,8 @@ API 模式下，Playwright 操作被放到 `src/autoteam/api.py` (`_PlaywrightEx
 - 捕获 request / response / 当前 URL 中的 OAuth callback。
 - 用 authorization code 调 OpenAI token endpoint。
 - 从 `id_token` 解析邮箱、ChatGPT account ID、plan type。
-- 保存 CPA 兼容 auth 文件。
-- 同一邮箱只保留一份 `codex-{email}-{plan_type}-{hash}.json`。
+- 保存 OAuth RT auth 文件。
+- 同一邮箱只保留一份 `codex-{email}-{plan_type}-{hash}-oauth.json`。
 - 主号保存为 `codex-main-{account_id}.json`，不进入账号池。
 - 查询 Codex 额度 `/backend-api/wham/usage`。
 - 用 refresh token 刷新 access token。

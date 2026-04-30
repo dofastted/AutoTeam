@@ -8,9 +8,9 @@
 - `SYNC_TARGET_SUB2API` 控制 Sub2API。
 - 未显式设置开关时，存在完整连接配置会被视为启用。
 
-## 推荐同步模型
+## 当前同步模型
 
-前台账号操作不应等待 CPA / Sub2API 完整同步完成。新增账号、恢复账号、上传单个认证文件后，应先把本地账号状态和 `auth_file` 保存好，再创建后台同步任务。
+前台账号操作不应等待 CPA / Sub2API 完整同步完成。新增账号、恢复账号、上传单个认证文件后，应先把本地账号状态和 `rt_auth_file` 保存好，再创建后台同步任务。
 
 推荐把同步分成两类任务：
 
@@ -20,11 +20,12 @@
 后台同步只按差异上传：
 
 - 先读取本地 `accounts.json` 中未禁用同步的 `active` 账号。
-- 只选择存在 `auth_file` 且本地文件可读的账号。
+- 只选择存在可上传 OAuth RT 文件的账号。主字段是 `rt_auth_file`；旧 `auth_file` 只在内容确认含 `refresh_token` 且不是 ChatGPT session 时作为兼容候选。
 - 读取 CPA / Sub2API 远端列表，以邮箱和文件名匹配。
 - 远端已有同邮箱或同名文件时跳过，远端缺失时上传或更新。
 - 默认不删除远端文件。删除必须走单独的清理任务，并带明确确认。
 - `sold` 或 `sync_disabled=true` 的账号不上传、不更新。
+- `session_auth_file` 只作为 ChatGPT Web session 备份，普通同步、库存同步和额度检查都不能把它当上传凭证。
 
 错误处理默认采用暂停优先：
 
@@ -33,18 +34,7 @@
 - 认证文件缺失、token 无效、配置缺失属于不可自动修复错误，应立即暂停。
 - 暂停记录写入任务状态，前端只负责显示错误和恢复按钮。
 
-推荐配置：
-
-- `SYNC_EXECUTION_MODE=async`: 默认异步。可选 `inline` 仅用于本地排查。
-- `SYNC_UPLOAD_STRATEGY=incremental`: 默认差异上传。可选 `full` 只用于人工修复。
-- `SYNC_DELETE_MISSING=false`: 默认不删除远端缺失匹配项。
-- `SYNC_FAILURE_POLICY=pause`: 默认遇到不可自动修复错误暂停。可选 `continue` 只适合人工批量修复。
-- `SYNC_AUTO_RETRY=transient`: 默认只重试网络、429、5xx。可选 `off`、`always`。
-- `SYNC_RETRY_MAX_ATTEMPTS=3`: 单账号或单远端动作最多尝试 3 次。
-- `SYNC_RETRY_BACKOFF_SECONDS=5,30,120`: 重试等待时间。
-- `SYNC_PAUSE_ON_SUCCESS_RATE_BELOW=95`: 批量任务成功率低于阈值时暂停。
-
-当前代码里 `/api/sync/cpa` 只同步 `active` 账号，并会删除本地管理但已非 active 的远端 CPA 文件。要补传 `standby` 账号的 CPA 文件，不应复用该接口；应新增只上传、不删除的增量补传任务。
+当前代码里 `/api/sync/cpa` 只同步 `active` 账号的本地 OAuth RT 文件，不启动浏览器、不补 OAuth，也不删除远端文件。要补传 `standby` 账号的 CPA 文件，应新增只上传、不删除的增量补传任务。
 
 ## CPA
 
@@ -53,10 +43,10 @@
 正向同步 `sync_to_cpa`：
 
 - 读取本地账号。
-- 修复断裂的 `auth_file` 路径。
 - 只上传未禁用同步的 active 账号 OAuth RT 认证文件。
-- 删除 CPA 中本地管理账号但不再 active 的文件。
-- 返回上传、删除、本地去重等统计结果。
+- 跳过只有 `session_auth_file` 或缺少 OAuth RT 文件的账号，并在结果中返回跳过原因。
+- 不删除 CPA 远端文件。
+- 返回上传、跳过和本地去重等统计结果。
 
 库存同步 `maintain_cpa_inventory`：
 
@@ -91,32 +81,33 @@
 - CPA 侧按邮箱或本地 auth 文件名删除远端文件。
 - 删除后本地账号标记为 `sold` 和 `sync_disabled=true`，后续 `/api/sync/cpa` 不会重新上传。
 
-增量补传 CPA 文件时，应新增独立入口，不改变 `sync_to_cpa` 的删除语义。该入口只做上传：
+增量补传 CPA 文件时，应新增独立入口。该入口只做上传：
 
 - 匹配范围：`active` 与可复用 `standby`。
 - 匹配键：优先邮箱，其次认证文件名。
 - 已存在：跳过。
-- 不存在：上传本地 `auth_file`。
+- 不存在：上传本地 OAuth RT 文件。
 - 上传成功后可写 `cpa_uploaded_at` 与独立同步任务记录。
 - 上传失败按 `SYNC_AUTO_RETRY` 与 `SYNC_FAILURE_POLICY` 处理。
 
 HTTP 入口：
 
-- `/api/sync`: 按已启用目标同步 CPA / Sub2API。
-- `/api/sync/cpa`: 只同步 CPA，账号池操作页的 CPA 推送按钮使用这个入口。
+- `/api/sync`: 按已启用目标上传本地 OAuth RT 文件到 CPA / Sub2API。
+- `/api/sync/cpa`: 只上传本地 OAuth RT 文件到 CPA，账号池操作页的 CPA 推送按钮使用这个入口。
 - `/api/sync/cpa-stock`: 维护 CPA 云端库存，目标为 100 个库存 RT 文件。
 - `/api/sync/cpa/cleanup-401`: 清理 CPA 远端 401 文件，并按返回名单标记本地账号不可用。
 - `/api/sync/cpa/cleanup-invalid-rt`: 直接刷新 CPA OAuth RT 文件，删除明确失效的远端文件。
 - `/api/accounts/mark-unusable/account-deactivated`: 按 `auths/unusable/account_deactivated` 标记本地账号不可用。
-- `/api/sync/sub2api`: 只同步 Sub2API，账号池操作页和同步中心的 Sub2API 推送按钮使用这个入口。
+- `/api/sync/sub2api`: 只上传本地 OAuth RT 文件到 Sub2API，账号池操作页和同步中心的 Sub2API 推送按钮使用这个入口。
 
-反向同步 `sync_from_cpa`：
+反向同步 `sync_from_cpa` 是恢复入口：
 
 - 下载 CPA 中的 `codex-*.json`。
 - 按账号去重。
 - 比较 `last_refresh` 和 `expired`。
 - CPA 文件更旧时保留本地文件。
 - 新导入账号默认写为 standby。
+- 它不属于普通上传同步，不会用 session 备份生成远端文件。
 
 单账号 CPA 认证入口：
 
@@ -130,7 +121,7 @@ HTTP 入口：
 
 `SUB2API_GROUP` 可填分组名或分组 ID，多个值用逗号分隔。同步时会保留用户手工绑定的其他分组，只替换 AutoTeam 管理的分组绑定。分组不存在时，账号推送和按邮箱去重仍会继续，返回结果的 `warnings` 会说明已跳过分组绑定。
 
-账号池推送到 Sub2API 时，以邮箱为去重键。若远端已有同邮箱 OpenAI OAuth 账号，会更新已有账号而不是新建；AutoTeam 自己标记的重复账号会删除多余项。同步 payload 按 `C:\Users\Administrator\Downloads\sub2api示列.json` 的 OpenAI OAuth 账号结构生成，固定写入 `model_mapping`、`privacy_mode=training_off`、`openai_oauth_responses_websockets_v2_mode=off`、并覆盖基础调度字段。全量同步会删除本地管理范围内已非 active 的账号；单账号同步只创建或更新目标邮箱，不删除其他账号。
+账号池推送到 Sub2API 时，以邮箱为去重键。若远端已有同邮箱 OpenAI OAuth 账号，会更新已有账号而不是新建；AutoTeam 自己标记的重复账号会删除多余项。同步 payload 按 `C:\Users\Administrator\Downloads\sub2api示列.json` 的 OpenAI OAuth 账号结构生成，固定写入 `model_mapping`、`privacy_mode=training_off`、`openai_oauth_responses_websockets_v2_mode=off`、并覆盖基础调度字段。当前普通同步只创建或更新本地 active 账号，不删除远端缺失账号。
 
 `sold` 或 `sync_disabled=true` 不会进入 Sub2API 同步目标。卖出账号时，`delete_account_from_sub2api` 只删除 AutoTeam 管理的 pool 账号，匹配邮箱或 `autoteam_auth_file`。
 

@@ -60,7 +60,7 @@
 
 ## 额度检查
 
-`src/autoteam/manager.py` (`cmd_check`): 遍历未禁用同步的 active 账号认证文件，调用 `src/autoteam/codex_auth.py` (`check_codex_quota`) 查询额度。额度不足时会写入 `last_quota`、`quota_exhausted_at`、`quota_resets_at`，并把账号标记为 `exhausted`。`sold` 不参与额度检查。
+`src/autoteam/manager.py` (`cmd_check`): 遍历未禁用同步的 active 账号 OAuth RT 文件，调用 `src/autoteam/codex_auth.py` (`check_codex_quota`) 查询额度。`session_auth_file` 不参与额度检查。额度不足时会写入 `last_quota`、`quota_exhausted_at`、`quota_resets_at`，并把账号标记为 `exhausted`。`sold` 不参与额度检查。
 
 ## 智能轮转
 
@@ -74,7 +74,7 @@
 4. 统计当前 Team 人数。
 5. 优先复用 standby 账号。
 6. 仍有空位时创建新账号。
-7. 任务结束后调用已启用远端同步。
+7. 任务结束后把本地 OAuth RT 文件上传到已启用远端。
 
 复用旧账号走 `src/autoteam/manager.py` (`reinvite_account`)。只有 Codex OAuth 返回 `plan_type=team` 时，旧账号才会恢复为 active。
 
@@ -82,7 +82,7 @@
 
 `src/autoteam/manager.py` (`cmd_fill`): 未传目标时，当前人数加 `FILL_BATCH_SIZE` 作为本次目标，且不超过 `TEAM_TARGET_SEATS`。默认 `FILL_BATCH_SIZE=10`。
 
-显式传入更大目标时，流程仍按 `FILL_BATCH_SIZE` 记录每批结果，并在每批后同步 CPA / Sub2API。
+显式传入更大目标时，流程仍按 `FILL_BATCH_SIZE` 记录每批结果，并在每批后把本地 OAuth RT 文件上传到 CPA / Sub2API。
 
 ## 清理成员
 

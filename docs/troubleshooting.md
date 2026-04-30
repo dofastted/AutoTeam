@@ -107,16 +107,16 @@ uv run autoteam cleanup 5
 
 ## CPA 同步相关
 
-### 反向同步后本地 token 似乎“变旧了”
+### `pull-cpa` 后本地 token 似乎“变旧了”
 
-新版本会比较本地与 CPA 两侧文件的：
+`pull-cpa` 是从 CPA 恢复到本地的入口。它会比较本地与 CPA 两侧 OAuth RT 文件的：
 
 - `last_refresh`
 - `expired`
 
 只有 CPA 文件更“新”时，才会覆盖本地文件。
 
-如果你怀疑历史版本已经把旧 token 写回本地，可以先重新登录目标账号，再执行：
+只有 CPA 文件更新时才会覆盖本地 OAuth 文件。如果你怀疑历史版本已经把旧 token 写回本地，可以先重新登录目标账号，再执行：
 
 ```bash
 uv run autoteam pull-cpa
@@ -127,9 +127,9 @@ uv run autoteam pull-cpa
 - `cpa_duplicates_deleted`
 - `local_duplicates_deleted`
 
-### 同账号在 CPA / 本地出现多个文件名不同的认证文件
+### 同账号在 CPA / 本地出现多个文件名不同的 OAuth 文件
 
-新版本会在同步时按同账号去重：
+`pull-cpa` 会按同账号去重：
 
 - CPA 侧只保留一份
 - 本地也只保留一份
@@ -140,6 +140,10 @@ uv run autoteam pull-cpa
 ```bash
 uv run autoteam pull-cpa
 ```
+
+### 同步中心跳过 session-only 账号
+
+普通同步只上传本地 OAuth RT 文件。只有 `session_auth_file` 的账号需要先走单账号登录或 `/api/accounts/{email}/cpa-auth`，生成 `rt_auth_file` 后才能上传 CPA / Sub2API。
 
 ## Docker 相关
 

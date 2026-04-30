@@ -14,14 +14,6 @@
 - `MAIL_PROVIDER`: `mo_email`、`cloudmail`、`cloudflare_temp_email`。
 - `CPA_URL`、`CPA_KEY`、`SYNC_TARGET_CPA`: CPA 同步。
 - `SUB2API_URL`、`SUB2API_EMAIL`、`SUB2API_PASSWORD`、`SUB2API_GROUP`、`SYNC_TARGET_SUB2API`: Sub2API 同步。
-- `SYNC_EXECUTION_MODE`: 同步执行方式，建议默认 `async`，可选 `inline`。
-- `SYNC_UPLOAD_STRATEGY`: 上传策略，建议默认 `incremental`，可选 `full`。
-- `SYNC_DELETE_MISSING`: 是否删除远端缺失匹配项，建议默认 `false`。
-- `SYNC_FAILURE_POLICY`: 同步错误策略，建议默认 `pause`，可选 `continue`。
-- `SYNC_AUTO_RETRY`: 自动重试策略，建议默认 `transient`，可选 `off`、`always`。
-- `SYNC_RETRY_MAX_ATTEMPTS`: 单项同步最大尝试次数，建议默认 `3`。
-- `SYNC_RETRY_BACKOFF_SECONDS`: 重试等待时间列表，建议默认 `5,30,120`。
-- `SYNC_PAUSE_ON_SUCCESS_RATE_BELOW`: 批量成功率低于该值时暂停，建议默认 `95`。
 - `PLAYWRIGHT_BROWSER_MODE`: 浏览器显示方式，`hidden` 不弹窗，`visible` 显示窗口，`embedded` 当前按不弹窗运行。
 - `PLAYWRIGHT_HEADLESS`: 旧版兼容项，`false` 等同可见窗口。
 - `BROWSER_PARALLEL_WORKERS`: 账号补满、轮转和直注批量任务的新号创建并行窗口数，范围 `1..3`。
@@ -51,9 +43,9 @@
 - `mail_account_id`
 - `status`
 - `usage_status`
-- `auth_file`
-- `rt_auth_file`
-- `session_auth_file`
+- `auth_file`: 兼容字段。OAuth 写入时可能指向 OAuth RT 文件；普通同步不把它当主来源。
+- `rt_auth_file`: 账号池 OAuth RT 文件。CPA / Sub2API 上传、账号池额度检查优先使用它。
+- `session_auth_file`: ChatGPT Web session 备份。普通同步、库存同步和账号池额度检查不能上传或使用它。
 - `registration_status`
 - `cpa_status`
 - `cpa_error_message`
@@ -95,9 +87,9 @@
 
 ## 认证文件
 
-账号池 OAuth RT 文件名：`auths/codex-{email}-{plan_type}-{hash}-oauth.json`。
+账号池 OAuth RT 文件名：`auths/codex-{email}-{plan_type}-{hash}-oauth.json`。这是 CPA / Sub2API 普通同步的上传来源。
 
-账号池 ChatGPT session 备份文件名：`auths/codex-{email}-{plan_type}-{hash}-session.json`。
+账号池 ChatGPT session 备份文件名：`auths/codex-{email}-{plan_type}-{hash}-session.json`。它只保留注册完成后的 ChatGPT Web session，不是 CPA / Sub2API 上传凭证。
 
 主号文件名：`auths/codex-main-*.json`。
 
@@ -114,5 +106,7 @@
 - `expired`
 - `last_refresh`
 - `credential_source`
+
+OAuth RT 文件必须包含 `refresh_token`。`credential_source=chatgpt_session` 的文件即使有 `access_token`，也不能作为 CPA / Sub2API 普通同步来源。
 
 这些文件包含敏感 token，默认不提交。

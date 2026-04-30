@@ -4,7 +4,7 @@
 
 `web/src/components/OAuthPage.vue`: 页面包含两部分。
 
-- CPA 凭证检查：读取 `/api/accounts` 和 `/api/cpa/files`，对比 active 席位账号与 CPA 认证文件。
+- CPA 凭证检查：读取 `/api/accounts` 和 `/api/cpa/files`，分别显示 Session、OAuth RT、CPA、Sub2API 状态。
 - 手动 OAuth：调用 `/api/manual-account/start` 生成 OAuth 链接，支持自动 callback 和手动粘贴 callback URL。
 
 前端 API client 在 `web/src/api.js`：
@@ -50,8 +50,8 @@
 - `src/autoteam/codex_auth.py` (`build_chatgpt_session_auth_bundle`): 读取 `/api/auth/session` 的 `accessToken`、session cookie、账号 ID 和 `plan_type`。
 - `src/autoteam/cpa_batch.py` (`_create_direct_account`): 将 session bundle 保存为 `auths/codex-{email}-{plan_type}-{hash}-session.json`，并写入 `session_auth_file`。浏览器异常、认证错误页或 session 提取失败时，当前邮箱直接失败并换下一个邮箱。
 - `src/autoteam/cpa_batch.py` (`_create_direct_accounts_parallel`): 直注批量并行 worker。按窗口数拆分目标，每个 worker 单独创建邮箱、注册、保存 session 凭证。
-- `src/autoteam/cpa_batch.py` (`_verify_and_upload_cpa`): 优先使用 `rt_auth_file` 或可用的 `auth_file`；缺少 OAuth RT 文件时自动调用 `login_codex_via_browser` 打开该账号的 Codex OAuth 链接，拦截 callback 换 RT，保存为 `auths/codex-{email}-{plan_type}-{hash}-oauth.json`。
-- `src/autoteam/cpa_batch.py` (`_CpaUploadWorker`): OAuth RT 凭证保存后，CPA 额度检查和上传在内部 worker 线程执行；主线程可以继续注册后续账号。
+- `src/autoteam/cpa_batch.py` (`_verify_and_upload_cpa`): 通过 `select_oauth_rt_auth_file` 选择本地 OAuth RT 文件；旧 `auth_file` 只有内容确认是 OAuth RT 时才可作为兼容候选。缺少 OAuth RT 文件时自动调用 `login_codex_via_browser` 打开该账号的 Codex OAuth 链接，拦截 callback 换 RT，保存为 `auths/codex-{email}-{plan_type}-{hash}-oauth.json`。
+- `src/autoteam/cpa_batch.py` (`_CpaUploadWorker`): OAuth RT 凭证保存后，CPA 额度检查和上传在内部 worker 线程执行；主线程可以继续注册后续账号。并行直注时，缺少 OAuth RT 的账号会先停在 `cpa_queued`，等注册浏览器窗口结束后再启动 Codex OAuth，避免 CPA OAuth 抢占注册浏览器槽位。
 
 成功条件：
 
@@ -79,7 +79,7 @@
 
 批量 CPA JSON 用来新做账号：创建邮箱、注册、保存 session 凭证、检查额度、上传 CPA。
 
-历史账号补传只处理本地已有 `auth_file` 的账号：
+历史账号补传只处理本地已有 OAuth RT 文件的账号：
 
 - 不打开浏览器。
 - 不新建邮箱。
@@ -87,13 +87,15 @@
 - 不删除 CPA 或 Sub2API 远端账号。
 - 按邮箱和文件名匹配远端。
 - 远端缺失时增量上传。
+- `rt_auth_file` 是主来源；旧 `auth_file` 只有内容确认含 OAuth `refresh_token` 且不是 ChatGPT session 时才可作为兼容来源。
+- `session_auth_file` 只是 ChatGPT Web session 备份，不能上传 CPA / Sub2API。
 
 补传范围建议：
 
 - `active` 账号必须包含。
 - 可复用 `standby` 账号也应包含，因为它们已有 auth 文件，恢复时可以直接使用。
 - `pending` 账号不应补传。
-- 没有 `auth_file` 或本地文件不存在的账号只记录错误，不进入上传。
+- 没有 OAuth RT 文件或本地文件不存在的账号只记录跳过原因，不进入上传。
 
 补传完成后：
 
@@ -107,7 +109,7 @@
 
 自动重试应分类型配置，不要只给一个简单布尔值。
 
-推荐默认：
+建议默认：
 
 - `SYNC_AUTO_RETRY=transient`
 - `SYNC_RETRY_MAX_ATTEMPTS=3`
@@ -123,7 +125,7 @@
 
 不应自动重试的错误：
 
-- 本地 `auth_file` 缺失。
+- 本地 OAuth RT 文件缺失。
 - auth JSON 无法解析。
 - 缺少 CPA / Sub2API 配置。
 - OAuth token 明确无效。
@@ -150,7 +152,7 @@
 
 - 目标会被限制在 `1..MAX_TEAM_SEATS`。
 - 实际执行仍按 `FILL_BATCH_SIZE` 记录每批结果。
-- 每批结束后调用已启用远端同步。
+- 每批结束后把本地 OAuth RT 文件上传到已启用远端。
 
 默认值：
 
@@ -165,7 +167,7 @@
 - 成功数量。
 - 失败数量。
 - 成功率。
-- CPA / Sub2API 同步结果。
+- CPA / Sub2API 上传结果。
 
 后台任务最终结果包含 `attempted`、`succeeded`、`failed`、`success_rate` 和 `batches`。
 
@@ -178,7 +180,8 @@
 - 每 10 分钟触发一次。
 - 优先检查当前 managed run 是否还在运行。
 - 没有运行中的 run 时，优先恢复未完成 run；没有可恢复 run 时再启动新批次。
-- 检查成功账号是否已经写入 `plan_type`、`auth_file`、`cpa_uploaded_at`、`qualified_at`。
+- 如果启动新批次遇到 API 409，但 `/api/tasks` 显示已有 `cpa-batch` 在运行，hook 会把该任务的 `run_id` 追加到 `managed_run_ids`，避免后续统计继续停在旧 run。
+- 检查成功账号是否已经写入 `plan_type`、`rt_auth_file`、`cpa_uploaded_at`、`qualified_at`。
 - 通过 `/api/cpa/files` 检查 CPA 远端是否已经存在对应 auth 文件，避免只看本地成功状态。
 
 ## 修改注意

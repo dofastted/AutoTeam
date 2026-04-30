@@ -100,8 +100,8 @@ PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:3333
 | `manual-add` | 手动 OAuth 添加账号（打开链接登录后粘贴回调 URL） |
 | `fill [N]` | 补满成员；未传 N 时按 `FILL_BATCH_SIZE` 执行一批 |
 | `cleanup [N]` | 清理多余成员 |
-| `sync` | 同步认证文件到已启用远端 |
-| `pull-cpa` | 从 CPA 反向同步认证文件到本地 |
+| `sync` | 上传本地 OAuth RT 文件到已启用远端 |
+| `pull-cpa` | 从 CPA 反向导入认证文件到本地，用于恢复 |
 | `admin-login` | 管理员登录 |
 
 更多参数与接口说明见 [API 文档](docs/api.md)。
@@ -184,7 +184,7 @@ MAIL_PROVIDER=cloudflare_temp_email
 
 `TEAM_TARGET_SEATS` 控制 Team 总人数目标，默认 `999`。`FILL_BATCH_SIZE` 控制「补满成员」每次最多新增多少账号，默认 `10`。
 
-Web 面板点击「补满成员」时不再一次性补到总目标，而是按 `FILL_BATCH_SIZE` 执行一批。每批结束后会记录尝试数、成功数、失败数、成功率，并上传 CPA 认证文件。
+Web 面板点击「补满成员」时不再一次性补到总目标，而是按 `FILL_BATCH_SIZE` 执行一批。每批结束后会记录尝试数、成功数、失败数、成功率，并上传本地 OAuth RT 文件。
 
 #### Cloudflare Temp Email 注意事项
 
@@ -241,7 +241,7 @@ SUB2API_GROUP=12,Team Pool
 ## 适用场景
 
 - 需要维持固定数量的 Team 可用席位
-- 需要把 Codex 认证文件同步到 CLIProxyAPI / Sub2API
+- 需要把本地 OAuth RT 文件上传到 CLIProxyAPI / Sub2API
 - 需要在 Web 面板里完成日常轮转、对账、OAuth 导入
 
 ## 已知限制

@@ -104,6 +104,8 @@ BROWSER_PARALLEL_WORKERS=1
 - `visible`: 显示独立浏览器窗口，适合临时观察页面。
 - `embedded`: 当前按无头运行，预留给后续页面内嵌预览。
 
+可见窗口启动时固定使用 `1280x800`，位置为屏幕左上角。
+
 旧配置仍兼容：
 
 ```dotenv
@@ -206,10 +208,10 @@ uv run autoteam main-codex-sync
 
 ## 认证文件格式
 
-兼容 CLIProxyAPI，文件名格式：
+OAuth RT 文件兼容 CLIProxyAPI，文件名格式：
 
 ```text
-codex-{email}-{plan_type}-{hash}.json
+codex-{email}-{plan_type}-{hash}-oauth.json
 ```
 
 文件内容示例：
@@ -224,20 +226,27 @@ codex-{email}-{plan_type}-{hash}.json
   "email": "...",
   "expired": "2026-04-20T10:00:00Z",
   "last_refresh": "2026-04-10T10:00:00Z",
-  "session_token": "...",
-  "credential_source": "chatgpt_session"
+  "credential_source": "oauth"
 }
 ```
 
-直注批量流程可能没有 OAuth `refresh_token`。这类文件会带 `credential_source=chatgpt_session`，`access_token` 来自 ChatGPT Web session，`session_token` 用于保留注册完成后的登录凭证。
+直注批量流程会先保存 ChatGPT Web session 备份，文件名格式：
 
-反向同步 (`pull-cpa`) 时，CPA 中下载回来的文件也会被重新整理成这个命名规范。
+```text
+codex-{email}-{plan_type}-{hash}-session.json
+```
+
+这类文件会带 `credential_source=chatgpt_session`，`access_token` 来自 ChatGPT Web session，`session_token` 用于保留注册完成后的登录凭证。它不包含可长期刷新的 OAuth `refresh_token`，不能上传到 CPA / Sub2API。
+
+CPA / Sub2API 普通同步只上传本地 OAuth RT 文件。账号字段里 `rt_auth_file` 是主来源；旧 `auth_file` 只有内容确认含 `refresh_token` 且不是 ChatGPT session 时才作为兼容来源。
+
+反向同步 (`pull-cpa`) 是恢复入口。CPA 中下载回来的文件会被重新整理成 OAuth 文件命名规范。
 
 ## Team 补位批次
 
 `TEAM_TARGET_SEATS` 是 Team 总人数目标，默认 `999`。`FILL_BATCH_SIZE` 是「补满成员」一次最多新增的账号数，默认 `10`。`BROWSER_PARALLEL_WORKERS` 控制每批新号创建时同时开的独立浏览器数，最大为 `3`。
 
-Web 面板点击「补满成员」时，如果不手动传目标人数，后端只会执行一批：当前 Team 人数加上 `FILL_BATCH_SIZE`，且不超过 `TEAM_TARGET_SEATS`。如果通过 CLI 或 API 明确传入较大的目标，执行过程仍会按 `FILL_BATCH_SIZE` 分批记录日志，并在每批结束后上传 CPA 认证文件。
+Web 面板点击「补满成员」时，如果不手动传目标人数，后端只会执行一批：当前 Team 人数加上 `FILL_BATCH_SIZE`，且不超过 `TEAM_TARGET_SEATS`。如果通过 CLI 或 API 明确传入较大的目标，执行过程仍会按 `FILL_BATCH_SIZE` 分批记录日志，并在每批结束后上传本地 OAuth RT 文件。
 
 ## 批量 CPA JSON
 
@@ -266,8 +275,9 @@ Web 面板点击「补满成员」时，如果不手动传目标人数，后端�
 
 其中：
 - `auths/codex-main-*.json` 是主号专用
-- `auths/codex-{email}-{plan}-{hash}.json` 是轮转账号
-- 从 CPA 反向同步时会自动清理同账号重复文件
+- `auths/codex-{email}-{plan}-{hash}-oauth.json` 是轮转账号的 OAuth RT 文件
+- `auths/codex-{email}-{plan}-{hash}-session.json` 是 ChatGPT Web session 备份，不能上传 CPA / Sub2API
+- 从 CPA 反向同步时会自动清理同账号重复 OAuth 文件
 
 ## 启动验证
 

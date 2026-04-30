@@ -22,10 +22,10 @@
 主要页面：
 
 - `web/src/components/Dashboard.vue`: 账号统计、账号列表、登录、移出、卖出、删除、导出。
-- `web/src/components/TeamMembers.vue`: Team 成员和邀请。
+- `web/src/components/TeamMembers.vue`: Team 成员和邀请，并显示 Session、OAuth RT、CPA、Sub2API 状态。
 - `web/src/components/PoolPage.vue`: 账号池操作入口，包含批量 CPA JSON 启动、运行记录和账号明细。
 - `web/src/components/SyncPage.vue`: 同步操作入口。
-- `web/src/components/OAuthPage.vue`: 手动 OAuth 登录和 CPA 凭证检查。
+- `web/src/components/OAuthPage.vue`: 手动 OAuth 登录和 CPA 凭证检查，区分 Session 备份、OAuth RT、CPA、Sub2API 状态。
 - `web/src/components/TaskHistory.vue`: 后台任务状态。
 - `web/src/components/LogViewer.vue`: 日志查看。
 - `web/src/components/ConfigPage.vue`: 运行配置。
@@ -44,12 +44,14 @@
 
 服务启动时，`src/autoteam/api.py` 会调用 `src/autoteam/flow_runs.py` (`mark_interrupted_running_runs`) 标记遗留的 `running` 批量记录为失败。账号池操作页显示邮箱创建、注册、OAuth、额度检查和 CPA 上传阶段。
 
+`POST /api/cpa-batch/runs/{run_id}/resume` 会复用原 run 的 `join_mode`、`target`、`batch_size` 和 `parallel_workers`。恢复并行直注 run 时不能退回单窗口，否则页面显示和运行行为会与原 run 不一致。
+
 ## 前台操作与后台同步
 
 前台账号操作应只等待本地状态变化完成，不应同步等待 CPA / Sub2API 的全量远端操作。推荐交互：
 
 - 用户点击账号操作按钮。
-- 后端完成本地账号状态、`auth_file`、任务记录写入。
+- 后端完成本地账号状态、`rt_auth_file`、任务记录写入。
 - 后端返回 `202` 或本地操作结果。
 - 后台同步任务继续处理 CPA / Sub2API。
 - 前端显示本地结果和后台同步任务状态。
@@ -62,6 +64,8 @@
 - 远端数量核对。
 - 可自动重试的网络失败。
 
+同步中心和账号池操作页的普通同步只上传本地 OAuth RT 文件。`session_auth_file` 只作为 ChatGPT Web session 备份显示，不能作为 CPA / Sub2API 上传来源。
+
 不适合悄悄异步的操作：
 
 - Team 移出或取消邀请。
@@ -69,7 +73,7 @@
 - 删除 Sub2API 账号。
 - 改写 `.env` 或登录态。
 
-`POST /api/accounts/login` 是本地 OAuth 验证任务：它启动账号自己的 Codex OAuth 登录，保存 OAuth RT 文件，更新本地账号状态，并保留旧 `session_auth_file`。它不要求 CPA / Sub2API 配置，也不自动同步远端。
+`POST /api/accounts/login` 是本地 OAuth 验证任务：它启动账号自己的 Codex OAuth 登录，保存 OAuth RT 文件，更新本地账号状态，并保留旧 `session_auth_file`。它不要求 CPA / Sub2API 配置，也不自动同步远端。默认拒绝已售出或 `sync_disabled=true` 的账号；排查已标记失效账号时可显式传 `force=true` 重新跑本地 OAuth 验证。
 
 `POST /api/accounts/check-deactivated-mail` 是同步确认操作：它先检查邮箱是否收到包含 `deactivated` 的邮件，再按参数决定是否释放 Team 席位和退役邮箱。
 

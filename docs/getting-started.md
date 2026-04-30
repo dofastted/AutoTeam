@@ -170,7 +170,7 @@ uv run autoteam rotate 5
 3. 移出额度低于阈值的账号
 4. 优先复用 standby 中额度已恢复的旧号
 5. 不够时自动创建新账号
-6. 同步 active 认证文件到 CPA
+6. 上传 active 账号的本地 OAuth RT 文件到 CPA
 
 > **注意：**
 > `rotate 5` / `fill 5` 中的 `5` 指的是 **Team 总人数目标**，不是“本地管理账号数量”。
@@ -188,7 +188,7 @@ API 模式下：
 - Web 面板集中管理日常操作
 - 后台自动巡检（默认每 5 分钟）
 - 可在「账号池操作」页新做 100 个 team 账号 CPA JSON，并查看账号明细和错误等级
-- 可在「同步中心」中做对账与双向同步
+- 可在「同步中心」中上传本地 OAuth RT 文件；从 CPA 拉回本地用于恢复
 - 可在「OAuth 登录」页手动导入账号
 
 ### 方式二：手动执行
@@ -198,8 +198,8 @@ uv run autoteam status      # 查看状态
 uv run autoteam check       # 检查额度
 uv run autoteam rotate 5    # 智能轮转
 uv run autoteam fill        # 按 FILL_BATCH_SIZE 执行一批补位
-uv run autoteam sync        # 同步到 CPA
-uv run autoteam pull-cpa    # 从 CPA 拉回本地
+uv run autoteam sync        # 上传本地 OAuth RT 文件到已启用远端
+uv run autoteam pull-cpa    # 从 CPA 拉回本地，用于恢复
 ```
 
 ## 常见流程
@@ -222,7 +222,7 @@ uv run autoteam manual-add # 手动 OAuth 导入一个账号
 uv run autoteam cleanup 5  # 保留 5 个总席位
 ```
 
-### 从 CPA 恢复认证文件到本地
+### 从 CPA 恢复 OAuth RT 文件到本地
 
 ```bash
 uv run autoteam pull-cpa

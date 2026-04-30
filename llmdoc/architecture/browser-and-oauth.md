@@ -6,7 +6,7 @@
 
 默认行为：
 
-- `PLAYWRIGHT_BROWSER_MODE=hidden` 默认不弹出窗口；`visible` 显示窗口；`embedded` 当前按不弹窗处理。旧 `PLAYWRIGHT_HEADLESS=false` 仍兼容。
+- `PLAYWRIGHT_BROWSER_MODE=hidden` 默认不弹出窗口；`visible` 显示窗口；`embedded` 当前按不弹窗处理。旧 `PLAYWRIGHT_HEADLESS=false` 仍兼容。Chromium 启动时固定带 `--window-position=0,0` 和 `--window-size=1280,800`，可见窗口会出现在屏幕左上角。
 - 支持 `PLAYWRIGHT_PROXY_URL`、`PLAYWRIGHT_PROXY_SERVER`、`PLAYWRIGHT_PROXY_USERNAME`、`PLAYWRIGHT_PROXY_PASSWORD`、`PLAYWRIGHT_PROXY_BYPASS`。若 `PLAYWRIGHT_PROXY_URL` 未设置，浏览器会使用 `llmdoc/architecture/outbound-proxy.md` 里的当前任务出口代理。
 - `src/autoteam/browser_runtime.py` (`acquire_browser_lease`): 默认只允许一个 Chromium 流程；账号补满、轮转和直注批量任务可按 `BROWSER_PARALLEL_WORKERS=1..3` 临时开放多个独立 Chromium 槽位。异常退出会关闭浏览器并释放自己的槽位。
 - 浏览器流程常写入 `screenshots/` 作为排查证据。
@@ -37,9 +37,9 @@ API 模式下，Playwright 相关操作通过 `src/autoteam/api.py` (`_Playwrigh
 
 `src/autoteam/codex_auth.py`: 负责 PKCE、OAuth URL、token 交换、ChatGPT session 凭证提取、认证文件保存、额度查询和 refresh。
 
-账号池自动 OAuth 入口是 `login_codex_via_browser`。它登录账号后打开 Codex OAuth URL，捕获 callback code，换 token 并保存 CPA 兼容 JSON。
+账号池自动 OAuth 入口是 `login_codex_via_browser`。它登录账号后打开 Codex OAuth URL，捕获 callback code，换 token 并保存 OAuth RT JSON。
 
-批量直注账号优先使用 `build_chatgpt_session_auth_bundle`。直注注册完成并进入 Team 后，`src/autoteam/manager.py` (`_register_direct_once`) 会在关闭同一个浏览器前读取 `https://chatgpt.com/api/auth/session` 的 `accessToken` 和 session cookie，保存为 CPA 兼容 JSON，避免再进入 Codex OAuth consent/callback 页面。
+批量直注账号优先使用 `build_chatgpt_session_auth_bundle`。直注注册完成并进入 Team 后，`src/autoteam/manager.py` (`_register_direct_once`) 会在关闭同一个浏览器前读取 `https://chatgpt.com/api/auth/session` 的 `accessToken` 和 session cookie，保存为 ChatGPT Web session 备份。该备份写入 `session_auth_file`，普通同步不能上传它。
 
 批量 CPA 路径要求拿到 session bundle。`src/autoteam/cpa_batch.py` (`_create_direct_account`) 只执行一次当前邮箱注册；浏览器异常、`https://chatgpt.com/api/auth/error`、未识别邮箱步骤或 session 提取失败都会让当前邮箱失败并换下一个邮箱，不再用 Team 成员检查作为兜底。
 
@@ -51,6 +51,6 @@ API 模式下，Playwright 相关操作通过 `src/autoteam/api.py` (`_Playwrigh
 
 `src/autoteam/manual_account.py` (`ManualAccountFlow`): 不启动 Chromium。它只生成 OAuth 链接，尝试监听 `http://localhost:1455/auth/callback`，也支持用户粘贴最终 callback URL。
 
-完成后会保存认证文件，按 `plan_type` 和额度结果更新本地账号状态。它不自动同步 CPA / Sub2API；远端上传由同步中心或对应同步接口单独触发。
+完成后会保存 OAuth RT 文件，按 `plan_type` 和额度结果更新本地账号状态。它不自动同步 CPA / Sub2API；远端上传由同步中心或对应同步接口单独触发。
 
-`src/autoteam/api.py` (`post_account_login`): 仪表盘的单账号登录按钮使用本地 OAuth 验证账号。该接口只要求账号对应邮箱 provider 配置，不要求 CPA / Sub2API 配置；成功后写 `auth_file`、`rt_auth_file`，并保留已有 `session_auth_file`。若 OAuth 页面返回 `account_deactivated`，账号会写为 `status=unavailable`、`sync_disabled=true`、`unavailable_reason=account_deactivated`。
+`src/autoteam/api.py` (`post_account_login`): 仪表盘的单账号登录按钮使用本地 OAuth 验证账号。该接口只要求账号对应邮箱 provider 配置，不要求 CPA / Sub2API 配置；成功后写 `auth_file`、`rt_auth_file`，并保留已有 `session_auth_file`。默认拒绝已售出或 `sync_disabled=true` 的账号；排查已标记失效账号时可显式传 `force=true` 重新跑本地 OAuth 验证。若 OAuth 页面返回 `account_deactivated`，账号会写为 `status=unavailable`、`sync_disabled=true`、`unavailable_reason=account_deactivated`。

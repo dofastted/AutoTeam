@@ -6,7 +6,7 @@ AutoTeam 的目标不是单纯“多开号”，而是：
 
 1. 维护 **Team 总人数** 在目标值附近
 2. 让 active 账号尽量保持可用额度
-3. 将可用认证文件同步到 CPA
+3. 将本地 OAuth RT 文件上传到 CPA / Sub2API
 4. 在需要时从 CPA 反向恢复认证文件到本地
 
 ## 轮转流程
@@ -22,7 +22,7 @@ AutoTeam 的目标不是单纯“多开号”，而是：
         ↓
 不够再创建新号
         ↓
-同步 active 认证文件到 CPA
+上传 active 账号的本地 OAuth RT 文件到远端
 ```
 
 > 轮转目标是 **Team 总人数**。
@@ -50,8 +50,10 @@ active ──额度不足──> exhausted ──移出 Team──> standby
 | 动作 | 方向 | 用途 |
 |------|------|------|
 | `同步账号` | Team / `auths/` → `accounts.json` | 修复本地账号池记录 |
-| `同步 CPA` | 本地 active → CPA | 只把 active 认证文件同步到 CPA |
-| `拉取 CPA` | CPA → 本地 | 从 CPA 反向恢复 / 导入认证文件 |
+| `同步 CPA` | 本地 active → CPA | 只把 active 账号的本地 OAuth RT 文件上传到 CPA |
+| `拉取 CPA` | CPA → 本地 | 从 CPA 反向恢复 / 导入 OAuth RT 文件 |
+
+普通上传同步不会上传 ChatGPT session 备份。只有 `rt_auth_file`，或内容确认是 OAuth RT 的旧 `auth_file`，才会进入 CPA / Sub2API 上传。
 
 ### 反向同步特点
 
@@ -95,7 +97,7 @@ http://localhost:1455/auth/callback
 | `mo_email.py` | Mo Email 临时邮箱客户端 |
 | `cloudmail.py` | CloudMail 临时邮箱客户端 |
 | `cloudflare_temp_email.py` | Cloudflare Temp Email 客户端 |
-| `cpa_sync.py` | CPA 双向同步与去重 |
+| `cpa_sync.py` | CPA 上传、反向导入与去重 |
 | `manual_account.py` | 手动 OAuth 导入（自动 / 手动回调） |
 
 ## 项目结构
@@ -116,7 +118,7 @@ autoteam/
 │   ├── cloudmail.py            # CloudMail 客户端
 │   ├── cloudflare_temp_email.py # Cloudflare Temp Email 客户端
 │   ├── codex_auth.py           # Codex OAuth 与 token 管理
-│   ├── cpa_sync.py             # CPA 正反向同步
+│   ├── cpa_sync.py             # CPA 上传和反向导入
 │   ├── manual_account.py       # 手动 OAuth 导入
 │   ├── invite.py               # 自动注册流程
 │   └── web/dist/               # 前端构建产物
