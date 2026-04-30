@@ -9,8 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import requests
-
+from autoteam import outbound_proxy
 from autoteam.codex_auth import CODEX_CLIENT_ID
 from autoteam.config import SUB2API_EMAIL, SUB2API_GROUP, SUB2API_PASSWORD, SUB2API_URL
 from autoteam.textio import read_text
@@ -69,7 +68,7 @@ def _request(method: str, path: str, *, token: str | None = None, label: str, **
     headers = dict(kwargs.pop("headers", {}) or {})
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    resp = requests.request(method, url, headers=headers, timeout=_TIMEOUT, **kwargs)
+    resp = outbound_proxy.request(method, url, headers=headers, timeout=_TIMEOUT, **kwargs)
 
     try:
         payload = resp.json()

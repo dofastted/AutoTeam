@@ -74,11 +74,13 @@ services:
 然后在 `data/.env` 里使用宿主机别名，例如：
 
 ```env
-PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:3333
+OUTBOUND_PROXY_POOL=http://host.docker.internal:3333
+OUTBOUND_PROXY_BYPASS=localhost,127.0.0.1,::1
 ```
 
 说明：
 
+- `OUTBOUND_PROXY_POOL` 会影响 OpenAI/ChatGPT、邮箱服务、CPA 和 Sub2API；Playwright 代理留空时也跟随它
 - **Linux Docker** 通常需要手动加上面的 `extra_hosts`
 - **Windows / macOS Docker Desktop** 一般自带 `host.docker.internal`
 - 如果你直接写宿主机局域网 / Tailscale IP，也要确保对应端口对容器可达

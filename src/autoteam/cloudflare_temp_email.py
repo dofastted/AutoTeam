@@ -12,8 +12,7 @@ from email import policy
 from email.parser import BytesParser
 from urllib.parse import urlsplit, urlunsplit
 
-import requests
-
+from autoteam import outbound_proxy
 from autoteam.config import (
     CF_TEMP_EMAIL_ADMIN_PASSWORD,
     CF_TEMP_EMAIL_BASE_URL,
@@ -54,7 +53,7 @@ class CloudflareTempEmailClient:
         self.base_url = normalize_cloudflare_temp_email_base_url(CF_TEMP_EMAIL_BASE_URL)
         self.admin_password = str(CF_TEMP_EMAIL_ADMIN_PASSWORD or "").strip()
         self.domain = str(CF_TEMP_EMAIL_DOMAIN or "").strip().lstrip("@")
-        self.session = requests.Session()
+        self.session = outbound_proxy.new_session()
 
     def _headers(self):
         headers = {"Content-Type": "application/json"}

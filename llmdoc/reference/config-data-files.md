@@ -25,6 +25,7 @@
 - `PLAYWRIGHT_BROWSER_MODE`: 浏览器显示方式，`hidden` 不弹窗，`visible` 显示窗口，`embedded` 当前按不弹窗运行。
 - `PLAYWRIGHT_HEADLESS`: 旧版兼容项，`false` 等同可见窗口。
 - `BROWSER_PARALLEL_WORKERS`: 账号补满、轮转和直注批量任务的新号创建并行窗口数，范围 `1..3`。
+- `OUTBOUND_PROXY_ENABLED`、`OUTBOUND_PROXY_POOL`、`OUTBOUND_PROXY_BYPASS`、`OUTBOUND_PROXY_STRATEGY`、`OUTBOUND_PROXY_FAILOVER`: 后端外部请求出口代理池。默认使用 `http://127.0.0.1:10808`，本地地址默认绕过。
 - `PLAYWRIGHT_PROXY_URL`、`PLAYWRIGHT_PROXY_BYPASS`: 浏览器代理和本地回调绕过。
 - `AUTO_CHECK_INTERVAL`、`AUTO_CHECK_THRESHOLD`、`AUTO_CHECK_MIN_LOW`: 自动巡检。
 - `TEAM_TARGET_SEATS`: Team 总人数目标。

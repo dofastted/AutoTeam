@@ -119,16 +119,16 @@ docker compose restart
 
 直接打开 `http://your-server:8787`，会显示配置向导页面，在浏览器中填写。
 
-如果你需要让浏览器流量走宿主机 SOCKS5 代理，请先确认容器内可以解析并访问宿主机代理地址（例如 `host.docker.internal`，或你自己提供的宿主机网关别名）。
+如果你需要让 AutoTeam 的外部流量走宿主机代理，请先确认容器内可以解析并访问宿主机代理地址（例如 `host.docker.internal`，或你自己提供的宿主机网关别名）。
 
 然后在 `data/.env` 中加入：
 
 ```dotenv
-PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:1080
-PLAYWRIGHT_PROXY_BYPASS=localhost,127.0.0.1
+OUTBOUND_PROXY_POOL=http://host.docker.internal:1080
+OUTBOUND_PROXY_BYPASS=localhost,127.0.0.1,::1
 ```
 
-如果代理需要认证，建议改用 HTTP 代理：
+`OUTBOUND_PROXY_POOL` 会影响 OpenAI/ChatGPT、邮箱服务、CPA 和 Sub2API；Playwright 浏览器在 `PLAYWRIGHT_PROXY_URL` 留空时也会跟随它。如果只想覆盖浏览器，可以单独设置：
 
 ```dotenv
 PLAYWRIGHT_PROXY_URL=http://username:password@host.docker.internal:1080

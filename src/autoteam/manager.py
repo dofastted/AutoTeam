@@ -28,6 +28,7 @@ import threading
 import time
 from pathlib import Path
 
+from autoteam import outbound_proxy
 from autoteam.account_ops import delete_managed_account, fetch_team_state
 from autoteam.accounts import (
     STATUS_ACTIVE,
@@ -2748,34 +2749,38 @@ def main():
     except Exception:
         pass
 
-    if args.command == "status":
-        cmd_status()
-    elif args.command == "check":
-        cmd_check()
-    elif args.command == "rotate":
-        cmd_rotate(args.target)
-    elif args.command == "add":
-        cmd_add()
-    elif args.command == "manual-add":
-        cmd_manual_add()
-    elif args.command == "admin-login":
-        cmd_admin_login(args.email)
-    elif args.command == "admin-session":
-        cmd_admin_session(args.email)
-    elif args.command == "main-codex-sync":
-        cmd_main_codex_sync()
-    elif args.command == "fill":
-        cmd_fill(args.target)
-    elif args.command == "cleanup":
-        cmd_cleanup(args.max_seats)
-    elif args.command == "sync":
-        sync_to_cpa()
-    elif args.command == "pull-cpa":
-        cmd_pull_cpa()
-    elif args.command == "api":
+    if args.command == "api":
         from autoteam.api import start_server
 
         start_server(host=args.host, port=args.port)
+        return
+
+    with outbound_proxy.task_proxy_context() as proxy_url:
+        logger.info("[代理] 本次命令使用出口代理: %s", proxy_url or "direct")
+        if args.command == "status":
+            cmd_status()
+        elif args.command == "check":
+            cmd_check()
+        elif args.command == "rotate":
+            cmd_rotate(args.target)
+        elif args.command == "add":
+            cmd_add()
+        elif args.command == "manual-add":
+            cmd_manual_add()
+        elif args.command == "admin-login":
+            cmd_admin_login(args.email)
+        elif args.command == "admin-session":
+            cmd_admin_session(args.email)
+        elif args.command == "main-codex-sync":
+            cmd_main_codex_sync()
+        elif args.command == "fill":
+            cmd_fill(args.target)
+        elif args.command == "cleanup":
+            cmd_cleanup(args.max_seats)
+        elif args.command == "sync":
+            sync_to_cpa()
+        elif args.command == "pull-cpa":
+            cmd_pull_cpa()
 
 
 if __name__ == "__main__":

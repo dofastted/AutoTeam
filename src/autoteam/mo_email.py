@@ -9,8 +9,7 @@ import threading
 import time
 from urllib.parse import quote
 
-import requests
-
+from autoteam import outbound_proxy
 from autoteam.config import (
     EMAIL_POLL_INTERVAL,
     EMAIL_POLL_TIMEOUT,
@@ -60,7 +59,7 @@ class MoEmailClient:
         self.name_prefix = str(MO_EMAIL_NAME_PREFIX or "abc").strip() or "abc"
         self.start_index = max(1, _coerce_int(MO_EMAIL_START_INDEX, 1))
         self.expiry_time = _coerce_int(MO_EMAIL_EXPIRY_TIME, 3600000)
-        self.session = requests.Session()
+        self.session = outbound_proxy.new_session()
 
     def _headers(self):
         return {

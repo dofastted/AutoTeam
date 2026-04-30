@@ -6,8 +6,7 @@ import re
 import time
 import uuid
 
-import requests
-
+from autoteam import outbound_proxy
 from autoteam.config import (
     CLOUDMAIL_BASE_URL,
     CLOUDMAIL_DOMAIN,
@@ -31,7 +30,7 @@ class CloudMailClient:
     def __init__(self):
         self.base_url = CLOUDMAIL_BASE_URL
         self.token = None
-        self.session = requests.Session()
+        self.session = outbound_proxy.new_session()
 
     def _headers(self):
         h = {"Content-Type": "application/json"}

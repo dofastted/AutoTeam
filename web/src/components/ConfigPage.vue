@@ -354,6 +354,43 @@
           />
         </div>
 
+        <div class="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div class="mb-4 flex items-center justify-between gap-4">
+            <div>
+              <div class="text-sm font-medium text-white">出口代理池</div>
+              <div class="mt-1 text-xs leading-5 text-slate-400">
+                后端访问 OpenAI、邮箱服务、CPA 和 Sub2API 时使用。默认走 Windows Clash。
+              </div>
+            </div>
+            <div class="status-badge text-xs text-slate-400">
+              {{ outboundProxyEnabled ? '已启用' : '已关闭' }}
+            </div>
+          </div>
+          <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div v-for="field in outboundProxyFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+              <label class="mb-2 block text-sm font-medium text-slate-300">
+                {{ field.prompt }}
+                <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+              </label>
+              <select
+                v-if="isToggleField(field.key)"
+                v-model="runtimeForm[field.key]"
+                class="input-dark"
+              >
+                <option value="true">启用</option>
+                <option value="false">关闭</option>
+              </select>
+              <input
+                v-else
+                v-model="runtimeForm[field.key]"
+                :type="fieldInputType(field.key)"
+                :placeholder="field.default || ''"
+                class="input-dark"
+              />
+            </div>
+          </div>
+        </div>
+
         <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
           <button
             @click="proxyExpanded = !proxyExpanded"
@@ -362,7 +399,7 @@
             <div>
               <div class="text-sm font-medium text-white">高级代理设置</div>
               <div class="mt-1 text-xs leading-5 text-slate-400">
-                低频配置，默认折叠。只有浏览器流量需要单独代理时才填写。
+                低频配置，默认折叠。只有浏览器流量需要覆盖出口代理池时才填写。
               </div>
             </div>
             <span class="text-xs text-slate-400">{{ proxyExpanded ? '收起' : '展开' }}</span>
@@ -386,7 +423,7 @@
 
         <div class="flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 lg:flex-row lg:items-center lg:justify-between">
           <p class="text-xs leading-6 text-slate-400">
-            保存后会影响下一次启动的自动化浏览器。正在运行的浏览器任务会继续使用启动时的配置。
+            保存后会影响后续任务。正在运行的任务会继续使用启动时选中的代理。
           </p>
           <button
             @click="saveRuntimeConfig"
@@ -527,7 +564,7 @@ const emit = defineEmits(['refresh', 'admin-progress'])
 const runtimeCategoryKeys = {
   cloudmail: ['MAIL_PROVIDER', 'MO_EMAIL_BASE_URL', 'MO_EMAIL_API_KEY', 'MO_EMAIL_DOMAIN', 'MO_EMAIL_NAME_PREFIX', 'MO_EMAIL_START_INDEX', 'MO_EMAIL_EXPIRY_TIME', 'CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN', 'CF_TEMP_EMAIL_BASE_URL', 'CF_TEMP_EMAIL_ADMIN_PASSWORD', 'CF_TEMP_EMAIL_DOMAIN'],
   sync: ['SYNC_TARGET_CPA', 'SYNC_TARGET_SUB2API', 'CPA_URL', 'CPA_KEY', 'SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP'],
-  proxy: ['PLAYWRIGHT_BROWSER_MODE', 'PLAYWRIGHT_HEADLESS', 'BROWSER_PARALLEL_WORKERS', 'PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS'],
+  proxy: ['PLAYWRIGHT_BROWSER_MODE', 'PLAYWRIGHT_HEADLESS', 'BROWSER_PARALLEL_WORKERS', 'OUTBOUND_PROXY_ENABLED', 'OUTBOUND_PROXY_POOL', 'OUTBOUND_PROXY_BYPASS', 'OUTBOUND_PROXY_STRATEGY', 'OUTBOUND_PROXY_FAILOVER', 'PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS'],
   security: ['API_KEY'],
 }
 
@@ -551,8 +588,8 @@ const runtimeCategoryMeta = {
     icon: '🛰️',
     badge: 'Proxy / Advanced',
     title: '代理 / 高级',
-    description: '用于配置浏览器显示方式和 Playwright 流量代理。浏览器可设为隐藏、可见窗口或内嵌。',
-    note: '隐藏模式默认不弹窗；内嵌模式先按不弹窗运行，后续可接页面内预览。',
+    description: '用于配置后端出口代理池、浏览器显示方式和 Playwright 覆盖代理。',
+    note: '出口代理池默认使用 Windows Clash；Playwright 代理留空时跟随出口代理池。',
   },
   security: {
     icon: '🔐',
@@ -609,6 +646,7 @@ function fieldsByKeys(keys) {
 }
 
 const securityFields = computed(() => fieldsByKeys(runtimeCategoryKeys.security))
+const outboundProxyFields = computed(() => fieldsByKeys(['OUTBOUND_PROXY_ENABLED', 'OUTBOUND_PROXY_POOL', 'OUTBOUND_PROXY_BYPASS', 'OUTBOUND_PROXY_STRATEGY', 'OUTBOUND_PROXY_FAILOVER']))
 const proxyFields = computed(() => fieldsByKeys(['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS']))
 const syncToggleFields = computed(() => fieldsByKeys(['SYNC_TARGET_CPA', 'SYNC_TARGET_SUB2API']))
 const selectedMailProvider = computed(() => {
@@ -621,6 +659,7 @@ const cfTempEmailFields = computed(() => fieldsByKeys(['CF_TEMP_EMAIL_BASE_URL',
 
 const syncCpaEnabled = computed(() => String(runtimeForm.SYNC_TARGET_CPA || '').toLowerCase() === 'true')
 const syncSub2apiEnabled = computed(() => String(runtimeForm.SYNC_TARGET_SUB2API || '').toLowerCase() === 'true')
+const outboundProxyEnabled = computed(() => String(runtimeForm.OUTBOUND_PROXY_ENABLED || 'true').toLowerCase() === 'true')
 const syncCpaFields = computed(() => syncCpaEnabled.value ? fieldsByKeys(['CPA_URL', 'CPA_KEY']) : [])
 const syncSub2apiFields = computed(() => syncSub2apiEnabled.value ? fieldsByKeys(['SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP']) : [])
 
@@ -682,7 +721,7 @@ const currentRuntimeStatus = computed(() => {
   }
 
   if (selectedRuntimeCategory.value === 'proxy') {
-    const proxyConfigured = fieldsByKeys(['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS']).some(field => field.configured)
+    const proxyConfigured = outboundProxyEnabled.value || fieldsByKeys(['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS']).some(field => field.configured)
     const browserMode = normalizedBrowserMode.value
     if (proxyConfigured) {
       return {
@@ -771,7 +810,7 @@ function fieldInputType(key) {
 }
 
 function isToggleField(key) {
-  return key === 'SYNC_TARGET_CPA' || key === 'SYNC_TARGET_SUB2API' || key === 'PLAYWRIGHT_HEADLESS'
+  return key === 'SYNC_TARGET_CPA' || key === 'SYNC_TARGET_SUB2API' || key === 'PLAYWRIGHT_HEADLESS' || key === 'OUTBOUND_PROXY_ENABLED' || key === 'OUTBOUND_PROXY_FAILOVER'
 }
 
 const normalizedBrowserMode = computed(() => {

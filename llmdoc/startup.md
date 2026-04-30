@@ -10,6 +10,7 @@
 
 - 账号轮转、补位、清理：读 `llmdoc/architecture/account-lifecycle.md`。
 - 管理员登录、浏览器自动化、Codex OAuth：读 `llmdoc/architecture/browser-and-oauth.md`。
+- 出口代理、OpenAI/邮箱/远端同步网络请求：读 `llmdoc/architecture/outbound-proxy.md`。
 - CPA / Sub2API / auth 文件：读 `llmdoc/architecture/sync-targets.md` 和 `llmdoc/reference/config-data-files.md`。
 - Web 页面或 HTTP API：读 `llmdoc/architecture/api-and-web.md`。
 - 本地测试、构建、启动：读 `llmdoc/guides/local-development.md`。

@@ -16,6 +16,7 @@
 
 - `llmdoc/architecture/account-lifecycle.md`: 账号状态、轮转、补位、清理。
 - `llmdoc/architecture/browser-and-oauth.md`: Playwright、管理员登录、Codex OAuth、手动 OAuth。
+- `llmdoc/architecture/outbound-proxy.md`: 后端外部请求、出口代理池、Playwright 代理继承。
 - `llmdoc/architecture/sync-targets.md`: CPA / Sub2API 正向同步、CPA 反向导入、主号同步。
 - `llmdoc/architecture/api-and-web.md`: FastAPI 后端、Vue 前端、任务与页面关系。
 

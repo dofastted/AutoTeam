@@ -33,6 +33,11 @@ cp .env.example .env
 | `PLAYWRIGHT_BROWSER_MODE` | 浏览器显示方式，可选 `hidden`、`visible`、`embedded` | 否（默认 `hidden`） |
 | `PLAYWRIGHT_HEADLESS` | 旧版兼容项，`false` 等同 `PLAYWRIGHT_BROWSER_MODE=visible` | 否（默认 `true`） |
 | `BROWSER_PARALLEL_WORKERS` | 账号补满、轮转和直注批量任务的并行窗口数，范围 `1..3` | 否（默认 `1`） |
+| `OUTBOUND_PROXY_ENABLED` | 是否启用全局出口代理池 | 否（默认 `true`） |
+| `OUTBOUND_PROXY_POOL` | 全局出口代理池，逗号或换行分隔，支持 `http`、`https`、`socks5`、`socks5h`、`direct`、`none` | 否（默认 `http://127.0.0.1:10808`） |
+| `OUTBOUND_PROXY_BYPASS` | 出口代理绕过列表 | 否（默认 `localhost,127.0.0.1,::1`） |
+| `OUTBOUND_PROXY_STRATEGY` | 出口代理选择策略 | 否（当前为 `task-sticky`） |
+| `OUTBOUND_PROXY_FAILOVER` | 网络失败后是否尝试下一个代理 | 否（默认 `true`） |
 | `PLAYWRIGHT_PROXY_URL` | Playwright 浏览器代理 URL，如 `socks5://host:port` 或 `http://user:pass@host:port` | 否 |
 | `PLAYWRIGHT_PROXY_BYPASS` | Playwright 代理绕过列表，如 `localhost,127.0.0.1` | 否 |
 | `AUTO_CHECK_THRESHOLD` | 额度低于此百分比触发轮转 | 否（默认 `10`） |
@@ -58,7 +63,7 @@ cp .env.example .env
 - `API_KEY` 单独放在 **安全 / 访问控制**
 - CPA / Sub2API 开关和连接信息放在 **远端同步**
 - `.env` 原文编辑保留在 **源文件编辑**
-- 浏览器显示方式和代理配置属于低频项，默认放在 **代理 / 高级**
+- 浏览器显示方式、全局出口代理池和 Playwright 覆盖代理放在 **代理 / 高级**
 
 ## Sub2API 分组
 
@@ -107,7 +112,30 @@ PLAYWRIGHT_HEADLESS=false
 
 当同时存在 `PLAYWRIGHT_BROWSER_MODE` 和 `PLAYWRIGHT_HEADLESS` 时，优先使用 `PLAYWRIGHT_BROWSER_MODE`。
 
-推荐优先使用一个环境变量：
+### 出口代理池
+
+AutoTeam 后端访问 OpenAI/ChatGPT、邮箱服务、CPA、Sub2API 时会使用全局出口代理池。默认值是 Windows Clash：
+
+```dotenv
+OUTBOUND_PROXY_ENABLED=true
+OUTBOUND_PROXY_POOL=http://127.0.0.1:10808
+OUTBOUND_PROXY_BYPASS=localhost,127.0.0.1,::1
+OUTBOUND_PROXY_STRATEGY=task-sticky
+OUTBOUND_PROXY_FAILOVER=true
+```
+
+说明：
+
+- 一次账号注册、OAuth、额度检查或同步任务内固定同一个代理。
+- 连接超时、代理握手失败等网络错误会尝试下一个代理。
+- HTTP 401/403、账号失效、CPA/Sub2API 鉴权失败不会切换代理。
+- `OUTBOUND_PROXY_POOL` 支持逗号或换行分隔，支持 `http`、`https`、`socks5`、`socks5h`，也支持 `direct` / `none` 表示直连。
+- `localhost`、`127.0.0.1`、`::1` 默认不走代理，避免影响 OAuth 本地回调和本地 API。
+- 如果使用 `socks5`，当前 Python 环境需要安装 `requests[socks]`；否则请改用 HTTP 代理。
+
+### Playwright 覆盖代理
+
+`PLAYWRIGHT_PROXY_URL` 留空时，浏览器跟随后端出口代理池。如果只想让浏览器使用单独代理，可以设置：
 
 ```dotenv
 PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:1080

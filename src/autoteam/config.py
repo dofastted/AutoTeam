@@ -1,9 +1,11 @@
 """配置文件 - 从 .env 文件或环境变量加载"""
 
+import importlib
 import os
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from autoteam import outbound_proxy
 from autoteam.textio import parse_env_line, parse_env_value, read_text
 
 # 项目根目录（pyproject.toml 所在位置）
@@ -17,6 +19,8 @@ if _env_file.exists():
         if parsed:
             key, value = parsed
             os.environ.setdefault(key, value)
+
+outbound_proxy = importlib.reload(outbound_proxy)
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -83,6 +87,13 @@ TEAM_TARGET_SEATS = min(MAX_TEAM_SEATS, max(1, _get_int_env("TEAM_TARGET_SEATS",
 FILL_BATCH_SIZE = min(MAX_TEAM_SEATS, max(1, _get_int_env("FILL_BATCH_SIZE", 10)))  # 补满成员单次最多新增账号数
 BROWSER_PARALLEL_WORKERS = min(3, max(1, _get_int_env("BROWSER_PARALLEL_WORKERS", 1)))  # 浏览器并行窗口数
 
+# 出口代理池配置
+OUTBOUND_PROXY_ENABLED = _get_bool_env("OUTBOUND_PROXY_ENABLED", True)
+OUTBOUND_PROXY_POOL = os.environ.get("OUTBOUND_PROXY_POOL", outbound_proxy.DEFAULT_PROXY_URL).strip()
+OUTBOUND_PROXY_BYPASS = os.environ.get("OUTBOUND_PROXY_BYPASS", outbound_proxy.DEFAULT_BYPASS).strip()
+OUTBOUND_PROXY_STRATEGY = os.environ.get("OUTBOUND_PROXY_STRATEGY", "task-sticky").strip() or "task-sticky"
+OUTBOUND_PROXY_FAILOVER = _get_bool_env("OUTBOUND_PROXY_FAILOVER", True)
+
 # Playwright 代理配置
 _PLAYWRIGHT_BROWSER_MODES = {"hidden", "visible", "embedded"}
 _raw_browser_mode = os.environ.get("PLAYWRIGHT_BROWSER_MODE", "").strip().lower()
@@ -91,11 +102,27 @@ if _raw_browser_mode in _PLAYWRIGHT_BROWSER_MODES:
 else:
     PLAYWRIGHT_BROWSER_MODE = "hidden" if _get_bool_env("PLAYWRIGHT_HEADLESS", True) else "visible"
 PLAYWRIGHT_HEADLESS = PLAYWRIGHT_BROWSER_MODE != "visible"
+
+
+def _get_default_playwright_proxy_url() -> str:
+    explicit = os.environ.get("PLAYWRIGHT_PROXY_URL", "").strip()
+    if explicit:
+        return explicit
+    current_proxy = outbound_proxy.current_proxy_url()
+    if current_proxy:
+        return current_proxy
+    for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
 PLAYWRIGHT_PROXY_URL = os.environ.get("PLAYWRIGHT_PROXY_URL", "").strip()
 PLAYWRIGHT_PROXY_SERVER = os.environ.get("PLAYWRIGHT_PROXY_SERVER", "").strip()
 PLAYWRIGHT_PROXY_USERNAME = os.environ.get("PLAYWRIGHT_PROXY_USERNAME", "").strip()
 PLAYWRIGHT_PROXY_PASSWORD = os.environ.get("PLAYWRIGHT_PROXY_PASSWORD", "").strip()
-PLAYWRIGHT_PROXY_BYPASS = os.environ.get("PLAYWRIGHT_PROXY_BYPASS", "").strip()
+PLAYWRIGHT_PROXY_BYPASS = os.environ.get("PLAYWRIGHT_PROXY_BYPASS", "").strip() or "localhost,127.0.0.1"
 
 
 def _format_proxy_host(hostname: str) -> str:
@@ -133,8 +160,9 @@ def get_playwright_launch_options():
     }
 
     proxy = None
-    if PLAYWRIGHT_PROXY_URL:
-        proxy = _parse_proxy_url(PLAYWRIGHT_PROXY_URL)
+    playwright_proxy_url = _get_default_playwright_proxy_url()
+    if playwright_proxy_url:
+        proxy = _parse_proxy_url(playwright_proxy_url)
     elif PLAYWRIGHT_PROXY_SERVER:
         proxy = {"server": PLAYWRIGHT_PROXY_SERVER}
         if PLAYWRIGHT_PROXY_USERNAME:

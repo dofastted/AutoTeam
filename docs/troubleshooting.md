@@ -168,24 +168,26 @@ volumes:
   - ./data:/app/data
 ```
 
-### 容器里访问不到宿主机 SOCKS5 代理
+### 容器里访问不到宿主机代理
 
 如果代理在宿主机上，比如 `host.docker.internal:1080`，请先确认容器内可以解析并访问宿主机代理地址；不同 Docker / Podman 环境的宿主机别名配置方式可能不同。
 
 然后在 `data/.env` 中配置：
 
 ```dotenv
-PLAYWRIGHT_PROXY_URL=socks5://host.docker.internal:1080
-PLAYWRIGHT_PROXY_BYPASS=localhost,127.0.0.1
+OUTBOUND_PROXY_POOL=http://host.docker.internal:1080
+OUTBOUND_PROXY_BYPASS=localhost,127.0.0.1,::1
 ```
 
-如果代理需要认证，建议改用 HTTP 代理：
+如果只想让浏览器使用单独代理，再设置：
 
 ```dotenv
 PLAYWRIGHT_PROXY_URL=http://username:password@host.docker.internal:1080
 ```
 
 > 注意：Playwright / Chromium 不支持带认证的 socks5，因此不要写成 `socks5://username:password@host:port`。
+
+如果后端使用 `socks5` 代理时报 `Missing dependencies for SOCKS support`，说明当前 Python 环境缺少 SOCKS 支持。安装 `requests[socks]`，或把 `OUTBOUND_PROXY_POOL` 改成 HTTP 代理。
 
 ## Web 面板相关
 

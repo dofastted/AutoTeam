@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from autoteam import outbound_proxy
 from autoteam.config import API_KEY
 from autoteam.textio import parse_env_line, read_text, write_text
 
@@ -99,6 +100,11 @@ class SetupConfig(BaseModel):
     PLAYWRIGHT_HEADLESS: str = "true"
     PLAYWRIGHT_PROXY_URL: str = ""
     PLAYWRIGHT_PROXY_BYPASS: str = ""
+    OUTBOUND_PROXY_ENABLED: str = "true"
+    OUTBOUND_PROXY_POOL: str = outbound_proxy.DEFAULT_PROXY_URL
+    OUTBOUND_PROXY_BYPASS: str = outbound_proxy.DEFAULT_BYPASS
+    OUTBOUND_PROXY_STRATEGY: str = "task-sticky"
+    OUTBOUND_PROXY_FAILOVER: str = "true"
     API_KEY: str = ""
     TEAM_TARGET_SEATS: str = "999"
     FILL_BATCH_SIZE: str = "10"
@@ -114,6 +120,10 @@ _RUNTIME_CONFIG_CLEARABLE_FIELDS = {
     "PLAYWRIGHT_HEADLESS",
     "PLAYWRIGHT_PROXY_URL",
     "PLAYWRIGHT_PROXY_BYPASS",
+    "OUTBOUND_PROXY_ENABLED",
+    "OUTBOUND_PROXY_POOL",
+    "OUTBOUND_PROXY_BYPASS",
+    "OUTBOUND_PROXY_FAILOVER",
 }
 
 _CLOUDMAIL_REQUIRED_KEYS = ("CLOUDMAIL_BASE_URL", "CLOUDMAIL_EMAIL", "CLOUDMAIL_PASSWORD", "CLOUDMAIL_DOMAIN")
@@ -174,6 +184,11 @@ _ALL_RUNTIME_ENV_KEYS = [
     "PLAYWRIGHT_PROXY_USERNAME",
     "PLAYWRIGHT_PROXY_PASSWORD",
     "PLAYWRIGHT_PROXY_BYPASS",
+    "OUTBOUND_PROXY_ENABLED",
+    "OUTBOUND_PROXY_POOL",
+    "OUTBOUND_PROXY_BYPASS",
+    "OUTBOUND_PROXY_STRATEGY",
+    "OUTBOUND_PROXY_FAILOVER",
 ]
 _RUNTIME_ENV_BASE = {key: os.environ.get(key) for key in _ALL_RUNTIME_ENV_KEYS}
 _runtime_env_reload_lock = threading.Lock()
@@ -377,6 +392,7 @@ def _reload_runtime_config_modules():
         "autoteam.mail_provider",
         "autoteam.cpa_sync",
         "autoteam.sub2api_sync",
+        "autoteam.outbound_proxy",
     ):
         try:
             module = importlib.import_module(module_name)
@@ -1009,7 +1025,10 @@ def _run_task(task_id: str, func, *args, **kwargs):
     task["started_at"] = time.time()
 
     try:
-        result = func(*args, **kwargs)
+        with outbound_proxy.task_proxy_context() as proxy_url:
+            task["proxy_url"] = proxy_url or "direct"
+            logger.info("[API] 任务 %s 使用出口代理: %s", task_id[:8], proxy_url or "direct")
+            result = func(*args, **kwargs)
         if task.get("stop_requested"):
             _mark_task_stopped(task, task.get("error") or "任务已停止")
         else:
@@ -2362,8 +2381,6 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
         if not access_token:
             return None
 
-        import requests
-
         headers = {
             "authorization": f"Bearer {access_token}",
             "chatgpt-account-id": account_id,
@@ -2373,7 +2390,8 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
         if device_id:
             headers["oai-device-id"] = device_id
 
-        users_resp = requests.get(
+        users_resp = outbound_proxy.request(
+            "GET",
             f"https://chatgpt.com/backend-api/accounts/{account_id}/users",
             headers=headers,
             timeout=20,
@@ -2382,7 +2400,8 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
         users_data = users_resp.json()
         members = users_data.get("items", users_data.get("users", users_data.get("members", [])))
 
-        invites_resp = requests.get(
+        invites_resp = outbound_proxy.request(
+            "GET",
             f"https://chatgpt.com/backend-api/accounts/{account_id}/invites",
             headers=headers,
             timeout=20,

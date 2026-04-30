@@ -7,7 +7,7 @@
 默认行为：
 
 - `PLAYWRIGHT_BROWSER_MODE=hidden` 默认不弹出窗口；`visible` 显示窗口；`embedded` 当前按不弹窗处理。旧 `PLAYWRIGHT_HEADLESS=false` 仍兼容。
-- 支持 `PLAYWRIGHT_PROXY_URL`、`PLAYWRIGHT_PROXY_SERVER`、`PLAYWRIGHT_PROXY_USERNAME`、`PLAYWRIGHT_PROXY_PASSWORD`、`PLAYWRIGHT_PROXY_BYPASS`。
+- 支持 `PLAYWRIGHT_PROXY_URL`、`PLAYWRIGHT_PROXY_SERVER`、`PLAYWRIGHT_PROXY_USERNAME`、`PLAYWRIGHT_PROXY_PASSWORD`、`PLAYWRIGHT_PROXY_BYPASS`。若 `PLAYWRIGHT_PROXY_URL` 未设置，浏览器会使用 `llmdoc/architecture/outbound-proxy.md` 里的当前任务出口代理。
 - `src/autoteam/browser_runtime.py` (`acquire_browser_lease`): 默认只允许一个 Chromium 流程；账号补满、轮转和直注批量任务可按 `BROWSER_PARALLEL_WORKERS=1..3` 临时开放多个独立 Chromium 槽位。异常退出会关闭浏览器并释放自己的槽位。
 - 浏览器流程常写入 `screenshots/` 作为排查证据。
 

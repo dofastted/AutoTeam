@@ -6,6 +6,7 @@ import re
 import secrets
 import sys
 
+from autoteam import outbound_proxy
 from autoteam.config import PROJECT_ROOT
 from autoteam.mail_provider import (
     MAIL_PROVIDER_CLOUDFLARE_TEMP_EMAIL,
@@ -52,6 +53,11 @@ REQUIRED_CONFIGS = [
     ("PLAYWRIGHT_HEADLESS", "Playwright 无头模式（兼容旧配置 true/false）", "true", True),
     ("PLAYWRIGHT_PROXY_URL", "Playwright 浏览器代理 URL（可选，如 socks5://host:port）", "", True),
     ("PLAYWRIGHT_PROXY_BYPASS", "Playwright 代理绕过列表（可选，如 localhost,127.0.0.1）", "", True),
+    ("OUTBOUND_PROXY_ENABLED", "启用全局出口代理池（true/false）", "true", True),
+    ("OUTBOUND_PROXY_POOL", "全局出口代理池（逗号或换行分隔）", outbound_proxy.DEFAULT_PROXY_URL, True),
+    ("OUTBOUND_PROXY_BYPASS", "出口代理绕过列表", outbound_proxy.DEFAULT_BYPASS, True),
+    ("OUTBOUND_PROXY_STRATEGY", "出口代理选择策略", "task-sticky", True),
+    ("OUTBOUND_PROXY_FAILOVER", "出口代理失败后尝试下一个（true/false）", "true", True),
     ("API_KEY", "API 鉴权密钥（回车自动生成）", "", False),
     ("TEAM_TARGET_SEATS", "Team 总人数目标", "999", True),
     ("FILL_BATCH_SIZE", "补满成员单次最多新增数", "10", True),
@@ -338,9 +344,8 @@ def _verify_cpa():
     logger.info("[验证] CPA 配置...")
 
     try:
-        import requests
-
-        resp = requests.get(
+        resp = outbound_proxy.request(
+            "GET",
             f"{cpa_url}/v0/management/auth-files",
             headers={"Authorization": f"Bearer {cpa_key}"},
             timeout=10,

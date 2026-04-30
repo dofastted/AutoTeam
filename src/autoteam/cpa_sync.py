@@ -8,8 +8,7 @@ from datetime import datetime
 from hashlib import md5
 from pathlib import Path
 
-import requests
-
+from autoteam import outbound_proxy
 from autoteam.auth_storage import AUTH_DIR, ensure_auth_dir, ensure_auth_file_permissions
 from autoteam.config import CPA_KEY, CPA_URL
 from autoteam.textio import write_text
@@ -23,7 +22,7 @@ def _headers():
 
 def list_cpa_files():
     """获取 CPA 中所有认证文件"""
-    resp = requests.get(f"{CPA_URL}/v0/management/auth-files", headers=_headers(), timeout=10)
+    resp = outbound_proxy.request("GET", f"{CPA_URL}/v0/management/auth-files", headers=_headers(), timeout=10)
     if resp.status_code != 200:
         logger.error("[CPA] 获取文件列表失败: %d", resp.status_code)
         return []
@@ -39,7 +38,8 @@ def upload_to_cpa(filepath):
         return False
 
     with open(filepath, "rb") as f:
-        resp = requests.post(
+        resp = outbound_proxy.request(
+            "POST",
             f"{CPA_URL}/v0/management/auth-files",
             headers=_headers(),
             files={"file": (filepath.name, f, "application/json")},
@@ -56,7 +56,8 @@ def upload_to_cpa(filepath):
 
 def delete_from_cpa(name):
     """从 CPA 删除认证文件"""
-    resp = requests.delete(
+    resp = outbound_proxy.request(
+        "DELETE",
         f"{CPA_URL}/v0/management/auth-files",
         headers=_headers(),
         params={"name": name},
@@ -72,7 +73,8 @@ def delete_from_cpa(name):
 
 def download_from_cpa(name):
     """从 CPA 下载认证文件内容。"""
-    resp = requests.get(
+    resp = outbound_proxy.request(
+        "GET",
         f"{CPA_URL}/v0/management/auth-files/download",
         headers=_headers(),
         params={"name": name},

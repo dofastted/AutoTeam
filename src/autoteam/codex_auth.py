@@ -13,6 +13,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 import autoteam.display  # noqa: F401
+from autoteam import outbound_proxy
 from autoteam.admin_state import (
     get_admin_email,
     get_admin_session_token,
@@ -80,9 +81,8 @@ def _build_auth_url(code_challenge, state):
 def _exchange_auth_code(auth_code, code_verifier, fallback_email=None):
     logger.info("[Codex] 获取到 auth code，交换 token...")
 
-    import requests
-
-    resp = requests.post(
+    resp = outbound_proxy.request(
+        "POST",
         CODEX_TOKEN_URL,
         data={
             "grant_type": "authorization_code",
@@ -1534,8 +1534,6 @@ def check_codex_quota(access_token, account_id=None):
     返回 ("ok", quota_info) | ("exhausted", exhausted_info) | ("auth_error", None)
     quota_info = {"primary_pct": int, "primary_resets_at": int, "weekly_pct": int, "weekly_resets_at": int}
     """
-    import requests
-
     if not account_id:
         account_id = get_chatgpt_account_id()
 
@@ -1547,7 +1545,8 @@ def check_codex_quota(access_token, account_id=None):
         headers["Chatgpt-Account-Id"] = account_id
 
     try:
-        resp = requests.get(
+        resp = outbound_proxy.request(
+            "GET",
             "https://chatgpt.com/backend-api/wham/usage",
             headers=headers,
             timeout=30,
@@ -1588,9 +1587,8 @@ def check_codex_quota(access_token, account_id=None):
 
 def refresh_access_token(refresh_token):
     """刷新 access token"""
-    import requests
-
-    resp = requests.post(
+    resp = outbound_proxy.request(
+        "POST",
         CODEX_TOKEN_URL,
         data={
             "grant_type": "refresh_token",
