@@ -128,3 +128,50 @@ def test_get_team_members_returns_local_snapshot_without_cached_token(monkeypatc
     assert result["members"][0]["email"] == "one@example.com"
     assert result["members"][0]["status"] == "active"
     assert "access token" in result["refresh_error"]
+
+
+def test_get_team_members_enriches_cached_members_with_local_sold_status(monkeypatch):
+    monkeypatch.setattr("autoteam.admin_state.get_admin_session_token", lambda: "session")
+    monkeypatch.setattr("autoteam.admin_state.get_chatgpt_account_id", lambda: "acc-1")
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(
+        "autoteam.team_cache.load_team_members_cache",
+        lambda: {
+            "members": [
+                {
+                    "email": "sold@example.com",
+                    "role": "member",
+                    "user_id": "user-1",
+                    "is_local": False,
+                    "type": "member",
+                }
+            ],
+            "total": 1,
+            "invites": 0,
+            "cached": False,
+        },
+    )
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "sold@example.com",
+                "status": "sold",
+                "sync_disabled": True,
+                "auth_file": "/tmp/auth.json",
+                "cpa_archive_file": "/tmp/archive/auth.json",
+                "sold_at": 123,
+            }
+        ],
+    )
+
+    result = api.get_team_members(refresh=False)
+
+    member = result["members"][0]
+    assert result["cached"] is True
+    assert member["is_local"] is True
+    assert member["status"] == "sold"
+    assert member["sync_disabled"] is True
+    assert member["has_auth_file"] is True
+    assert member["has_cpa_archive_file"] is True
+    assert member["sold_at"] == 123

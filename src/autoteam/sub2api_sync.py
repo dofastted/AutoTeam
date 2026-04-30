@@ -687,18 +687,30 @@ def _load_pool_targets(target_emails: set[str] | None = None) -> tuple[dict[str,
     target_emails.discard("")
 
     for acc in accounts:
-        if acc.get("status") != STATUS_ACTIVE or acc.get("sync_disabled") or not acc.get("auth_file"):
+        if acc.get("status") != STATUS_ACTIVE or acc.get("sync_disabled"):
             continue
         account_email = str(acc.get("email") or "").strip().lower()
         if target_emails and account_email not in target_emails:
             continue
-        auth_path = Path(acc["auth_file"])
-        if not auth_path.exists():
-            continue
-        try:
-            auth_data = _load_auth_data(auth_path)
-        except Exception as exc:
-            logger.warning("[Sub2API] 读取 auth 文件失败，跳过 %s: %s", auth_path, exc)
+        auth_path = None
+        auth_data = None
+        for key in ("rt_auth_file", "auth_file"):
+            candidate = Path(str(acc.get(key) or "").strip())
+            if not candidate.exists():
+                continue
+            try:
+                candidate_data = _load_auth_data(candidate)
+            except Exception as exc:
+                logger.warning("[Sub2API] 读取 auth 文件失败，跳过 %s: %s", candidate, exc)
+                continue
+            if candidate_data.get("credential_source") == "chatgpt_session":
+                continue
+            if not candidate_data.get("access_token"):
+                continue
+            auth_path = candidate
+            auth_data = candidate_data
+            break
+        if auth_path is None or auth_data is None:
             continue
 
         email = (auth_data.get("email") or acc.get("email") or "").strip().lower()

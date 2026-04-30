@@ -26,8 +26,6 @@ from autoteam.codex_auth import (
     quota_result_resets_at,
     save_auth_file,
 )
-from autoteam.sync_targets import sync_to_configured_targets as sync_to_cpa
-
 logger = logging.getLogger(__name__)
 
 
@@ -229,7 +227,7 @@ class ManualAccountFlow:
         if not email:
             raise RuntimeError("OAuth token 中缺少邮箱")
 
-        auth_file = save_auth_file(bundle)
+        auth_file = save_auth_file(bundle, source="oauth")
         plan_type = bundle.get("plan_type") or "unknown"
         account_status = STATUS_ACTIVE if plan_type == "team" else STATUS_STANDBY
 
@@ -237,14 +235,25 @@ class ManualAccountFlow:
         account = find_account(accounts, email)
         if not account:
             add_account(email, "")
+            account = find_account(load_accounts(), email)
+
+        previous_session_auth_file = (account or {}).get("session_auth_file") or ""
+        if not previous_session_auth_file:
+            current_auth_file = (account or {}).get("auth_file") or ""
+            if current_auth_file and current_auth_file.endswith("-session.json"):
+                previous_session_auth_file = current_auth_file
 
         update_fields = {
             "status": account_status,
             "auth_file": auth_file,
+            "rt_auth_file": auth_file,
+            "plan_type": plan_type,
             "quota_exhausted_at": None,
             "quota_resets_at": None,
             "last_active_at": time.time(),
         }
+        if previous_session_auth_file:
+            update_fields["session_auth_file"] = previous_session_auth_file
 
         token = bundle.get("access_token")
         account_id = bundle.get("account_id")
@@ -261,7 +270,6 @@ class ManualAccountFlow:
                 update_fields["quota_resets_at"] = quota_result_resets_at(quota_info) or int(time.time() + 18000)
 
         update_account(email, **update_fields)
-        sync_to_cpa()
 
         return {
             "status": "completed",
@@ -271,6 +279,7 @@ class ManualAccountFlow:
                 "plan_type": plan_type,
                 "status": account_status,
                 "auth_file": auth_file,
+                "rt_auth_file": auth_file,
             },
         }
 

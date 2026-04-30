@@ -10,5 +10,9 @@
 - Playwright 默认隐藏运行。`PLAYWRIGHT_BROWSER_MODE=visible` 可显示窗口；`embedded` 当前按不弹窗处理。旧 `PLAYWRIGHT_HEADLESS=false` 仍兼容。配置入口是 `src/autoteam/config.py` (`get_playwright_launch_options`)。
 - 后端外部请求默认走出口代理池。`OUTBOUND_PROXY_POOL` 默认 `http://127.0.0.1:10808`，`localhost`、`127.0.0.1`、`::1` 默认直连；任务内固定一个代理，网络失败后可尝试下一个。
 - `BROWSER_PARALLEL_WORKERS` 控制账号补满、轮转和直注批量任务的新号创建并行窗口数，范围 `1..3`，默认 `1`。API 业务任务仍由 `src/autoteam/api.py` (`_playwright_lock`) 串行调度。
-- `auths/codex-{email}-{plan_type}-{hash}.json` 是账号池认证文件。`auths/codex-main-*.json` 是主号认证文件。
+- CPA 批量直注的并行窗口由 `src/autoteam/cpa_batch.py` 自己调度。注册阶段必须先创建邮箱、完成注册入席、拿到 ChatGPT session 并保存为本地备份；浏览器错误、认证错误页或缺少 session 凭证时，当前邮箱失败并换新邮箱，不做 Team 成员检查兜底。
+- CPA 云端上传只使用 OAuth RT auth 文件。`src/autoteam/cpa_batch.py` (`_verify_and_upload_cpa`) 会在缺少 RT 文件时调用 `login_codex_via_browser`，通过 Codex OAuth callback 换取 refresh token，再检查额度并上传 CPA。
+- 恢复 CPA 批量任务时，`src/autoteam/flow_runs.py` (`fail_running_flow_accounts`) 会先把该 run 中遗留的账号级 `running` 记录标记为失败。
+- `auths/codex-{email}-{plan_type}-{hash}-session.json` 是 ChatGPT session 备份文件。`auths/codex-{email}-{plan_type}-{hash}-oauth.json` 是 CPA 使用的 OAuth RT 文件。`auths/codex-main-*.json` 是主号认证文件。
 - CPA 兼容文件由 `src/autoteam/codex_auth.py` (`save_auth_file`, `save_main_auth_file`) 写入，由 `src/autoteam/cpa_sync.py` 上传或拉回。
+- 本地巡检 hook 由 `tools/codex-hook/check_and_invoke.py` 执行，运行状态写入 `.autoteam-hook/runtime/campaign.json` 和 `.autoteam-hook/logs/`。安装脚本是 `tools/codex-hook/install_cron.sh`，当前通过用户 `crontab` 每 10 分钟触发一次；它会检查成功账号登记、异步 CPA JSON 是否已进远端，并在需要时恢复或新开批量任务。

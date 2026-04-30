@@ -141,6 +141,56 @@ def test_search_emails_by_recipient_fetches_detail_when_list_has_no_content(monk
     assert client.extract_verification_code(emails[0]) == "123456"
 
 
+def test_search_emails_by_recipient_uses_user_id_account_identifier(monkeypatch):
+    client = mo_email.MoEmailClient()
+    monkeypatch.setattr(client, "_resolve_account_id_for_email", lambda email: "user-1")
+
+    def fake_request(method, path, **kwargs):
+        if path == "/api/emails/user-1":
+            return {
+                "messages": [
+                    {
+                        "id": "msg-1",
+                        "from_address": "OpenAI <noreply@tm.openai.com>",
+                        "to_address": "abc-1@gymbro.cloud",
+                        "subject": "Account deactivated",
+                        "content": "your account is deactivated",
+                    }
+                ]
+            }
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    emails = client.search_emails_by_recipient("abc-1@gymbro.cloud", size=5, account_id="user-1")
+
+    assert emails[0]["emailId"] == "msg-1"
+    assert emails[0]["accountId"] == "user-1"
+
+
+def test_get_email_by_id_returns_normalized_detail(monkeypatch):
+    client = mo_email.MoEmailClient()
+
+    monkeypatch.setattr(
+        client,
+        "_get_message_detail",
+        lambda account_id, message_id: {
+            "id": message_id,
+            "from_address": "noreply@tm.openai.com",
+            "to_address": "abc-1@gymbro.cloud",
+            "subject": "Code",
+            "html": "<p>Your temporary OpenAI login code is 123456</p>",
+        },
+    )
+
+    email = client.get_email_by_id("mailbox-1", "msg-1", to_email="abc-1@gymbro.cloud")
+
+    assert email["emailId"] == "msg-1"
+    assert email["accountId"] == "mailbox-1"
+    assert email["toEmail"] == "abc-1@gymbro.cloud"
+    assert client.extract_verification_code(email) == "123456"
+
+
 def test_extract_invite_link_reads_html_link():
     client = mo_email.MoEmailClient()
     email_data = {

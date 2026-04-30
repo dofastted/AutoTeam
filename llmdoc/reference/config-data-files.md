@@ -50,7 +50,13 @@
 - `mail_provider`
 - `mail_account_id`
 - `status`
+- `usage_status`
 - `auth_file`
+- `rt_auth_file`
+- `session_auth_file`
+- `registration_status`
+- `cpa_status`
+- `cpa_error_message`
 - `quota_exhausted_at`
 - `quota_resets_at`
 - `created_at`
@@ -64,12 +70,15 @@
 - `flow_error_message`
 - `plan_type`
 - `cpa_uploaded_at`
+- `cloud_stocked_at`
 - `cpa_archive_file`
 - `qualified_at`
 - `sub2api_synced_at`
 - `sync_disabled`
 - `sold_at`
 - `sale_remote_cleanup`
+- `self_use_at`
+- `self_use_remote_cleanup`
 
 批量 CPA JSON 常见阶段：`email_created`、`register`、`team_joined`、`oauth`、`quota_check`、`cpa_upload`、`completed`。
 
@@ -86,11 +95,13 @@
 
 ## 认证文件
 
-账号池文件名：`auths/codex-{email}-{plan_type}-{hash}.json`。
+账号池 OAuth RT 文件名：`auths/codex-{email}-{plan_type}-{hash}-oauth.json`。
+
+账号池 ChatGPT session 备份文件名：`auths/codex-{email}-{plan_type}-{hash}-session.json`。
 
 主号文件名：`auths/codex-main-*.json`。
 
-账号归档文件：`auths/archive/{email}/codex-{email}-{plan_type}-{hash}.json`。归档文件同样包含敏感 token，不提交。
+账号归档文件：`auths/archive/{email}/codex-{email}-{plan_type}-{hash}-*.json`。归档文件同样包含敏感 token，不提交。
 
 常见字段：
 
@@ -102,5 +113,6 @@
 - `email`
 - `expired`
 - `last_refresh`
+- `credential_source`
 
 这些文件包含敏感 token，默认不提交。

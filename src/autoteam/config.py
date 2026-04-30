@@ -101,7 +101,7 @@ if _raw_browser_mode in _PLAYWRIGHT_BROWSER_MODES:
     PLAYWRIGHT_BROWSER_MODE = _raw_browser_mode
 else:
     PLAYWRIGHT_BROWSER_MODE = "hidden" if _get_bool_env("PLAYWRIGHT_HEADLESS", True) else "visible"
-PLAYWRIGHT_HEADLESS = PLAYWRIGHT_BROWSER_MODE != "visible"
+PLAYWRIGHT_HEADLESS = PLAYWRIGHT_BROWSER_MODE == "hidden"
 
 
 def _get_default_playwright_proxy_url() -> str:

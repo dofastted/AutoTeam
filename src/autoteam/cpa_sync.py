@@ -3,6 +3,7 @@
 import base64
 import json
 import logging
+import tempfile
 import time
 from datetime import datetime
 from hashlib import md5
@@ -10,8 +11,9 @@ from pathlib import Path
 
 from autoteam import outbound_proxy
 from autoteam.auth_storage import AUTH_DIR, ensure_auth_dir, ensure_auth_file_permissions
+from autoteam.codex_auth import CODEX_CLIENT_ID, CODEX_TOKEN_URL
 from autoteam.config import CPA_KEY, CPA_URL
-from autoteam.textio import write_text
+from autoteam.textio import read_text, write_text
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,145 @@ def delete_from_cpa(name):
     else:
         logger.error("[CPA] 删除失败: %d %s", resp.status_code, resp.text[:200])
         return False
+
+
+def refresh_cpa_auth_file(name):
+    """让 CPA 刷新单个 Codex auth 文件。"""
+    resp = outbound_proxy.request(
+        "POST",
+        f"{CPA_URL}/v0/management/auth-files/codex/refresh",
+        headers={**_headers(), "Content-Type": "application/json"},
+        json={"name": name},
+        timeout=30,
+    )
+    if resp.status_code == 200:
+        return resp.json()
+    logger.error("[CPA] 刷新失败: %s -> %d %s", name, resp.status_code, resp.text[:200])
+    raise RuntimeError(f"CPA 刷新失败: {resp.status_code} {resp.text[:200]}")
+
+
+def delete_http401_from_cpa():
+    """删除 CPA 中已记录为 HTTP 401 的认证文件。"""
+    resp = outbound_proxy.request(
+        "DELETE",
+        f"{CPA_URL}/v0/management/auth-files/401",
+        headers=_headers(),
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        logger.error("[CPA] 清理 401 失败: %d %s", resp.status_code, resp.text[:200])
+        raise RuntimeError(f"CPA 清理 401 失败: {resp.status_code} {resp.text[:200]}")
+    result = resp.json()
+    _mark_http401_accounts_unavailable(result)
+    return result
+
+
+def _refresh_token_response(refresh_token):
+    return outbound_proxy.request(
+        "POST",
+        CODEX_TOKEN_URL,
+        data={
+            "grant_type": "refresh_token",
+            "client_id": CODEX_CLIENT_ID,
+            "refresh_token": refresh_token,
+            "scope": "openid email profile offline_access",
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=30,
+    )
+
+
+def _is_refresh_token_unauthorized(resp):
+    text = (getattr(resp, "text", "") or "").lower()
+    if getattr(resp, "status_code", 0) == 401:
+        return True
+    return "refresh_token_reused" in text or "token_invalidated" in text or "token_revoked" in text
+
+
+def cleanup_invalid_cpa_refresh_tokens():
+    """直接刷新 CPA OAuth RT 文件，删除明确 401/复用失效的远端文件。"""
+    files = list_cpa_files()
+    checked = 0
+    refreshed = 0
+    skipped = 0
+    deleted = []
+    failed = []
+    for item in files:
+        name = item.get("name") or ""
+        if not name:
+            skipped += 1
+            continue
+        content = download_from_cpa(name)
+        if not content:
+            failed.append({"name": name, "error": "download_failed"})
+            continue
+        try:
+            auth_data = json.loads(content)
+        except Exception as exc:
+            failed.append({"name": name, "error": f"json_error: {exc}"})
+            continue
+        refresh_token = (auth_data.get("refresh_token") or "").strip()
+        if not refresh_token or auth_data.get("credential_source") == "chatgpt_session":
+            skipped += 1
+            continue
+
+        checked += 1
+        email = item.get("email") or auth_data.get("email") or ""
+        try:
+            resp = _refresh_token_response(refresh_token)
+        except Exception as exc:
+            failed.append({"name": name, "email": email, "error": str(exc)})
+            continue
+        if resp.status_code == 200:
+            try:
+                token_data = resp.json()
+            except Exception as exc:
+                failed.append({"name": name, "email": email, "error": f"refresh_json_error: {exc}"})
+                continue
+            auth_data["access_token"] = token_data.get("access_token") or auth_data.get("access_token") or ""
+            auth_data["refresh_token"] = token_data.get("refresh_token") or refresh_token
+            auth_data["id_token"] = token_data.get("id_token") or auth_data.get("id_token") or ""
+            auth_data["expired"] = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(time.time() + float(token_data.get("expires_in") or 3600)),
+            )
+            auth_data["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            with tempfile.TemporaryDirectory(prefix="autoteam-cpa-refresh-") as tmpdir:
+                tmp_path = Path(tmpdir) / name
+                write_text(tmp_path, json.dumps(auth_data, indent=2))
+                if not upload_to_cpa(tmp_path):
+                    failed.append({"name": name, "email": email, "error": "upload_refreshed_failed"})
+                    continue
+            refreshed += 1
+            continue
+        if _is_refresh_token_unauthorized(resp):
+            if delete_from_cpa(name):
+                deleted.append({"name": name, "email": email, "status_code": resp.status_code})
+            else:
+                failed.append({"name": name, "email": email, "error": "delete_failed"})
+            continue
+        failed.append(
+            {
+                "name": name,
+                "email": email,
+                "status_code": resp.status_code,
+                "error": (resp.text or "")[:200],
+            }
+        )
+
+    result = {
+        "status": "ok" if not failed else "partial",
+        "checked": checked,
+        "refreshed": refreshed,
+        "skipped": skipped,
+        "deleted": len(deleted),
+        "files": [item["name"] for item in deleted],
+        "accounts": deleted,
+        "failed": failed,
+        "total": len(files),
+    }
+    _mark_http401_accounts_unavailable(result)
+    return result
 
 
 def download_from_cpa(name):
@@ -163,13 +304,17 @@ def _normalized_auth_path(bundle, main=False):
         return AUTH_DIR / f"codex-main-{suffix}.json"
     plan_type = bundle.get("plan_type", "unknown")
     hash_id = md5(account_id.encode()).hexdigest()[:8] if account_id else "unknown"
-    return AUTH_DIR / f"codex-{email}-{plan_type}-{hash_id}.json"
+    source = "session" if bundle.get("credential_source") == "chatgpt_session" else "oauth" if bundle.get("refresh_token") else "auth"
+    return AUTH_DIR / f"codex-{email}-{plan_type}-{hash_id}-{source}.json"
 
 
 def _auth_identity(bundle, main=False):
     if main:
         return ("main", bundle.get("account_id") or bundle.get("email") or "")
-    return ("codex", (bundle.get("email") or "").lower(), bundle.get("account_id") or "")
+    source = bundle.get("credential_source") or ""
+    if not source:
+        source = "oauth" if bundle.get("refresh_token") else "auth"
+    return ("codex", (bundle.get("email") or "").lower(), bundle.get("account_id") or "", source)
 
 
 def _candidate_score(auth_data, bundle, name, main=False):
@@ -213,7 +358,9 @@ def _save_normalized_auth_file(bundle, main=False):
     else:
         email = bundle.get("email", "")
         for old in AUTH_DIR.glob(f"codex-{email}-*.json"):
-            if old != filepath and old.exists():
+            old_source = "session" if old.stem.endswith("-session") else "oauth" if old.stem.endswith("-oauth") else "auth"
+            target_source = "session" if filepath.stem.endswith("-session") else "oauth" if filepath.stem.endswith("-oauth") else "auth"
+            if old_source == target_source and old != filepath and old.exists():
                 old.unlink()
 
     return _write_auth_file(filepath, bundle)
@@ -246,6 +393,33 @@ def _load_local_best_candidate(identity_key):
         ) > _candidate_score(best["auth_data"], best["bundle"], best["path"].name, best["main"]):
             best = candidate
     return best
+
+
+def _load_auth_data_from_path(path):
+    try:
+        return json.loads(read_text(Path(path)))
+    except Exception:
+        return {}
+
+
+def _is_cpa_uploadable_auth_path(path):
+    auth_data = _load_auth_data_from_path(path)
+    if not auth_data:
+        return False
+    if auth_data.get("credential_source") == "chatgpt_session":
+        return False
+    return bool(auth_data.get("refresh_token") and auth_data.get("access_token"))
+
+
+def _account_auth_path_for_cpa(acc):
+    for key in ("rt_auth_file", "auth_file"):
+        auth_path = acc.get(key) or ""
+        if not auth_path:
+            continue
+        path = Path(auth_path)
+        if path.exists() and _is_cpa_uploadable_auth_path(path):
+            return path
+    return None
 
 
 def _cleanup_local_duplicates(accounts=None):
@@ -554,9 +728,9 @@ def sync_to_cpa():
     # active 账号的认证文件
     active_files = {}
     for acc in accounts:
-        if acc["status"] == STATUS_ACTIVE and not acc.get("sync_disabled") and acc.get("auth_file"):
-            path = Path(acc["auth_file"])
-            if path.exists():
+        if acc["status"] == STATUS_ACTIVE and not acc.get("sync_disabled"):
+            path = _account_auth_path_for_cpa(acc)
+            if path:
                 active_files[path.name] = path
 
     # CPA 认证文件
@@ -593,6 +767,197 @@ def sync_to_cpa():
         "local_duplicates_deleted": local_duplicates_deleted,
         "local_active": len(active_files),
         "cpa_local_managed": len(final_local_managed),
+    }
+
+
+def _cpa_file_identity(item):
+    email = (item.get("email") or "").strip().lower()
+    name = item.get("name") or ""
+    return email, name
+
+
+def maintain_cpa_inventory(target=100):
+    """保证 CPA 云端至少有 target 个本地库存 RT 文件可用。"""
+    from autoteam.accounts import (
+        CPA_STATUS_SUCCESS,
+        USAGE_INVENTORY,
+        load_accounts,
+        save_accounts,
+    )
+
+    target = max(0, int(target or 0))
+    accounts = load_accounts()
+    candidates = []
+    for acc in accounts:
+        if (acc.get("usage_status") or "").strip().lower() != USAGE_INVENTORY:
+            continue
+        if (acc.get("cpa_status") or "").strip().lower() != CPA_STATUS_SUCCESS:
+            continue
+        if acc.get("sync_disabled"):
+            continue
+        auth_path = _account_auth_path_for_cpa(acc)
+        if auth_path:
+            candidates.append((acc, auth_path))
+
+    cpa_files = list_cpa_files()
+    remote_names = {item.get("name") for item in cpa_files if item.get("name")}
+    remote_emails = {(item.get("email") or "").strip().lower() for item in cpa_files if item.get("email")}
+    local_remote_count = sum(
+        1
+        for acc, path in candidates
+        if path.name in remote_names or (acc.get("email") or "").strip().lower() in remote_emails
+    )
+
+    uploaded = []
+    errors = []
+    changed = False
+    for acc, auth_path in candidates:
+        if local_remote_count >= target:
+            break
+        email = (acc.get("email") or "").strip().lower()
+        if auth_path.name in remote_names or email in remote_emails:
+            continue
+        try:
+            if upload_to_cpa(auth_path):
+                now = time.time()
+                acc["cloud_stocked_at"] = now
+                acc["cpa_uploaded_at"] = now
+                uploaded.append(auth_path.name)
+                remote_names.add(auth_path.name)
+                remote_emails.add(email)
+                local_remote_count += 1
+                changed = True
+            else:
+                errors.append({"email": email, "name": auth_path.name, "error": "upload_failed"})
+        except Exception as exc:
+            errors.append({"email": email, "name": auth_path.name, "error": str(exc)})
+
+    if changed:
+        save_accounts(accounts)
+
+    return {
+        "target": target,
+        "remote_available": local_remote_count,
+        "candidate_count": len(candidates),
+        "uploaded": uploaded,
+        "uploaded_count": len(uploaded),
+        "missing": max(0, target - local_remote_count),
+        "errors": errors,
+    }
+
+
+def _extract_401_names(result):
+    names = set()
+    for key in ("names", "deleted", "files", "items"):
+        value = result.get(key) if isinstance(result, dict) else None
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, str):
+                    names.add(item)
+                elif isinstance(item, dict) and item.get("name"):
+                    names.add(item["name"])
+    return names
+
+
+def _mark_http401_accounts_unavailable(result):
+    names = _extract_401_names(result)
+    if not names:
+        return
+    from autoteam.accounts import STATUS_UNAVAILABLE, load_accounts, save_accounts
+
+    accounts = load_accounts()
+    changed = False
+    for acc in accounts:
+        auth_names = {
+            Path(value).name
+            for value in (acc.get("auth_file"), acc.get("rt_auth_file"), acc.get("session_auth_file"))
+            if value
+        }
+        if auth_names & names:
+            acc["status"] = STATUS_UNAVAILABLE
+            acc["sync_disabled"] = True
+            acc["unavailable_reason"] = "http_401"
+            acc["unavailable_at"] = time.time()
+            changed = True
+    if changed:
+        save_accounts(accounts)
+
+
+def _email_from_auth_filename(name):
+    name = Path(name).name
+    if not name.startswith("codex-"):
+        return ""
+    body = name[len("codex-") :]
+    for marker in ("-team-", "-plus-", "-free-", "-unknown-"):
+        if marker in body:
+            return body.split(marker, 1)[0].strip().lower()
+    return ""
+
+
+def mark_unusable_account_deactivated_from_dir(directory="auths/unusable/account_deactivated"):
+    """按 unusable/account_deactivated 目录把本地账号标记为不可用。"""
+    from autoteam.accounts import STATUS_UNAVAILABLE, load_accounts, save_accounts
+
+    base = Path(directory)
+    files = sorted(base.glob("codex-*.json")) if base.exists() else []
+    marked = {}
+    parse_errors = []
+    for path in files:
+        email = ""
+        try:
+            data = json.loads(read_text(path))
+            email = (data.get("email") or "").strip().lower()
+        except Exception as exc:
+            parse_errors.append({"name": path.name, "error": str(exc)})
+        if not email:
+            email = _email_from_auth_filename(path.name)
+        if email:
+            marked[email] = str(path)
+
+    accounts = load_accounts()
+    now = time.time()
+    changed = []
+    matched = 0
+    for acc in accounts:
+        email = (acc.get("email") or "").strip().lower()
+        if email not in marked:
+            continue
+        matched += 1
+        before = (
+            acc.get("status"),
+            acc.get("sync_disabled"),
+            acc.get("unavailable_reason"),
+            acc.get("unusable_auth_file"),
+        )
+        acc["status"] = STATUS_UNAVAILABLE
+        acc["sync_disabled"] = True
+        acc["unavailable_reason"] = "account_deactivated"
+        acc["unavailable_at"] = now
+        acc["unusable_auth_file"] = marked[email]
+        acc["cpa_status"] = "failed"
+        acc["cpa_error_message"] = "account_deactivated"
+        after = (
+            acc.get("status"),
+            acc.get("sync_disabled"),
+            acc.get("unavailable_reason"),
+            acc.get("unusable_auth_file"),
+        )
+        if before != after:
+            changed.append(email)
+
+    if changed:
+        save_accounts(accounts)
+
+    missing_local = sorted(set(marked) - {(acc.get("email") or "").strip().lower() for acc in accounts})
+    return {
+        "directory": str(base),
+        "files": len(files),
+        "marked_emails": len(marked),
+        "matched_accounts": matched,
+        "changed_accounts": len(changed),
+        "changed": changed,
+        "missing_local_accounts": missing_local,
+        "parse_errors": parse_errors,
     }
 
 

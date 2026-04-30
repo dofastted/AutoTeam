@@ -15,4 +15,5 @@ test.py
 .env
 web/node_modules/
 .codex
+.autoteam-hook/
 .coverage

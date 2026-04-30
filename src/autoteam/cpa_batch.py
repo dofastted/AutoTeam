@@ -13,9 +13,25 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-from autoteam.accounts import STATUS_ACTIVE, STATUS_EXHAUSTED, add_account, find_account, load_accounts, update_account
+from autoteam import outbound_proxy
+from autoteam.accounts import (
+    CPA_STATUS_FAILED,
+    CPA_STATUS_PENDING,
+    CPA_STATUS_SUCCESS,
+    REGISTRATION_STATUS_FAILED,
+    REGISTRATION_STATUS_PENDING,
+    REGISTRATION_STATUS_SUCCESS,
+    STATUS_ACTIVE,
+    STATUS_EXHAUSTED,
+    STATUS_UNAVAILABLE,
+    USAGE_INVENTORY,
+    add_account,
+    find_account,
+    load_accounts,
+    update_account,
+)
 from autoteam.auth_archive import archive_account_auth_file
-from autoteam.browser_runtime import acquire_browser_lease
+from autoteam.browser_runtime import acquire_browser_lease, browser_parallel_limit
 from autoteam.chatgpt_api import ChatGPTTeamAPI
 from autoteam.codex_auth import (
     check_codex_quota,
@@ -30,13 +46,19 @@ from autoteam.flow_runs import (
     append_flow_event,
     create_flow_run,
     delete_flow_account,
+    fail_running_flow_accounts,
     get_flow_run,
     is_flow_pause_requested,
     resume_flow_run,
     update_flow_run,
 )
 from autoteam.invite import register_with_invite
-from autoteam.mail_provider import get_account_mail_provider, get_mail_client, get_mail_client_for_account
+from autoteam.mail_provider import (
+    get_account_mail_account_id,
+    get_account_mail_provider,
+    get_mail_client,
+    get_mail_client_for_account,
+)
 from autoteam.manager import invite_to_team
 from autoteam.sync_targets import SYNC_TARGET_SUB2API, is_sync_target_enabled
 from autoteam.textio import read_text
@@ -53,6 +75,14 @@ SUCCESS_RATE_SAFETY_MARGIN = 1.0
 JOIN_MODE_DIRECT = "direct"
 JOIN_MODE_INVITE = "invite"
 VALID_JOIN_MODES = {JOIN_MODE_DIRECT, JOIN_MODE_INVITE}
+
+
+class AccountDeactivatedError(RuntimeError):
+    """Raised when OpenAI reports account_deactivated and the account should be skipped permanently."""
+
+    def __init__(self, email: str, message: str = "account_deactivated"):
+        super().__init__(message)
+        self.email = _normalized_email(email)
 
 
 class AccountFlowError(RuntimeError):
@@ -100,8 +130,8 @@ class _CpaUploadWorker:
             self.thread.start()
             self._started = True
 
-    def enqueue(self, email: str, *, batch_index: int | None = None) -> None:
-        self.jobs.put({"email": _normalized_email(email), "batch_index": batch_index})
+    def enqueue(self, email: str, *, batch_index: int | None = None, worker_index: int | None = None) -> None:
+        self.jobs.put({"email": _normalized_email(email), "batch_index": batch_index, "worker_index": worker_index})
 
     def finish(self) -> None:
         if self._started and not self._finished:
@@ -114,110 +144,148 @@ class _CpaUploadWorker:
 
     def _run(self) -> None:
         account_mail_cache: dict[str, object] = {}
-        while True:
-            job = self.jobs.get()
-            try:
-                if job is None:
-                    return
-                email = str(job.get("email") or "")
-                batch_index = job.get("batch_index")
+        with outbound_proxy.task_proxy_context():
+            while True:
+                job = self.jobs.get()
                 try:
-                    update_account(
-                        email,
-                        flow_status="running",
-                        flow_stage="cpa_auth",
-                        flow_error_level="info",
-                        flow_error_message="",
-                    )
-                    self.hooks.account_event(
-                        email,
-                        batch_index=batch_index,
-                        stage="cpa_auth",
-                        message="开始 Codex 认证、额度检查和 CPA 上传",
-                        status="running",
-                    )
-                    result = _verify_and_upload_cpa(
-                        email,
-                        account_mail_cache,
-                        hooks=self.hooks,
-                        batch_index=batch_index,
-                    )
-                    sub2api_result = _sync_cpa_account_to_sub2api(
-                        email,
-                        hooks=self.hooks,
-                        batch_index=batch_index,
-                    )
-                    account_updates = {
-                        "flow_status": "success",
-                        "flow_stage": "completed",
-                        "flow_error_level": "info",
-                        "flow_error_message": "",
-                        "plan_type": result["plan_type"],
-                    }
-                    if sub2api_result:
-                        account_updates["sub2api_synced_at"] = time.time()
-                    update_account(email, **account_updates)
-                    self.hooks.account_event(
-                        email,
-                        batch_index=batch_index,
-                        stage="completed",
-                        message="CPA JSON 已可用" + ("，Sub2API 已同步" if sub2api_result else ""),
-                        status="success",
-                        plan_type=result["plan_type"],
-                        auth_file=result["auth_file"],
-                        auth_name=result["auth_name"],
-                        cpa_uploaded=True,
-                        sub2api_synced=bool(sub2api_result),
-                        finished_at=time.time(),
-                    )
-                    self.failures.pop(email, None)
-                    self.results.put({"ok": True, "email": email, "result": result})
-                except Exception as exc:
-                    failure_count = self.failures.get(email, 0) + 1
-                    self.failures[email] = failure_count
-                    if failure_count < MAX_ACCOUNT_FAILURES:
-                        message = f"CPA 认证失败第 {failure_count}/{MAX_ACCOUNT_FAILURES} 次，继续重试当前账号: {exc}"
-                        update_account(
-                            email,
-                            flow_status="running",
-                            flow_stage="cpa_retry",
-                            flow_error_level="warn",
-                            flow_error_message=message,
-                            flow_failure_count=failure_count,
-                        )
-                        self.hooks.account_event(
-                            email,
-                            batch_index=batch_index,
-                            stage="cpa_retry",
-                            message=message,
-                            error_level="warn",
-                            status="running",
-                            failure_count=failure_count,
-                        )
-                        self.jobs.put(job)
-                        continue
+                    if job is None:
+                        return
+                    self._run_job(job, account_mail_cache)
+                finally:
+                    self.jobs.task_done()
 
-                    update_account(
-                        email,
-                        flow_status="failed",
-                        flow_stage="cpa_auth",
-                        flow_error_level="error",
-                        flow_error_message=str(exc),
-                        flow_failure_count=failure_count,
-                    )
-                    self.hooks.account_event(
-                        email,
-                        batch_index=batch_index,
-                        stage="cpa_auth",
-                        message=str(exc),
-                        error_level="error",
-                        status="failed",
-                        finished_at=time.time(),
-                        failure_count=failure_count,
-                    )
-                    self.results.put({"ok": False, "email": email, "error": str(exc), "failure_count": failure_count})
-            finally:
-                self.jobs.task_done()
+    def _run_job(self, job: dict, account_mail_cache: dict[str, object]) -> None:
+        email = str(job.get("email") or "")
+        batch_index = job.get("batch_index")
+        worker_index = job.get("worker_index")
+        try:
+            update_account(
+                email,
+                flow_status="running",
+                flow_stage="cpa_auth",
+                flow_error_level="info",
+                flow_error_message="",
+            )
+            self.hooks.account_event(
+                email,
+                batch_index=batch_index,
+                worker_index=worker_index,
+                stage="cpa_auth",
+                message="开始 Codex 认证、额度检查和 CPA 上传",
+                status="running",
+            )
+            result = _verify_and_upload_cpa(
+                email,
+                account_mail_cache,
+                hooks=self.hooks,
+                batch_index=batch_index,
+                worker_index=worker_index,
+            )
+            sub2api_result = _sync_cpa_account_to_sub2api(
+                email,
+                hooks=self.hooks,
+                batch_index=batch_index,
+                worker_index=worker_index,
+            )
+            account_updates = {
+                "flow_status": "success",
+                "flow_stage": "completed",
+                "flow_error_level": "info",
+                "flow_error_message": "",
+                "plan_type": result["plan_type"],
+            }
+            if worker_index is not None:
+                account_updates["worker_index"] = worker_index
+            if sub2api_result:
+                account_updates["sub2api_synced_at"] = time.time()
+            update_account(email, **account_updates)
+            self.hooks.account_event(
+                email,
+                batch_index=batch_index,
+                worker_index=worker_index,
+                stage="completed",
+                message="CPA JSON 已可用" + ("，Sub2API 已同步" if sub2api_result else ""),
+                status="success",
+                plan_type=result["plan_type"],
+                auth_file=result["auth_file"],
+                auth_name=result["auth_name"],
+                cpa_uploaded=True,
+                sub2api_synced=bool(sub2api_result),
+                finished_at=time.time(),
+            )
+            self.failures.pop(email, None)
+            self.results.put({"ok": True, "email": email, "result": result})
+        except Exception as exc:
+            if isinstance(exc, AccountDeactivatedError):
+                update_account(
+                    email,
+                    status=STATUS_UNAVAILABLE,
+                    sync_disabled=True,
+                    flow_status="failed",
+                    flow_stage="cpa_auth",
+                    flow_error_level="error",
+                    flow_error_message=str(exc),
+                    unavailable_reason="account_deactivated",
+                    unavailable_at=time.time(),
+                )
+                self.hooks.account_event(
+                    email,
+                    batch_index=batch_index,
+                    worker_index=worker_index,
+                    stage="cpa_auth",
+                    message="检测到 account_deactivated，已标记不可用并跳过",
+                    error_level="error",
+                    status="failed",
+                    finished_at=time.time(),
+                )
+            failure_count = self.failures.get(email, 0) + 1
+            self.failures[email] = failure_count
+            if isinstance(exc, AccountDeactivatedError):
+                self.results.put({"ok": False, "email": email, "error": str(exc), "failure_count": failure_count})
+                return
+            if failure_count < MAX_ACCOUNT_FAILURES:
+                message = f"CPA 认证失败第 {failure_count}/{MAX_ACCOUNT_FAILURES} 次，继续重试当前账号: {exc}"
+                update_account(
+                    email,
+                    flow_status="running",
+                    flow_stage="cpa_retry",
+                    flow_error_level="warn",
+                    flow_error_message=message,
+                    flow_failure_count=failure_count,
+                )
+                self.hooks.account_event(
+                    email,
+                    batch_index=batch_index,
+                    worker_index=worker_index,
+                    stage="cpa_retry",
+                    message=message,
+                    error_level="warn",
+                    status="running",
+                    failure_count=failure_count,
+                )
+                self.jobs.put(job)
+                return
+
+            update_account(
+                email,
+                flow_status="failed",
+                flow_stage="cpa_auth",
+                flow_error_level="error",
+                flow_error_message=str(exc),
+                flow_failure_count=failure_count,
+            )
+            self.hooks.account_event(
+                email,
+                batch_index=batch_index,
+                worker_index=worker_index,
+                stage="cpa_auth",
+                message=str(exc),
+                error_level="error",
+                status="failed",
+                finished_at=time.time(),
+                failure_count=failure_count,
+            )
+            self.results.put({"ok": False, "email": email, "error": str(exc), "failure_count": failure_count})
 
 
 def _normalized_email(value: str | None) -> str:
@@ -251,6 +319,13 @@ def _should_pause_for_success_rate(success_count: int, failed_count: int) -> boo
     return _completed_success_rate(success_count, failed_count) < (
         MIN_COMPLETED_SUCCESS_RATE + SUCCESS_RATE_SAFETY_MARGIN
     )
+
+
+def _split_success_targets(total: int, workers: int) -> list[int]:
+    total = max(0, int(total or 0))
+    workers = min(max(1, int(workers or 1)), max(1, total or 1))
+    base, extra = divmod(total, workers)
+    return [base + (1 if index < extra else 0) for index in range(workers) if base + (1 if index < extra else 0) > 0]
 
 
 def _parse_jwt_payload(token: str) -> dict:
@@ -292,6 +367,28 @@ def _load_auth_data(auth_path: str | Path) -> dict:
     return json.loads(read_text(Path(auth_path)))
 
 
+def _is_oauth_rt_auth_data(auth_data: dict) -> bool:
+    if not auth_data:
+        return False
+    if auth_data.get("credential_source") == "chatgpt_session":
+        return False
+    return bool(auth_data.get("refresh_token"))
+
+
+def _resolve_oauth_auth_path(acc: dict) -> str:
+    for key in ("rt_auth_file", "auth_file"):
+        auth_path = acc.get(key) or ""
+        if not auth_path or not Path(auth_path).exists():
+            continue
+        try:
+            auth_data = _load_auth_data(auth_path)
+        except Exception:
+            continue
+        if _is_oauth_rt_auth_data(auth_data):
+            return str(auth_path)
+    return ""
+
+
 def _account_for_email(email: str) -> dict | None:
     return find_account(load_accounts(), _normalized_email(email))
 
@@ -301,6 +398,7 @@ def _record_account_runtime(
     *,
     run_id: str | None = None,
     batch_index: int | None = None,
+    worker_index: int | None = None,
     flow_status: str = "running",
     flow_stage: str = "",
     flow_error_level: str = "info",
@@ -310,6 +408,7 @@ def _record_account_runtime(
     payload = {
         "run_id": run_id,
         "batch_index": batch_index,
+        "worker_index": worker_index,
         "flow_status": flow_status,
         "flow_stage": flow_stage,
         "flow_error_level": flow_error_level,
@@ -319,11 +418,51 @@ def _record_account_runtime(
     update_account(email, **{key: value for key, value in payload.items() if value is not None})
 
 
-def _create_direct_account(mail_client, hooks: CpaBatchHooks | None = None, batch_index: int | None = None) -> str:
-    from autoteam.manager import _is_email_in_team, _register_direct_once
+def _skip_email_reason(email: str) -> str | None:
+    account = _account_for_email(email)
+    if not account:
+        return None
+    status = (account.get("status") or "").strip().lower()
+    if status == STATUS_UNAVAILABLE:
+        return account.get("unavailable_reason") or "status=unavailable"
+    if account.get("skip_registration"):
+        return account.get("skip_reason") or "skip_registration"
+    return None
 
-    account_id, email = mail_client.create_temp_email()
-    email = _normalized_email(email)
+
+def _create_direct_account(
+    mail_client,
+    hooks: CpaBatchHooks | None = None,
+    batch_index: int | None = None,
+    worker_index: int | None = None,
+) -> str:
+    from autoteam.manager import _register_direct_once
+
+    skipped_emails: set[str] = set()
+    while True:
+        account_id, email = mail_client.create_temp_email()
+        email = _normalized_email(email)
+        skip_reason = _skip_email_reason(email)
+        if not skip_reason and email not in skipped_emails:
+            break
+        skipped_emails.add(email)
+        logger.warning("[直接注册] 跳过已标记邮箱 %s: %s", email, skip_reason or "duplicate in same allocation loop")
+        if hooks:
+            hooks.account_event(
+                email,
+                batch_index=batch_index,
+                worker_index=worker_index,
+                stage="email_skipped",
+                message=f"跳过已标记邮箱，改用新邮箱: {skip_reason or 'duplicate in same allocation loop'}",
+                error_level="warn",
+                status="failed",
+                finished_at=time.time(),
+            )
+        try:
+            mail_client.delete_account(account_id)
+        except Exception as exc:
+            logger.warning("[直接注册] 删除跳过邮箱异常: %s", exc)
+
     password = f"Tmp_{uuid.uuid4().hex[:12]}!"
     provider_name = getattr(mail_client, "provider_name", "")
     session_bundle: dict[str, object] = {}
@@ -339,10 +478,12 @@ def _create_direct_account(mail_client, hooks: CpaBatchHooks | None = None, batc
         mail_provider=provider_name,
         mail_account_id=account_id,
     )
+    update_account(email, registration_status=REGISTRATION_STATUS_PENDING, cpa_status=CPA_STATUS_PENDING)
     _record_account_runtime(
         email,
         run_id=hooks.run_id if hooks else None,
         batch_index=batch_index,
+        worker_index=worker_index,
         flow_status="running",
         flow_stage="email_created",
     )
@@ -350,146 +491,238 @@ def _create_direct_account(mail_client, hooks: CpaBatchHooks | None = None, batc
         hooks.account_event(
             email,
             batch_index=batch_index,
+            worker_index=worker_index,
             stage="email_created",
             message="邮箱已创建并写入账号池",
             status="running",
         )
 
-    success = False
-    for attempt in range(3):
+    if hooks:
+        hooks.account_event(
+            email,
+            batch_index=batch_index,
+            worker_index=worker_index,
+            stage="register",
+            message="开始直注注册",
+            status="running",
+        )
+    logger.info("[直接注册] 开始注册: %s", email)
+
+    session_bundle.clear()
+    try:
+        try:
+            success = _register_direct_once(
+                mail_client,
+                email,
+                password,
+                mail_account_id=account_id,
+                session_bundle_callback=capture_session_bundle,
+                require_session_bundle=True,
+            )
+        except TypeError as exc:
+            if "require_session_bundle" not in str(exc):
+                raise
+            success = _register_direct_once(
+                mail_client,
+                email,
+                password,
+                mail_account_id=account_id,
+                session_bundle_callback=capture_session_bundle,
+            )
+    except Exception as exc:
+        message = f"直注注册失败: {exc}"
+        update_account(email, registration_status=REGISTRATION_STATUS_FAILED, registration_error_message=message)
+        try:
+            mail_client.delete_account(account_id)
+        except Exception as delete_exc:
+            logger.warning("[直接注册] 删除失败临时邮箱异常: %s", delete_exc)
+        logger.warning("[直接注册] %s: %s", message, email)
         if hooks:
             hooks.account_event(
                 email,
                 batch_index=batch_index,
+                worker_index=worker_index,
                 stage="register",
-                message=f"开始第 {attempt + 1}/3 次直注注册",
-                status="running",
+                message=message,
+                error_level="error",
+                status="failed",
+                finished_at=time.time(),
             )
-        logger.info("[直接注册] 开始第 %d/3 次注册尝试: %s", attempt + 1, email)
-        session_bundle.clear()
-        try:
-            try:
-                success = _register_direct_once(
-                    mail_client,
-                    email,
-                    password,
-                    mail_account_id=account_id,
-                    session_bundle_callback=capture_session_bundle,
-                    require_session_bundle=True,
-                )
-            except TypeError as exc:
-                if "require_session_bundle" not in str(exc):
-                    raise
-                success = _register_direct_once(
-                    mail_client,
-                    email,
-                    password,
-                    mail_account_id=account_id,
-                    session_bundle_callback=capture_session_bundle,
-                )
-        except Exception as exc:
-            success = False
-            message = str(exc)
-            if hooks:
-                hooks.account_event(
-                    email,
-                    batch_index=batch_index,
-                    stage="browser_restart",
-                    message=f"浏览器流程异常，已关闭并准备重试当前账号: {message}",
-                    error_level="warn",
-                    status="running",
-                )
-            logger.warning("[直接注册] 浏览器流程异常，重试当前账号 %s: %s", email, exc)
-            session_failed = message.startswith("ChatGPT session 提取失败")
-        else:
-            session_failed = False
-        if success and session_bundle:
-            break
-        if success:
-            success = False
-            if hooks:
-                hooks.account_event(
-                    email,
-                    batch_index=batch_index,
-                    stage="session_auth",
-                    message="注册完成但未获取 ChatGPT session CPA 凭证，重试当前账号",
-                    error_level="warn",
-                    status="running",
-                )
-
-        if not session_failed and _is_email_in_team(email):
-            logger.info("[直接注册] 远端确认账号已在 Team 中，视为注册成功: %s", email)
-            success = True
-            if session_bundle:
-                break
-            success = False
-            if hooks:
-                hooks.account_event(
-                    email,
-                    batch_index=batch_index,
-                    stage="session_auth",
-                    message="远端已入席但缺少 session CPA 凭证，继续重试当前账号",
-                    error_level="warn",
-                    status="running",
-                )
-
-        if attempt < 2:
-            if hooks:
-                hooks.account_event(
-                    email,
-                    batch_index=batch_index,
-                    stage="register_retry",
-                    message="注册失败且账号不在 Team 中，60 秒后重试",
-                    error_level="warn",
-                    status="running",
-                )
-            logger.warning("[直接注册] 注册失败且账号不在 Team 中，60 秒后重试: %s", email)
-            time.sleep(60)
+        raise AccountFlowError(email, message) from exc
 
     if not success:
+        message = "直注注册未完成"
+        update_account(email, registration_status=REGISTRATION_STATUS_FAILED, registration_error_message=message)
         try:
             mail_client.delete_account(account_id)
         except Exception as exc:
             logger.warning("[直接注册] 删除失败临时邮箱异常: %s", exc)
-        raise AccountFlowError(email, "连续 3 次直注注册失败")
-
-    if session_bundle:
-        plan_type = (session_bundle.get("plan_type") or "unknown").strip().lower()
-        auth_path = save_auth_file(session_bundle)
-        archive_path = _archive_account_auth(email, auth_path)
-        update_account(email, auth_file=auth_path, plan_type=plan_type, **_archive_update(archive_path))
         if hooks:
             hooks.account_event(
                 email,
                 batch_index=batch_index,
-                stage="session_auth",
-                message=f"已从 ChatGPT session 保存 CPA 凭证，plan={plan_type}",
-                status="running",
-                plan_type=plan_type,
-                auth_file=str(auth_path),
-                auth_name=Path(auth_path).name,
-                cpa_archive_file=archive_path,
+                worker_index=worker_index,
+                stage="register",
+                message=message,
+                error_level="error",
+                status="failed",
+                finished_at=time.time(),
             )
-    elif hooks:
+        raise AccountFlowError(email, message)
+
+    if not session_bundle:
+        message = "未获取到 ChatGPT session CPA 凭证"
+        update_account(email, registration_status=REGISTRATION_STATUS_FAILED, registration_error_message=message)
+        try:
+            mail_client.delete_account(account_id)
+        except Exception as exc:
+            logger.warning("[直接注册] 删除失败临时邮箱异常: %s", exc)
+        if hooks:
+            hooks.account_event(
+                email,
+                batch_index=batch_index,
+                worker_index=worker_index,
+                stage="session_auth",
+                message=message,
+                error_level="error",
+                status="failed",
+                finished_at=time.time(),
+            )
+        raise AccountFlowError(email, message)
+
+    plan_type = (session_bundle.get("plan_type") or "unknown").strip().lower()
+    auth_path = save_auth_file(session_bundle, source="session")
+    archive_path = _archive_account_auth(email, auth_path)
+    update_account(
+        email,
+        session_auth_file=auth_path,
+        registration_status=REGISTRATION_STATUS_SUCCESS,
+        registration_error_message="",
+        plan_type=plan_type,
+        **_archive_update(archive_path),
+    )
+    if hooks:
         hooks.account_event(
             email,
             batch_index=batch_index,
+            worker_index=worker_index,
             stage="session_auth",
-            message="注册会话未返回可保存的 CPA 凭证",
-            error_level="warn",
+            message=f"已从 ChatGPT session 保存本地备份凭证，plan={plan_type}",
             status="running",
+            plan_type=plan_type,
+            auth_file=str(auth_path),
+            auth_name=Path(auth_path).name,
+            cpa_archive_file=archive_path,
         )
 
     _record_account_runtime(
         email,
         run_id=hooks.run_id if hooks else None,
         batch_index=batch_index,
+        worker_index=worker_index,
         flow_status="running",
         flow_stage="team_joined",
         status=STATUS_ACTIVE,
         last_active_at=time.time(),
     )
     return email
+
+
+def _create_direct_accounts_parallel(
+    total: int,
+    *,
+    parallel_workers: int,
+    hooks: CpaBatchHooks,
+    batch_index: int | None = None,
+) -> dict:
+    total = max(0, int(total or 0))
+    targets = _split_success_targets(total, parallel_workers)
+    if not targets:
+        return {"attempted": 0, "succeeded": 0, "failed": 0, "emails": [], "worker_reports": [], "parallel_workers": 0}
+
+    results: queue.Queue[dict] = queue.Queue()
+
+    def worker(worker_index: int, worker_target: int) -> None:
+        attempted = 0
+        succeeded = 0
+        failed = 0
+        emails: list[dict[str, object]] = []
+        try:
+            with outbound_proxy.task_proxy_context():
+                mail_client = get_mail_client()
+                mail_client.login()
+                max_attempts = max(worker_target, worker_target * MAX_ATTEMPT_MULTIPLIER)
+                while succeeded < worker_target and attempted < max_attempts:
+                    if hooks.pause_requested():
+                        break
+                    attempted += 1
+                    logger.info(
+                        "[CPA批量] 直注 worker %d 开始第 %d 个账号，目标成功 %d",
+                        worker_index,
+                        attempted,
+                        worker_target,
+                    )
+                    try:
+                        email = _create_direct_account(
+                            mail_client,
+                            hooks=hooks,
+                            batch_index=batch_index,
+                            worker_index=worker_index,
+                        )
+                    except AccountFlowError as exc:
+                        failed += 1
+                        logger.warning("[CPA批量] 直注 worker %d 注册失败: %s", worker_index, exc)
+                        continue
+                    except Exception as exc:
+                        failed += 1
+                        logger.warning("[CPA批量] 直注 worker %d 异常: %s", worker_index, exc)
+                        continue
+                    email = _normalized_email(email)
+                    if email:
+                        succeeded += 1
+                        emails.append({"email": email, "worker_index": worker_index})
+                    else:
+                        failed += 1
+        except Exception as exc:
+            failed += 1
+            logger.warning("[CPA批量] 直注 worker %d 初始化异常: %s", worker_index, exc)
+        finally:
+            results.put(
+                {
+                    "worker_index": worker_index,
+                    "target": worker_target,
+                    "attempted": attempted,
+                    "succeeded": succeeded,
+                    "failed": failed,
+                    "emails": emails,
+                }
+            )
+
+    threads = [
+        threading.Thread(target=worker, args=(index + 1, target), daemon=True) for index, target in enumerate(targets)
+    ]
+    with browser_parallel_limit(len(targets)):
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    worker_reports = []
+    emails = []
+    while not results.empty():
+        report = results.get()
+        emails.extend(report.pop("emails", []))
+        worker_reports.append(report)
+    worker_reports.sort(key=lambda item: item["worker_index"])
+    emails.sort(key=lambda item: (int(item.get("worker_index") or 0), str(item.get("email") or "")))
+    return {
+        "attempted": sum(int(item.get("attempted") or 0) for item in worker_reports),
+        "succeeded": sum(int(item.get("succeeded") or 0) for item in worker_reports),
+        "failed": sum(int(item.get("failed") or 0) for item in worker_reports),
+        "emails": emails,
+        "worker_reports": worker_reports,
+        "parallel_workers": len(targets),
+    }
 
 
 def _create_invited_account(
@@ -596,40 +829,55 @@ def _ensure_team_auth(
     *,
     hooks: CpaBatchHooks | None = None,
     batch_index: int | None = None,
+    worker_index: int | None = None,
     allow_browser_oauth: bool = True,
 ) -> tuple[str, str, dict]:
     acc = _account_for_email(email)
     if not acc:
         raise RuntimeError("本地账号记录不存在")
 
-    auth_path = acc.get("auth_file") or ""
+    auth_path = _resolve_oauth_auth_path(acc)
     plan_type = _auth_plan_from_path(auth_path) if auth_path and Path(auth_path).exists() else ""
     auth_data = _load_auth_data(auth_path) if auth_path and Path(auth_path).exists() else {}
 
-    if not auth_data:
+    if not _is_oauth_rt_auth_data(auth_data):
         if not allow_browser_oauth:
-            raise RuntimeError("未获取到 ChatGPT session CPA 凭证，已跳过浏览器 OAuth")
+            raise RuntimeError("未获取到 OAuth RT 凭证，已跳过浏览器 OAuth")
         account_mail = _ensure_mail_client_for_account(acc, mail_client_cache)
         if hooks:
             hooks.account_event(
                 email,
                 batch_index=batch_index,
+                worker_index=worker_index,
                 stage="oauth",
                 message="开始 Codex OAuth 登录",
                 status="running",
             )
-        bundle = login_codex_via_browser(email, acc.get("password", ""), mail_client=account_mail)
+        bundle = login_codex_via_browser(
+            email,
+            acc.get("password", ""),
+            mail_client=account_mail,
+            mail_account_id=get_account_mail_account_id(acc),
+        )
         if not bundle:
             raise RuntimeError("Codex 登录失败")
         plan_type = (bundle.get("plan_type") or "unknown").strip().lower()
-        auth_path = save_auth_file(bundle)
+        auth_path = save_auth_file(bundle, source="oauth")
         archive_path = _archive_account_auth(email, auth_path)
-        update_account(email, auth_file=auth_path, plan_type=plan_type, **_archive_update(archive_path))
+        update_account(
+            email,
+            auth_file=auth_path,
+            rt_auth_file=auth_path,
+            rt_obtained_at=time.time(),
+            plan_type=plan_type,
+            **_archive_update(archive_path),
+        )
         auth_data = _load_auth_data(auth_path)
         if hooks:
             hooks.account_event(
                 email,
                 batch_index=batch_index,
+                worker_index=worker_index,
                 stage="oauth",
                 message=f"Codex OAuth 完成，plan={plan_type}",
                 status="running",
@@ -642,6 +890,7 @@ def _ensure_team_auth(
         hooks.account_event(
             email,
             batch_index=batch_index,
+            worker_index=worker_index,
             stage="oauth",
             message="使用本地已有 Codex 认证文件",
             status="running",
@@ -664,18 +913,26 @@ def _verify_and_upload_cpa(
     *,
     hooks: CpaBatchHooks | None = None,
     batch_index: int | None = None,
+    worker_index: int | None = None,
 ) -> dict:
     auth_path, plan_type, auth_data = _ensure_team_auth(
-        email, mail_client_cache, hooks=hooks, batch_index=batch_index, allow_browser_oauth=False
+        email,
+        mail_client_cache,
+        hooks=hooks,
+        batch_index=batch_index,
+        worker_index=worker_index,
+        allow_browser_oauth=True,
     )
     token = auth_data.get("access_token")
     if not token:
+        update_account(email, cpa_status=CPA_STATUS_FAILED, cpa_error_message="认证文件缺少 access_token")
         raise RuntimeError("认证文件缺少 access_token")
 
     if hooks:
         hooks.account_event(
             email,
             batch_index=batch_index,
+            worker_index=worker_index,
             stage="quota_check",
             message="开始检查 Codex 额度",
             status="running",
@@ -687,6 +944,7 @@ def _verify_and_upload_cpa(
     if quota_status == "ok" and isinstance(quota_info, dict):
         update_account(email, last_quota=quota_info)
     elif quota_status == "exhausted":
+        update_account(email, cpa_status=CPA_STATUS_FAILED, cpa_error_message="Codex 额度已用完")
         update_account(
             email,
             status=STATUS_EXHAUSTED,
@@ -695,13 +953,25 @@ def _verify_and_upload_cpa(
             quota_resets_at=quota_result_resets_at(quota_info) or int(time.time() + 18000),
         )
         raise RuntimeError("Codex 额度已用完")
+    elif quota_status == "account_deactivated":
+        update_account(email, cpa_status=CPA_STATUS_FAILED, cpa_error_message="account_deactivated")
+        update_account(
+            email,
+            status=STATUS_UNAVAILABLE,
+            sync_disabled=True,
+            unavailable_reason="account_deactivated",
+            unavailable_at=time.time(),
+        )
+        raise AccountDeactivatedError(email, "account_deactivated")
     else:
+        update_account(email, cpa_status=CPA_STATUS_FAILED, cpa_error_message=f"Codex 额度检查失败: {quota_status}")
         raise RuntimeError(f"Codex 额度检查失败: {quota_status}")
 
     if hooks:
         hooks.account_event(
             email,
             batch_index=batch_index,
+            worker_index=worker_index,
             stage="cpa_upload",
             message="额度可用，开始上传 CPA JSON",
             status="running",
@@ -710,10 +980,21 @@ def _verify_and_upload_cpa(
             auth_name=Path(auth_path).name,
         )
     if not upload_to_cpa(auth_path):
+        update_account(email, cpa_status=CPA_STATUS_FAILED, cpa_error_message=f"CPA 上传失败: {Path(auth_path).name}")
         raise RuntimeError(f"CPA 上传失败: {Path(auth_path).name}")
 
     archive_path = _archive_account_auth(email, auth_path)
-    update_account(email, cpa_uploaded_at=time.time(), qualified_at=time.time(), **_archive_update(archive_path))
+    now = time.time()
+    update_account(
+        email,
+        cpa_status=CPA_STATUS_SUCCESS,
+        cpa_error_message="",
+        usage_status=USAGE_INVENTORY,
+        cpa_uploaded_at=now,
+        qualified_at=now,
+        cloud_stocked_at=now,
+        **_archive_update(archive_path),
+    )
     return {
         "email": email,
         "plan_type": plan_type,
@@ -729,6 +1010,7 @@ def _sync_cpa_account_to_sub2api(
     *,
     hooks: CpaBatchHooks | None = None,
     batch_index: int | None = None,
+    worker_index: int | None = None,
 ) -> dict | None:
     if not is_sync_target_enabled(SYNC_TARGET_SUB2API):
         return None
@@ -744,6 +1026,7 @@ def _sync_cpa_account_to_sub2api(
             hooks.account_event(
                 email,
                 batch_index=batch_index,
+                worker_index=worker_index,
                 stage="sub2api_sync",
                 message=message,
                 error_level="warn",
@@ -759,6 +1042,7 @@ def _sync_cpa_account_to_sub2api(
         hooks.account_event(
             email,
             batch_index=batch_index,
+            worker_index=worker_index,
             stage="sub2api_sync",
             message=message,
             error_level="warn" if warnings else "info",
@@ -780,6 +1064,9 @@ def run_cpa_batch(
     existing_run = get_flow_run(run_id) if resume else None
     if resume and not existing_run:
         raise ValueError(f"任务记录不存在: {run_id}")
+    if resume:
+        fail_running_flow_accounts(run_id)
+        existing_run = get_flow_run(run_id)
 
     join_mode = (existing_run.get("join_mode") if existing_run else join_mode or JOIN_MODE_DIRECT).strip().lower()
     if join_mode not in VALID_JOIN_MODES:
@@ -859,11 +1146,14 @@ def run_cpa_batch(
 
     try:
         cpa_worker.start()
-        mail_client = get_mail_client()
-        mail_client.login()
         if join_mode == JOIN_MODE_INVITE:
+            mail_client = get_mail_client()
+            mail_client.login()
             chatgpt = ChatGPTTeamAPI()
             chatgpt.start()
+        elif parallel_workers <= 1:
+            mail_client = get_mail_client()
+            mail_client.login()
 
         while success_count < target and (attempts < max_attempts or pending_cpa > 0):
             drain_cpa_results()
@@ -900,10 +1190,15 @@ def run_cpa_batch(
                     continue
                 batch_index = (attempts // batch_size) + 1
                 hooks.run_update(current_batch=batch_index)
-                from autoteam.manager import _create_new_accounts_parallel
 
-                create_result = _create_new_accounts_parallel(create_target, parallel_workers=parallel_workers)
+                create_result = _create_direct_accounts_parallel(
+                    create_target,
+                    parallel_workers=parallel_workers,
+                    hooks=hooks,
+                    batch_index=batch_index,
+                )
                 attempts += int(create_result.get("attempted") or 0)
+                account_failures += int(create_result.get("failed") or 0)
                 hooks.run_update(attempted_count=attempts)
                 created_accounts = []
                 for item in create_result.get("emails") or []:
@@ -916,10 +1211,31 @@ def run_cpa_batch(
                     if email:
                         created_accounts.append({"email": email, "worker_index": worker_index})
                 if not created_accounts:
-                    account_failures += int(create_result.get("failed") or 1)
                     consecutive_register_failures += 1
                     if consecutive_register_failures >= MAX_CONSECUTIVE_REGISTER_FAILURES:
                         return pause_for_consecutive_register_failures("并行直注注册未产生成功账号")
+                    if _should_pause_for_success_rate(success_count, account_failures):
+                        reason = (
+                            f"成功率保护暂停: 成功 {success_count}, 失败 {account_failures}, "
+                            f"已完成成功率 {_completed_success_rate(success_count, account_failures):.2f}%"
+                        )
+                        hooks.run_update(fatal_error=reason, pause_requested=True)
+                        cpa_worker.finish()
+                        cpa_worker.join()
+                        drain_cpa_results()
+                        hooks.pause()
+                        logger.warning("[CPA批量] %s", reason)
+                        return {
+                            "run_id": run_id,
+                            "status": "paused",
+                            "target": target,
+                            "batch_size": batch_size,
+                            "join_mode": join_mode,
+                            "attempted": attempts,
+                            "succeeded": success_count,
+                            "failed": account_failures,
+                            "halt_reason": reason,
+                        }
                     continue
                 consecutive_register_failures = 0
                 for created in created_accounts:
@@ -951,7 +1267,7 @@ def run_cpa_batch(
                         message="已提交 CPA JSON 检查和上传，继续处理后续账号",
                         status="running",
                     )
-                    cpa_worker.enqueue(email, batch_index=batch_index)
+                    cpa_worker.enqueue(email, batch_index=batch_index, worker_index=worker_index)
                     pending_cpa += 1
                 consume_cpa_result(block=True, timeout=0.05)
                 continue
@@ -1113,5 +1429,9 @@ def run_cpa_batch(
         cpa_worker.finish()
         cpa_worker.join()
         drain_cpa_results()
+        try:
+            fail_running_flow_accounts(run_id, "任务结束时清理遗留运行记录")
+        except Exception as exc:
+            logger.warning("[CPA批量] 清理遗留运行账号记录失败: %s", exc)
         if chatgpt and chatgpt.browser:
             chatgpt.stop()

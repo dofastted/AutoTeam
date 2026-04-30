@@ -54,9 +54,36 @@
 
 - 读取本地账号。
 - 修复断裂的 `auth_file` 路径。
-- 只上传未禁用同步的 active 账号认证文件。
+- 只上传未禁用同步的 active 账号 OAuth RT 认证文件。
 - 删除 CPA 中本地管理账号但不再 active 的文件。
 - 返回上传、删除、本地去重等统计结果。
+
+库存同步 `maintain_cpa_inventory`：
+
+- 只读取 `usage_status=inventory`、`cpa_status=success`、未禁用同步的账号。
+- 只上传含 `refresh_token` 的 OAuth RT 文件，不上传 ChatGPT session 备份文件。
+- 云端本地库存少于 100 时补传本地库存文件。
+- 本地多余库存继续保留在 `accounts.json` 和 `auths/`，不主动从本地删除。
+
+401 清理 `delete_http401_from_cpa`：
+
+- 调用 CPA 的 `DELETE /v0/management/auth-files/401`。
+- CPA 返回文件名时，本地同名账号写为 `status=unavailable`、`sync_disabled=true`、`unavailable_reason=http_401`。
+
+失效 RT 清理 `cleanup_invalid_cpa_refresh_tokens`：
+
+- 下载 CPA 远端 auth 文件，只处理含 `refresh_token` 的 OAuth 文件。
+- 直接请求 OpenAI token refresh，不依赖 CPA 是否已把错误写入内存状态。
+- 遇到 HTTP 401、`refresh_token_reused`、`token_invalidated` 或 `token_revoked` 时删除 CPA 文件。
+- 对本地同名账号写 `status=unavailable`、`sync_disabled=true`、`unavailable_reason=http_401`。
+- refresh 成功时会把新 access token 和新 refresh token 重新上传到 CPA，避免消耗有效 RT 后不保存。
+
+本地失效目录标记 `mark_unusable_account_deactivated_from_dir`：
+
+- 默认读取 `auths/unusable/account_deactivated`。
+- 按文件 JSON 内的 `email` 或 `codex-{email}-{plan}-{hash}.json` 文件名解析邮箱。
+- 匹配本地 `accounts.json` 后写 `status=unavailable`、`sync_disabled=true`、`unavailable_reason=account_deactivated`。
+- 该动作只处理本地账号状态，不删除本地 auth 文件。
 
 已售账号：
 
@@ -77,6 +104,10 @@ HTTP 入口：
 
 - `/api/sync`: 按已启用目标同步 CPA / Sub2API。
 - `/api/sync/cpa`: 只同步 CPA，账号池操作页的 CPA 推送按钮使用这个入口。
+- `/api/sync/cpa-stock`: 维护 CPA 云端库存，目标为 100 个库存 RT 文件。
+- `/api/sync/cpa/cleanup-401`: 清理 CPA 远端 401 文件，并按返回名单标记本地账号不可用。
+- `/api/sync/cpa/cleanup-invalid-rt`: 直接刷新 CPA OAuth RT 文件，删除明确失效的远端文件。
+- `/api/accounts/mark-unusable/account-deactivated`: 按 `auths/unusable/account_deactivated` 标记本地账号不可用。
 - `/api/sync/sub2api`: 只同步 Sub2API，账号池操作页和同步中心的 Sub2API 推送按钮使用这个入口。
 
 反向同步 `sync_from_cpa`：
@@ -89,8 +120,8 @@ HTTP 入口：
 
 单账号 CPA 认证入口：
 
-- `src/autoteam/api.py` (`post_account_cpa_auth`): 面向 Web OAuth 页。仅允许 active 席位账号。若本地有 auth 文件则上传；若没有则自动执行 Codex OAuth，确认 `plan_type=team` 后上传。
-- `src/autoteam/cpa_batch.py` (`run_cpa_batch`): 批量直注账号在注册成功后优先使用 ChatGPT Web session 生成本地 auth 文件，再上传 CPA；该批量路径不依赖 Codex OAuth callback。
+- `src/autoteam/api.py` (`post_account_cpa_auth`): 面向 Web OAuth 页。仅允许 active 席位账号。若本地已有 OAuth RT 文件则直接上传；若只有 session 备份或本地缺少 RT 文件，则自动执行 Codex OAuth，确认 `plan_type=team` 后上传。
+- `src/autoteam/cpa_batch.py` (`run_cpa_batch`): 批量直注账号在注册成功后保存 ChatGPT Web session 备份，再通过 Codex OAuth callback 生成 OAuth RT 文件并上传 CPA。
 - `src/autoteam/cpa_batch.py` (`_CpaUploadWorker`): 每个账号 CPA 上传成功后，若 Sub2API 已启用，会调用 `src/autoteam/sub2api_sync.py` (`sync_account_to_sub2api`) 单独同步该账号。
 
 ## Sub2API

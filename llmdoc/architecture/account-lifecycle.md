@@ -10,6 +10,17 @@
 
 状态存储在 `accounts.json`，读写由 `src/autoteam/accounts.py` 负责。
 
+## 业务属性
+
+`usage_status` 独立于 `status`，用于表达账号用途：
+
+- `normal`: 普通轮转账号，不进入 CPA 可售库存。
+- `inventory`: CPA 库存账号，可用于云端库存同步。
+- `self_use`: 自用账号，远端下架，本地记录和 auth 文件保留。
+- `sold`: 已售出账号，远端下架，本地记录和 auth 文件保留。
+
+新账号创建时默认是 `normal`。批量 CPA 上传成功后，`src/autoteam/cpa_batch.py` (`_verify_and_upload_cpa`) 会写 `cpa_status=success` 和 `usage_status=inventory`。
+
 ## 已售账号
 
 `src/autoteam/api.py` (`post_sell_account`): 把 active 合格账号标记为 `sold`。
@@ -18,9 +29,34 @@
 
 - 不移出 ChatGPT Team。
 - 不删除本地账号记录和本地 auth 文件。
-- 写入 `sync_disabled=true`、`sold_at`、`sale_remote_cleanup`。
+- 写入 `usage_status=sold`、`sync_disabled=true`、`sold_at`、`sale_remote_cleanup`。
 - 删除当前已启用 CPA / Sub2API 里的同邮箱账号或同名 auth 文件。
 - 后续 `sync_account_states` 不会把 `sold` 改回 `active`。
+
+## 邮件失效账号
+
+`src/autoteam/account_deactivation.py` (`check_deactivated_mail`): 读取邮箱 provider 的收件箱，查找包含 `deactivated` 的邮件。
+
+行为：
+
+- 默认只检查未标记失效、未售出、自用且未禁用同步的账号。
+- 传入 `directory=auths/unusable/account_deactivated` 时，会直接从目录中的 `codex-*.json` 读取邮箱清单，即使本地账号已被标记失效也会参与 dry-run 校对。
+- 命中后会写入 `status=unavailable`、`sync_disabled=true`、`unavailable_reason=account_deactivated`、`unavailable_at`。
+- 同时写入 `deactivated_mail_checked_at`、`deactivated_mail_evidence`、`mailbox_retired`、`mailbox_retired_at`。
+- `apply=true` 时，active / exhausted 账号会尝试从 Team 移出。
+- 邮箱 provider 若支持删除，会尝试删除对应邮箱账户；Mo Email 当前没有删除邮箱接口，只会保留本地记录。
+
+## 自用账号
+
+`src/autoteam/api.py` (`post_self_use_account`): 把 active 账号标记为自用。
+
+行为：
+
+- 不移出 ChatGPT Team。
+- 不删除本地账号记录和本地 auth 文件。
+- 写入 `usage_status=self_use`、`sync_disabled=true`、`self_use_at`、`self_use_remote_cleanup`。
+- 删除当前已启用 CPA / Sub2API 里的同邮箱账号或同名 auth 文件。
+- 不计入 CPA 云端库存目标。
 
 ## 额度检查
 

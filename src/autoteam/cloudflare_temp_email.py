@@ -324,6 +324,15 @@ class CloudflareTempEmailClient:
             filtered.append(item)
         return filtered
 
+    def get_email_by_id(self, account_id, email_id, to_email=None):
+        target_email = str(to_email or "").strip()
+        if not target_email:
+            return None
+        for item in self.search_emails_by_recipient(target_email, size=20, account_id=account_id):
+            if str(item.get("emailId")) == str(email_id):
+                return item
+        return None
+
     def list_emails(self, account_id, size=10):
         account_id = account_id if account_id is not None else 0
         for account in self.list_accounts(size=200):

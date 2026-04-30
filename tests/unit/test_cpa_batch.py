@@ -1,3 +1,5 @@
+import pytest
+
 from autoteam import accounts, cpa_batch, flow_runs
 
 
@@ -14,6 +16,15 @@ class _FakeMailClient:
         return None
 
 
+def _fake_cpa_result(email):
+    return {
+        "email": email,
+        "plan_type": "team",
+        "auth_file": f"/tmp/codex-{email}-team.json",
+        "auth_name": f"codex-{email}-team.json",
+    }
+
+
 def _use_tmp_flow_file(tmp_path, monkeypatch):
     monkeypatch.setattr(flow_runs, "FLOW_RUNS_FILE", tmp_path / "flow_runs.json")
     monkeypatch.setattr(accounts, "ACCOUNTS_FILE", tmp_path / "accounts.json")
@@ -26,16 +37,7 @@ def test_run_cpa_batch_groups_accounts_by_configured_batch_size(tmp_path, monkey
     monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
     monkeypatch.setattr(cpa_batch, "update_account", lambda *args, **kwargs: None)
     monkeypatch.setattr(cpa_batch, "_create_direct_account", lambda _mail, **_kwargs: next(emails))
-    monkeypatch.setattr(
-        cpa_batch,
-        "_verify_and_upload_cpa",
-        lambda email, _cache, **_kwargs: {
-            "email": email,
-            "plan_type": "team",
-            "auth_file": f"/tmp/codex-{email}-team.json",
-            "auth_name": f"codex-{email}-team.json",
-        },
-    )
+    monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", lambda email, _cache, **_kwargs: _fake_cpa_result(email))
 
     result = cpa_batch.run_cpa_batch("run-1", target=3, batch_size=2, join_mode="direct")
     run = flow_runs.get_flow_run("run-1")
@@ -58,12 +60,7 @@ def test_run_cpa_batch_continues_after_account_error_until_target_is_met(tmp_pat
     def fake_verify(email, _cache, **_kwargs):
         if email == "bad@example.com":
             raise RuntimeError("Codex plan=free，不是 team")
-        return {
-            "email": email,
-            "plan_type": "team",
-            "auth_file": f"/tmp/codex-{email}-team.json",
-            "auth_name": f"codex-{email}-team.json",
-        }
+        return _fake_cpa_result(email)
 
     monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", fake_verify)
 
@@ -91,12 +88,7 @@ def test_run_cpa_batch_retries_cpa_failure_for_same_account_before_skipping(tmp_
         attempts["count"] += 1
         if attempts["count"] < 3:
             raise RuntimeError("temporary cpa error")
-        return {
-            "email": email,
-            "plan_type": "team",
-            "auth_file": f"/tmp/codex-{email}-team.json",
-            "auth_name": f"codex-{email}-team.json",
-        }
+        return _fake_cpa_result(email)
 
     monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", fake_verify)
 
@@ -129,16 +121,7 @@ def test_run_cpa_batch_pauses_when_completed_success_rate_is_at_risk(tmp_path, m
         return email
 
     monkeypatch.setattr(cpa_batch, "_create_direct_account", fake_create_direct)
-    monkeypatch.setattr(
-        cpa_batch,
-        "_verify_and_upload_cpa",
-        lambda email, _cache, **_kwargs: {
-            "email": email,
-            "plan_type": "team",
-            "auth_file": f"/tmp/codex-{email}-team.json",
-            "auth_name": f"codex-{email}-team.json",
-        },
-    )
+    monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", lambda email, _cache, **_kwargs: _fake_cpa_result(email))
 
     result = cpa_batch.run_cpa_batch("run-rate-guard", target=100, batch_size=20, join_mode="direct")
     run = flow_runs.get_flow_run("run-rate-guard")
@@ -193,16 +176,7 @@ def test_run_cpa_batch_resume_continues_existing_run(tmp_path, monkeypatch):
     monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
     monkeypatch.setattr(cpa_batch, "update_account", lambda *args, **kwargs: None)
     monkeypatch.setattr(cpa_batch, "_create_direct_account", lambda _mail, **_kwargs: "resume@example.com")
-    monkeypatch.setattr(
-        cpa_batch,
-        "_verify_and_upload_cpa",
-        lambda email, _cache, **_kwargs: {
-            "email": email,
-            "plan_type": "team",
-            "auth_file": f"/tmp/codex-{email}-team.json",
-            "auth_name": f"codex-{email}-team.json",
-        },
-    )
+    monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", lambda email, _cache, **_kwargs: _fake_cpa_result(email))
 
     result = cpa_batch.run_cpa_batch("run-resume", resume=True)
     run = flow_runs.get_flow_run("run-resume")
@@ -232,16 +206,7 @@ def test_run_cpa_batch_resume_legacy_run_without_parallel_workers(tmp_path, monk
     monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
     monkeypatch.setattr(cpa_batch, "update_account", lambda *args, **kwargs: None)
     monkeypatch.setattr(cpa_batch, "_create_direct_account", lambda _mail, **_kwargs: "legacy@example.com")
-    monkeypatch.setattr(
-        cpa_batch,
-        "_verify_and_upload_cpa",
-        lambda email, _cache, **_kwargs: {
-            "email": email,
-            "plan_type": "team",
-            "auth_file": f"/tmp/codex-{email}-team.json",
-            "auth_name": f"codex-{email}-team.json",
-        },
-    )
+    monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", lambda email, _cache, **_kwargs: _fake_cpa_result(email))
 
     result = cpa_batch.run_cpa_batch("run-resume-legacy", resume=True)
     updated = flow_runs.get_flow_run("run-resume-legacy")
@@ -250,6 +215,110 @@ def test_run_cpa_batch_resume_legacy_run_without_parallel_workers(tmp_path, monk
     assert result["attempted"] == 2
     assert result["succeeded"] == 2
     assert updated["success_count"] == 2
+
+
+def test_run_cpa_batch_resume_marks_lingering_running_accounts_failed(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    flow_runs.create_flow_run("run-resume-clean", target=2, batch_size=1, join_mode="direct")
+    flow_runs.append_flow_event(
+        "run-resume-clean",
+        "stale@example.com",
+        batch_index=1,
+        worker_index=1,
+        stage="register",
+        message="旧窗口仍在运行",
+        status="running",
+    )
+    flow_runs.update_flow_run(
+        "run-resume-clean",
+        status="paused",
+        success_count=0,
+        failed_count=0,
+        attempted_count=1,
+        finished_at=1000,
+        pause_requested=True,
+    )
+
+    monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
+    monkeypatch.setattr(cpa_batch, "update_account", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cpa_batch, "_create_direct_account", lambda _mail, **_kwargs: "resume-clean@example.com")
+    monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", lambda email, _cache, **_kwargs: _fake_cpa_result(email))
+
+    result = cpa_batch.run_cpa_batch("run-resume-clean", resume=True)
+    run = flow_runs.get_flow_run("run-resume-clean")
+    stale = next(item for item in run["accounts"] if item["email"] == "stale@example.com")
+
+    assert result["status"] == "completed"
+    assert result["attempted"] == 3
+    assert result["succeeded"] == 2
+    assert stale["status"] == "failed"
+    assert "恢复前清理遗留运行记录" in stale["events"][-1]["message"]
+
+
+def test_run_cpa_batch_parallel_direct_uses_cpa_batch_session_first_helper(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        cpa_batch,
+        "get_mail_client",
+        lambda: (_ for _ in ()).throw(AssertionError("parallel direct should create mail clients inside workers")),
+    )
+    monkeypatch.setattr(
+        cpa_batch,
+        "ChatGPTTeamAPI",
+        lambda: (_ for _ in ()).throw(AssertionError("direct batch should not start main account browser")),
+    )
+    monkeypatch.setattr(cpa_batch, "update_account", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "autoteam.manager._create_new_accounts_parallel",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("manager parallel helper should not run")),
+    )
+
+    def fake_create_parallel(total, *, parallel_workers, hooks, batch_index):
+        assert total == 3
+        assert parallel_workers == 3
+        assert hooks.run_id == "run-parallel-direct"
+        assert batch_index == 1
+        for index, email in enumerate(["w1@example.com", "w2@example.com", "w3@example.com"], start=1):
+            accounts.add_account(email, "pw")
+            hooks.account_event(
+                email,
+                batch_index=batch_index,
+                worker_index=index,
+                stage="session_auth",
+                message="session saved",
+                status="running",
+            )
+        return {
+            "attempted": 3,
+            "succeeded": 3,
+            "failed": 0,
+            "emails": [
+                {"email": "w1@example.com", "worker_index": 1},
+                {"email": "w2@example.com", "worker_index": 2},
+                {"email": "w3@example.com", "worker_index": 3},
+            ],
+            "worker_reports": [],
+            "parallel_workers": 3,
+        }
+
+    monkeypatch.setattr(cpa_batch, "_create_direct_accounts_parallel", fake_create_parallel)
+    monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", lambda email, _cache, **_kwargs: _fake_cpa_result(email))
+
+    result = cpa_batch.run_cpa_batch(
+        "run-parallel-direct",
+        target=3,
+        batch_size=20,
+        join_mode="direct",
+        parallel_workers=3,
+    )
+    run = flow_runs.get_flow_run("run-parallel-direct")
+
+    assert result["status"] == "completed"
+    assert result["attempted"] == 3
+    assert result["succeeded"] == 3
+    assert sorted(item["worker_index"] for item in run["accounts"]) == [1, 2, 3]
+    assert all(item["status"] == "success" for item in run["accounts"])
 
 
 def test_flow_runs_keep_recent_records_and_account_events(tmp_path, monkeypatch):
@@ -286,12 +355,7 @@ def test_run_cpa_batch_stops_when_pause_is_requested(tmp_path, monkeypatch):
     def fake_verify(email, _cache, **_kwargs):
         seen.append(email)
         flow_runs.request_flow_pause("run-4")
-        return {
-            "email": email,
-            "plan_type": "team",
-            "auth_file": f"/tmp/codex-{email}-team.json",
-            "auth_name": f"codex-{email}-team.json",
-        }
+        return _fake_cpa_result(email)
 
     monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", fake_verify)
 
@@ -325,16 +389,7 @@ def test_cpa_upload_success_syncs_sub2api_when_enabled(tmp_path, monkeypatch):
             }
         ),
     )
-    monkeypatch.setattr(
-        cpa_batch,
-        "_verify_and_upload_cpa",
-        lambda email, _cache, **_kwargs: {
-            "email": email,
-            "plan_type": "team",
-            "auth_file": f"/tmp/codex-{email}-team.json",
-            "auth_name": f"codex-{email}-team.json",
-        },
-    )
+    monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", lambda email, _cache, **_kwargs: _fake_cpa_result(email))
 
     result = cpa_batch.run_cpa_batch("run-sub2api-after-cpa", target=1, batch_size=1, join_mode="direct")
     run = flow_runs.get_flow_run("run-sub2api-after-cpa")
@@ -350,20 +405,29 @@ def test_direct_account_records_email_before_register_failure(tmp_path, monkeypa
     flow_runs.create_flow_run("run-direct", target=1, batch_size=20, join_mode="direct")
 
     monkeypatch.setattr("autoteam.manager._register_direct_once", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr("autoteam.manager._is_email_in_team", lambda _email: False)
-    monkeypatch.setattr(cpa_batch.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "autoteam.manager._is_email_in_team",
+        lambda _email: (_ for _ in ()).throw(AssertionError("team check should not run")),
+    )
+    monkeypatch.setattr(
+        cpa_batch.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(AssertionError("same email retry sleep should not run")),
+    )
 
     hooks = cpa_batch.CpaBatchHooks("run-direct")
     try:
         cpa_batch._create_direct_account(_FakeMailClient(), hooks=hooks, batch_index=1)
     except cpa_batch.AccountFlowError as exc:
         assert exc.email == "new@example.com"
+        assert str(exc) == "直注注册未完成"
     else:
         raise AssertionError("expected AccountFlowError")
 
     run = flow_runs.get_flow_run("run-direct")
     assert run["accounts"][0]["email"] == "new@example.com"
-    assert run["accounts"][0]["stage"] in {"register_retry", "register"}
+    assert run["accounts"][0]["stage"] == "register"
+    assert run["accounts"][0]["status"] == "failed"
     assert accounts.load_accounts()[0]["email"] == "new@example.com"
 
 
@@ -389,33 +453,189 @@ def test_direct_account_saves_chatgpt_session_auth(tmp_path, monkeypatch):
         return True
 
     monkeypatch.setattr("autoteam.manager._register_direct_once", fake_register)
-    monkeypatch.setattr("autoteam.manager._is_email_in_team", lambda _email: False)
-    monkeypatch.setattr(cpa_batch, "save_auth_file", lambda _bundle: str(auth_path))
+    monkeypatch.setattr(
+        "autoteam.manager._is_email_in_team",
+        lambda _email: (_ for _ in ()).throw(AssertionError("team check should not run")),
+    )
+    monkeypatch.setattr(cpa_batch, "save_auth_file", lambda _bundle, **_kwargs: str(auth_path))
 
     hooks = cpa_batch.CpaBatchHooks("run-session")
     email = cpa_batch._create_direct_account(_FakeMailClient(), hooks=hooks, batch_index=1)
 
     assert email == "new@example.com"
     acc = accounts.load_accounts()[0]
-    assert acc["auth_file"] == str(auth_path)
+    assert acc["session_auth_file"] == str(auth_path)
+    assert acc.get("auth_file") is None
+    assert acc["registration_status"] == accounts.REGISTRATION_STATUS_SUCCESS
     assert acc["plan_type"] == "team"
     run = flow_runs.get_flow_run("run-session")
     assert any(event["stage"] == "session_auth" for event in run["accounts"][0]["events"])
 
 
-def test_cpa_verify_skips_browser_oauth_when_session_auth_missing(tmp_path, monkeypatch):
+def test_direct_account_fails_when_session_bundle_missing(tmp_path, monkeypatch):
     _use_tmp_flow_file(tmp_path, monkeypatch)
+    flow_runs.create_flow_run("run-missing-session", target=1, batch_size=20, join_mode="direct")
+    deleted = []
+
+    class FakeMailClient(_FakeMailClient):
+        def delete_account(self, account_id):
+            deleted.append(account_id)
+
+    monkeypatch.setattr("autoteam.manager._register_direct_once", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(cpa_batch, "save_auth_file", lambda _bundle, **_kwargs: (_ for _ in ()).throw(AssertionError()))
+
+    hooks = cpa_batch.CpaBatchHooks("run-missing-session")
+    try:
+        cpa_batch._create_direct_account(FakeMailClient(), hooks=hooks, batch_index=1, worker_index=2)
+    except cpa_batch.AccountFlowError as exc:
+        assert exc.email == "new@example.com"
+        assert str(exc) == "未获取到 ChatGPT session CPA 凭证"
+    else:
+        raise AssertionError("expected AccountFlowError")
+
+    run = flow_runs.get_flow_run("run-missing-session")
+    account = run["accounts"][0]
+    assert account["status"] == "failed"
+    assert account["stage"] == "session_auth"
+    assert account["worker_index"] == 2
+    assert deleted == ["mail-1"]
+
+
+def test_direct_account_skips_marked_unavailable_email_and_uses_new_email(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    flow_runs.create_flow_run("run-skip-marked", target=1, batch_size=20, join_mode="direct")
+
+    accounts.add_account("skip@example.com", "pw")
+    accounts.update_account(
+        "skip@example.com",
+        status=accounts.STATUS_UNAVAILABLE,
+        unavailable_reason="account_deactivated",
+        sync_disabled=True,
+    )
+
+    deleted = []
+    register_calls = []
+
+    class FakeMailClient(_FakeMailClient):
+        def __init__(self):
+            self._emails = iter(
+                [
+                    ("mail-skip", "skip@example.com"),
+                    ("mail-new", "fresh@example.com"),
+                ]
+            )
+
+        def create_temp_email(self):
+            return next(self._emails)
+
+        def delete_account(self, account_id):
+            deleted.append(account_id)
+
+    def fake_register(_mail_client, email, _password, mail_account_id=None, session_bundle_callback=None):
+        register_calls.append((email, mail_account_id))
+        session_bundle_callback(
+            {
+                "email": email,
+                "account_id": "acc-2",
+                "plan_type": "team",
+                "access_token": "access-token",
+                "id_token": "id-token",
+                "refresh_token": "",
+                "expired": 2000000000,
+                "credential_source": "chatgpt_session",
+            }
+        )
+        return True
+
+    auth_path = tmp_path / "codex-fresh@example.com-team-acc.json"
+    monkeypatch.setattr("autoteam.manager._register_direct_once", fake_register)
+    monkeypatch.setattr(cpa_batch, "save_auth_file", lambda _bundle, **_kwargs: str(auth_path))
+
+    hooks = cpa_batch.CpaBatchHooks("run-skip-marked")
+    email = cpa_batch._create_direct_account(FakeMailClient(), hooks=hooks, batch_index=1, worker_index=1)
+
+    assert email == "fresh@example.com"
+    assert register_calls == [("fresh@example.com", "mail-new")]
+    assert deleted == ["mail-skip"]
+    latest = accounts.find_account(accounts.load_accounts(), "fresh@example.com")
+    assert latest is not None
+    assert latest["session_auth_file"] == str(auth_path)
+    run = flow_runs.get_flow_run("run-skip-marked")
+    skipped = next(item for item in run["accounts"] if item["email"] == "skip@example.com")
+    fresh = next(item for item in run["accounts"] if item["email"] == "fresh@example.com")
+    assert skipped["stage"] == "email_skipped"
+    assert skipped["status"] == "failed"
+    assert fresh["worker_index"] == 1
+
+
+def test_cpa_verify_gets_oauth_rt_when_session_auth_is_not_uploadable(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    oauth_path = tmp_path / "codex-new@example.com-team-acc-oauth.json"
     accounts.add_account("new@example.com", "pw")
-    accounts.update_account("new@example.com", status=accounts.STATUS_ACTIVE)
+    accounts.update_account("new@example.com", status=accounts.STATUS_ACTIVE, session_auth_file=str(tmp_path / "session.json"))
+    oauth_calls = []
+
+    class FakeMailClient:
+        def login(self):
+            return None
+
     monkeypatch.setattr(
         cpa_batch,
         "login_codex_via_browser",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("browser OAuth should not run")),
+        lambda *args, **kwargs: oauth_calls.append((args, kwargs))
+        or {
+            "email": "new@example.com",
+            "account_id": "acc-1",
+            "plan_type": "team",
+            "access_token": "token-ok",
+            "id_token": "id-token",
+            "refresh_token": "rt-1",
+            "expired": 2000000000,
+        },
+    )
+    monkeypatch.setattr(cpa_batch, "_ensure_mail_client_for_account", lambda _acc, _cache: FakeMailClient())
+    monkeypatch.setattr(cpa_batch, "save_auth_file", lambda _bundle, **_kwargs: str(oauth_path))
+    oauth_path.write_text('{"access_token":"token-ok","refresh_token":"rt-1"}', encoding="utf-8")
+    monkeypatch.setattr(cpa_batch, "check_codex_quota", lambda _token: ("ok", {"primary_pct": 0}))
+    monkeypatch.setattr(cpa_batch, "upload_to_cpa", lambda _path: True)
+    monkeypatch.setattr(cpa_batch, "archive_account_auth_file", lambda _email, _path: "")
+
+    result = cpa_batch._verify_and_upload_cpa("new@example.com", {})
+
+    assert oauth_calls
+    assert result["auth_file"] == str(oauth_path)
+    latest = accounts.find_account(accounts.load_accounts(), "new@example.com")
+    assert latest["rt_auth_file"] == str(oauth_path)
+    assert latest["auth_file"] == str(oauth_path)
+    assert latest["cpa_status"] == accounts.CPA_STATUS_SUCCESS
+    assert latest["usage_status"] == accounts.USAGE_INVENTORY
+
+
+def test_cpa_verify_marks_account_unavailable_when_quota_reports_account_deactivated(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    accounts.add_account("new@example.com", "pw")
+    accounts.update_account("new@example.com", status=accounts.STATUS_ACTIVE)
+
+    auth_path = tmp_path / "codex-new@example.com-team.json"
+    auth_path.write_text('{"access_token":"token-dead"}', encoding="utf-8")
+
+    monkeypatch.setattr(
+        cpa_batch,
+        "_ensure_team_auth",
+        lambda *_args, **_kwargs: (auth_path, "team", {"access_token": "token-dead"}),
+    )
+    monkeypatch.setattr(
+        cpa_batch,
+        "check_codex_quota",
+        lambda _token: ("account_deactivated", {"status_code": 403, "body": "account_deactivated"}),
     )
 
-    try:
+    with pytest.raises(cpa_batch.AccountDeactivatedError, match="account_deactivated"):
         cpa_batch._verify_and_upload_cpa("new@example.com", {})
-    except RuntimeError as exc:
-        assert "已跳过浏览器 OAuth" in str(exc)
-    else:
-        raise AssertionError("expected RuntimeError")
+
+    latest = accounts.find_account(accounts.load_accounts(), "new@example.com")
+    assert latest is not None
+    assert latest["status"] == accounts.STATUS_UNAVAILABLE
+    assert latest["sync_disabled"] is True
+    assert latest["unavailable_reason"] == "account_deactivated"
+    assert latest["unavailable_at"]

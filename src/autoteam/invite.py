@@ -23,6 +23,7 @@ import time
 
 from playwright.sync_api import sync_playwright
 
+from autoteam.about_you import fill_about_you_page
 from autoteam.browser_runtime import acquire_browser_lease
 from autoteam.chatgpt_api import ChatGPTTeamAPI
 from autoteam.config import get_playwright_launch_options
@@ -251,72 +252,9 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
     screenshot(page, "reg_06_after_code.png")
     logger.info("[注册] 当前 URL: %s", page.url)
 
-    # 填写个人信息（全名 + 生日/年龄）
-    name_input = find_visible(
-        page,
-        [
-            'input[name="name"]',
-            'input[placeholder*="name" i]',
-            'input[id="name"]',
-            'input[placeholder*="全名" i]',
-        ],
-        "名字输入框",
-        timeout=5000,
-    )
-
-    if name_input:
-        name_input.fill("User")
-        time.sleep(0.5)
-
-    # 自适应：生日日期（spinbutton）或年龄（普通 input）
-    filled_age = False
-    spinbuttons = page.locator('[role="spinbutton"]').all()
-    if len(spinbuttons) >= 3:
-        # 类型 A：React Aria DateField（年/月/日 spinbutton）
-        try:
-            page.locator("text=生日日期").click()
-            time.sleep(0.5)
-        except Exception:
-            pass
-        for sb, val in zip(spinbuttons[:3], ["1995", "06", "15"]):
-            sb.click(force=True)
-            time.sleep(0.2)
-            page.keyboard.type(val, delay=80)
-            time.sleep(0.3)
-        logger.info("[注册] 填入生日: 1995/06/15 (spinbutton)")
-        filled_age = True
-    else:
-        # 类型 B：普通年龄数字输入框
-        age_input = find_visible(
-            page,
-            [
-                'input[name="age"]',
-                'input[id="age"]',
-                'input[placeholder*="age" i]',
-                'input[placeholder*="年龄" i]',
-                'input[type="number"]',
-            ],
-            "年龄输入框",
-            timeout=3000,
-        )
-        if age_input:
-            age_input.fill("25")
-            logger.info("[注册] 填入年龄: 25")
-            filled_age = True
-
-    if name_input or filled_age:
-        find_and_click(
-            page,
-            [
-                'button:has-text("完成帐户创建")',
-                'button:has-text("Complete")',
-                'button:has-text("Continue")',
-                'button:has-text("Agree")',
-                'button[type="submit"]',
-            ],
-            "完成按钮",
-        )
-        time.sleep(8)
+    if "about-you" in (page.url or "").lower():
+        fill_about_you_page(page, email=email, logger=logger, log_prefix="[注册]")
+        time.sleep(3)
         screenshot(page, "reg_07_after_profile.png")
 
     # 可能需要接受条款 / 加入 workspace

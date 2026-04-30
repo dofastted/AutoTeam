@@ -6,7 +6,7 @@ import time
 import pytest
 from fastapi import HTTPException
 
-from autoteam import api
+from autoteam import accounts, api
 
 
 def _set_pool_runtime_config(monkeypatch):
@@ -232,6 +232,229 @@ def test_post_self_use_account_marks_usage_and_deletes_configured_targets(tmp_pa
     assert result["cpa_archive_file"] == str(archive_file)
     assert accounts_data[0]["usage_status"] == "self_use"
     assert accounts_data[0]["sync_disabled"] is True
+
+
+def test_post_account_login_only_requires_local_mail_and_keeps_old_session(tmp_path, monkeypatch):
+    session_file = tmp_path / "codex-user@example.com-team-abc-session.json"
+    session_file.write_text("{}", encoding="utf-8")
+    oauth_file = tmp_path / "codex-user@example.com-team-abc-oauth.json"
+    oauth_file.write_text("{}", encoding="utf-8")
+    archive_file = tmp_path / "archive" / oauth_file.name
+    accounts_data = [
+        {
+            "email": "user@example.com",
+            "status": "standby",
+            "password": "secret",
+            "auth_file": str(session_file),
+            "session_auth_file": str(session_file),
+            "mail_provider": "cloudmail",
+            "mail_account_id": 7,
+        }
+    ]
+    updates = []
+    quota_calls = []
+
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: list(accounts_data))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr("autoteam.auth_archive.archive_account_auth_file", lambda _email, _path: str(archive_file))
+    monkeypatch.setattr(api, "_require_account_mail_configs", lambda _acc, _label: None)
+    monkeypatch.setattr(
+        api,
+        "_require_sync_target_configs",
+        lambda _label: (_ for _ in ()).throw(AssertionError("sync target config should not be required")),
+    )
+
+    class FakeMailClient:
+        def login(self):
+            return None
+
+    monkeypatch.setattr(
+        "autoteam.mail_provider.get_mail_client_for_account",
+        lambda _acc: FakeMailClient(),
+    )
+    monkeypatch.setattr("autoteam.mail_provider.get_account_mail_account_id", lambda _acc: 7)
+    monkeypatch.setattr(
+        "autoteam.codex_auth.login_codex_via_browser",
+        lambda *args, **kwargs: {
+            "email": "user@example.com",
+            "plan_type": "team",
+            "access_token": "token-1",
+        },
+    )
+    monkeypatch.setattr(
+        "autoteam.codex_auth.check_codex_quota",
+        lambda token, account_id=None: quota_calls.append((token, account_id)) or ("ok", {"primary_pct": 10}),
+    )
+    monkeypatch.setattr("autoteam.codex_auth.save_auth_file", lambda _bundle: str(oauth_file))
+
+    def fake_update(email, **kwargs):
+        updates.append((email, kwargs))
+        accounts_data[0].update(kwargs)
+        return accounts_data[0]
+
+    monkeypatch.setattr("autoteam.accounts.update_account", fake_update)
+    monkeypatch.setattr(api, "_start_task", lambda command, func, params, *args, **kwargs: {"task_id": "task-1", "command": command, "params": params, "result": func(*args, **kwargs)})
+
+    result = api.post_account_login(api.LoginAccountParams(email="user@example.com"))
+
+    assert result["result"]["rt_auth_file"] == str(oauth_file)
+    assert quota_calls == [("token-1", None)]
+    assert accounts_data[0]["auth_file"] == str(oauth_file)
+    assert accounts_data[0]["rt_auth_file"] == str(oauth_file)
+    assert accounts_data[0]["session_auth_file"] == str(session_file)
+    assert accounts_data[0]["status"] == "active"
+    assert any("rt_auth_file" in item[1] for item in updates)
+
+
+def test_post_account_login_marks_unavailable_on_account_deactivated(tmp_path, monkeypatch):
+    accounts_data = [
+        {
+            "email": "dead@example.com",
+            "status": "standby",
+            "password": "secret",
+            "mail_provider": "cloudmail",
+            "mail_account_id": 7,
+        }
+    ]
+    updates = []
+
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: list(accounts_data))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(api, "_require_account_mail_configs", lambda _acc, _label: None)
+    monkeypatch.setattr(
+        api,
+        "_require_sync_target_configs",
+        lambda _label: (_ for _ in ()).throw(AssertionError("sync target config should not be required")),
+    )
+
+    class FakeMailClient:
+        def login(self):
+            return None
+
+    monkeypatch.setattr(
+        "autoteam.mail_provider.get_mail_client_for_account",
+        lambda _acc: FakeMailClient(),
+    )
+    monkeypatch.setattr("autoteam.mail_provider.get_account_mail_account_id", lambda _acc: 7)
+    monkeypatch.setattr(
+        "autoteam.codex_auth.login_codex_via_browser",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr("autoteam.codex_auth.LAST_OAUTH_FAILURE_REASON", "account_deactivated")
+
+    def fake_update(email, **kwargs):
+        updates.append((email, kwargs))
+        accounts_data[0].update(kwargs)
+        return accounts_data[0]
+
+    monkeypatch.setattr("autoteam.accounts.update_account", fake_update)
+    def fake_start_task(command, func, params, *args, **kwargs):
+        try:
+            func(*args, **kwargs)
+        except RuntimeError as exc:
+            return {
+                "task_id": "task-1",
+                "command": command,
+                "params": params,
+                "status": "failed",
+                "error": str(exc),
+            }
+        raise AssertionError("expected account_deactivated failure")
+
+    monkeypatch.setattr(api, "_start_task", fake_start_task)
+
+    result = api.post_account_login(api.LoginAccountParams(email="dead@example.com"))
+
+    assert result["status"] == "failed"
+    assert "account_deactivated" in result["error"]
+    assert accounts_data[0]["status"] == accounts.STATUS_UNAVAILABLE
+    assert accounts_data[0]["sync_disabled"] is True
+    assert accounts_data[0]["unavailable_reason"] == "account_deactivated"
+    assert any(item[1].get("unavailable_reason") == "account_deactivated" for item in updates)
+
+
+def test_post_account_login_requires_force_for_sync_disabled(monkeypatch):
+    accounts_data = [
+        {
+            "email": "dead@example.com",
+            "status": "unavailable",
+            "sync_disabled": True,
+            "unavailable_reason": "account_deactivated",
+            "mail_provider": "cloudmail",
+        }
+    ]
+
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: list(accounts_data))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(api, "_require_account_mail_configs", lambda _acc, _label: None)
+    monkeypatch.setattr(
+        api,
+        "_start_task",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("task should not start")),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        api.post_account_login(api.LoginAccountParams(email="dead@example.com"))
+
+    assert exc.value.status_code == 400
+    assert "force=true" in exc.value.detail
+
+
+def test_post_account_login_force_allows_sync_disabled(tmp_path, monkeypatch):
+    oauth_file = tmp_path / "codex-dead@example.com-team-abc-oauth.json"
+    oauth_file.write_text("{}", encoding="utf-8")
+    accounts_data = [
+        {
+            "email": "dead@example.com",
+            "status": "unavailable",
+            "sync_disabled": True,
+            "unavailable_reason": "account_deactivated",
+            "password": "secret",
+            "mail_provider": "cloudmail",
+            "mail_account_id": 7,
+        }
+    ]
+
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: list(accounts_data))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(api, "_require_account_mail_configs", lambda _acc, _label: None)
+    monkeypatch.setattr("autoteam.auth_archive.archive_account_auth_file", lambda _email, _path: "")
+
+    class FakeMailClient:
+        def login(self):
+            return None
+
+    monkeypatch.setattr("autoteam.mail_provider.get_mail_client_for_account", lambda _acc: FakeMailClient())
+    monkeypatch.setattr("autoteam.mail_provider.get_account_mail_account_id", lambda _acc: 7)
+    monkeypatch.setattr(
+        "autoteam.codex_auth.login_codex_via_browser",
+        lambda *args, **kwargs: {
+            "email": "dead@example.com",
+            "plan_type": "unknown",
+            "access_token": "token-1",
+        },
+    )
+    monkeypatch.setattr("autoteam.codex_auth.save_auth_file", lambda _bundle: str(oauth_file))
+
+    def fake_update(email, **kwargs):
+        accounts_data[0].update(kwargs)
+        return accounts_data[0]
+
+    monkeypatch.setattr("autoteam.accounts.update_account", fake_update)
+    monkeypatch.setattr(
+        api,
+        "_start_task",
+        lambda command, func, params, *args, **kwargs: {
+            "task_id": "task-1",
+            "command": command,
+            "params": params,
+            "result": func(*args, **kwargs),
+        },
+    )
+
+    result = api.post_account_login(api.LoginAccountParams(email="dead@example.com", force=True))
+
+    assert result["result"]["auth_file"] == str(oauth_file)
 
 
 def test_post_account_usage_status_allows_normal_inventory_only(monkeypatch):

@@ -47,7 +47,9 @@ Authorization: Bearer <API_KEY>
 | POST | `/api/sync/accounts` | 从 Team / auths 对账到本地账号池 |
 | POST | `/api/sync/main-codex/saved` | 只推送本地已有主号 Codex 凭证 |
 | POST | `/api/accounts/{email}/cpa-auth` | 为单个 active 席位账号完成 Codex 认证并上传到 CPA |
+| POST | `/api/accounts/login` | 对单个账号执行本地 Codex OAuth 登录验证，保存 OAuth RT 文件，不自动同步远端 |
 | POST | `/api/accounts/{email}/kick` | 将 active 账号移出 Team |
+| POST | `/api/accounts/check-deactivated-mail` | 检查邮箱是否有 `deactivated` 邮件，命中后标记失效并释放席位 |
 | DELETE | `/api/accounts/{email}` | 删除本地管理账号及其资源 |
 
 ### Team 成员移除
@@ -66,6 +68,29 @@ Authorization: Bearer <API_KEY>
 
 - `type = member`：从 Team 中移出
 - `type = invite`：取消邀请
+
+### deactivated 邮件检查
+
+`POST /api/accounts/check-deactivated-mail`
+
+请求体：
+
+```json
+{
+  "keyword": "deactivated",
+  "size": 30,
+  "directory": null,
+  "apply": false,
+  "release_team": true,
+  "dispose_mailbox": true
+}
+```
+
+- `apply = false` 时只做 dry-run。
+- `directory` 可传 `auths/unusable/account_deactivated`，这时直接从目录中的 `codex-*.json` 读取邮箱清单。
+- `release_team = true` 时，命中且仍在 Team 中的账号会尝试移出 Team。
+- `dispose_mailbox = true` 时，会尝试调用对应邮箱 provider 的删除接口。
+- 命中后本地账号会写入 `status=unavailable`、`sync_disabled=true`、`unavailable_reason=account_deactivated`。
 
 ## 后台任务接口
 
@@ -110,6 +135,8 @@ Authorization: Bearer <API_KEY>
 ## 手动 OAuth 导入
 
 后端先生成 Codex OAuth 链接，并尝试在 `localhost:1455` 自动接收回调；如果自动回调不可用，也可以手动提交回调 URL。
+
+手动 OAuth 完成后只保存本地认证文件并更新账号状态，不自动上传 CPA / Sub2API。需要远端同步时，继续调用同步中心对应接口。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|

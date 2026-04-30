@@ -1207,6 +1207,7 @@ class UnusableDirParams(BaseModel):
 class DeactivatedMailCheckParams(BaseModel):
     keyword: str = "deactivated"
     size: int = 30
+    directory: str | None = None
     apply: bool = False
     release_team: bool = True
     dispose_mailbox: bool = True
@@ -1909,7 +1910,7 @@ def get_codex_auth(email: str):
         acc = find_account(load_accounts(), email)
         if not acc:
             raise HTTPException(status_code=404, detail="账号不存在")
-        auth_file = acc.get("auth_file") or ""
+        auth_file = _resolve_status_auth_file(acc)
         if not auth_file or not Path(auth_file).exists():
             raise HTTPException(status_code=404, detail="该账号没有认证文件")
 
@@ -2135,12 +2136,14 @@ def post_account_usage_status(email: str, params: UsageStatusParams):
 
 class LoginAccountParams(BaseModel):
     email: str
+    force: bool = False
 
 
 @app.post("/api/accounts/{email}/cpa-auth", status_code=202)
 def post_account_cpa_auth(email: str):
     """为单个 Team 席位账号完成 Codex 认证并上传到 CPA。"""
     from autoteam.accounts import STATUS_ACTIVE, find_account, load_accounts
+    from autoteam.cpa_sync import _account_auth_path_for_cpa
 
     email = email.strip().lower()
     if _is_main_account_email(email):
@@ -2154,13 +2157,14 @@ def post_account_cpa_auth(email: str):
         raise HTTPException(status_code=400, detail=f"账号状态为 {acc.get('status')}，不是 active")
 
     _require_cpa_configs("CPA 认证")
-    auth_file = acc.get("auth_file") or ""
-    if not auth_file or not Path(auth_file).exists():
+    auth_file = _account_auth_path_for_cpa(acc)
+    if not auth_file:
         _require_account_mail_configs(acc, "CPA 认证")
 
     def _run():
         from autoteam.accounts import STATUS_ACTIVE, STATUS_EXHAUSTED, STATUS_UNAVAILABLE, update_account
         from autoteam.auth_archive import archive_account_auth_file
+        import autoteam.codex_auth as codex_auth
         from autoteam.codex_auth import (
             check_codex_quota,
             login_codex_via_browser,
@@ -2175,14 +2179,20 @@ def post_account_cpa_auth(email: str):
         if not latest:
             raise RuntimeError(f"账号不存在: {email}")
 
-        auth_path = latest.get("auth_file") or ""
-        plan_type = "unknown"
-        if auth_path and Path(auth_path).exists():
+        auth_path_obj = _account_auth_path_for_cpa(latest)
+        auth_path = str(auth_path_obj) if auth_path_obj else ""
+        plan_type = (latest.get("plan_type") or "unknown").strip().lower()
+        if auth_path:
             logger.info("[CPA认证] 使用已有本地认证文件: %s", email)
         else:
             logger.info("[CPA认证] 本地缺少认证文件，开始 Codex 登录: %s", email)
             mail_client = get_mail_client_for_account(latest)
             mail_client.login()
+            previous_session_auth_file = latest.get("session_auth_file") or ""
+            if not previous_session_auth_file:
+                current_auth_file = latest.get("auth_file") or ""
+                if current_auth_file and current_auth_file.endswith("-session.json"):
+                    previous_session_auth_file = current_auth_file
             bundle = login_codex_via_browser(
                 email,
                 latest.get("password", ""),
@@ -2190,18 +2200,35 @@ def post_account_cpa_auth(email: str):
                 mail_account_id=get_account_mail_account_id(latest),
             )
             if not bundle:
+                if codex_auth.LAST_OAUTH_FAILURE_REASON == "account_deactivated":
+                    update_account(
+                        email,
+                        status=STATUS_UNAVAILABLE,
+                        sync_disabled=True,
+                        unavailable_reason="account_deactivated",
+                        unavailable_at=time.time(),
+                    )
+                    raise RuntimeError(f"{email} 已返回 account_deactivated，已标记不可用")
                 raise RuntimeError(f"Codex 登录失败: {email}")
 
-            plan_type = bundle.get("plan_type") or "unknown"
-            auth_path = save_auth_file(bundle)
+            plan_type = (bundle.get("plan_type") or "unknown").strip().lower()
+            auth_path = save_auth_file(bundle, source="oauth")
             archive_path = archive_account_auth_file(email, auth_path)
-            update_account(email, auth_file=auth_path, cpa_archive_file=archive_path)
+            update_fields = {
+                "auth_file": auth_path,
+                "rt_auth_file": auth_path,
+                "plan_type": plan_type,
+                "cpa_archive_file": archive_path,
+            }
+            if previous_session_auth_file:
+                update_fields["session_auth_file"] = previous_session_auth_file
+            update_account(email, **update_fields)
 
             if plan_type == "team":
                 update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
                 token = bundle.get("access_token")
                 if token:
-                    st, info = check_codex_quota(token)
+                    st, info = check_codex_quota(token, account_id=bundle.get("account_id"))
                     if st == "ok" and isinstance(info, dict):
                         update_account(email, last_quota=info)
                     elif st == "exhausted":
@@ -2255,14 +2282,16 @@ def post_account_login(params: LoginAccountParams):
     acc = find_account(accounts, email)
     if not acc:
         raise HTTPException(status_code=404, detail="账号不存在")
-    if acc.get("status") == "sold" or acc.get("sync_disabled"):
+    if acc.get("status") == "sold":
         raise HTTPException(status_code=400, detail="账号已售出并停止同步，不能重新登录")
+    if acc.get("sync_disabled") and not params.force:
+        raise HTTPException(status_code=400, detail="账号已停止同步，不能重新登录；排查时可显式传 force=true")
     _require_account_mail_configs(acc, "登录账号")
-    _require_sync_target_configs("登录账号")
 
     def _run():
-        from autoteam.accounts import STATUS_ACTIVE, STATUS_UNAVAILABLE, update_account
+        from autoteam.accounts import STATUS_ACTIVE, STATUS_STANDBY, STATUS_UNAVAILABLE, update_account
         from autoteam.auth_archive import archive_account_auth_file
+        import autoteam.codex_auth as codex_auth
         from autoteam.codex_auth import (
             check_codex_quota,
             login_codex_via_browser,
@@ -2274,6 +2303,11 @@ def post_account_login(params: LoginAccountParams):
 
         mail_client = get_mail_client_for_account(acc)
         mail_client.login()
+        previous_session_auth_file = acc.get("session_auth_file") or ""
+        if not previous_session_auth_file:
+            current_auth_file = acc.get("auth_file") or ""
+            if current_auth_file and current_auth_file.endswith("-session.json"):
+                previous_session_auth_file = current_auth_file
         bundle = login_codex_via_browser(
             email,
             acc.get("password", ""),
@@ -2283,7 +2317,14 @@ def post_account_login(params: LoginAccountParams):
         if bundle:
             auth_file = save_auth_file(bundle)
             archive_path = archive_account_auth_file(email, auth_file)
-            update_account(email, auth_file=auth_file, cpa_archive_file=archive_path)
+            update_fields = {
+                "auth_file": auth_file,
+                "rt_auth_file": auth_file,
+                "cpa_archive_file": archive_path,
+            }
+            if previous_session_auth_file:
+                update_fields["session_auth_file"] = previous_session_auth_file
+            update_account(email, **update_fields)
             # 登录成功且是 team plan，自动标记为 active
             if bundle.get("plan_type") == "team":
                 update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
@@ -2312,16 +2353,24 @@ def post_account_login(params: LoginAccountParams):
                             unavailable_at=time.time(),
                         )
                         raise RuntimeError(f"{email} 已返回 account_deactivated，已标记不可用")
-            # 同步到已启用远端
-            from autoteam.sync_targets import sync_to_configured_targets as sync_to_cpa
-
-            sync_to_cpa()
+            elif bundle.get("plan_type") not in {"team", "unknown"}:
+                update_account(email, status=STATUS_STANDBY)
             return {
                 "email": email,
                 "plan": bundle.get("plan_type"),
                 "auth_file": auth_file,
+                "rt_auth_file": auth_file,
                 "cpa_archive_file": archive_path,
             }
+        if codex_auth.LAST_OAUTH_FAILURE_REASON == "account_deactivated":
+            update_account(
+                email,
+                status=STATUS_UNAVAILABLE,
+                sync_disabled=True,
+                unavailable_reason="account_deactivated",
+                unavailable_at=time.time(),
+            )
+            raise RuntimeError(f"{email} 已返回 account_deactivated，已标记不可用")
         raise RuntimeError(f"Codex 登录失败: {email}")
 
     task = _start_task(f"login:{email}", _run, {"email": email})
@@ -2487,6 +2536,7 @@ def post_check_deactivated_mail(params: DeactivatedMailCheckParams = Deactivated
             "result": check_deactivated_mail(
                 keyword=params.keyword,
                 size=params.size,
+                directory=params.directory,
                 apply=False,
                 release_team=params.release_team,
                 dispose_mailbox=params.dispose_mailbox,
@@ -2504,6 +2554,7 @@ def post_check_deactivated_mail(params: DeactivatedMailCheckParams = Deactivated
             return check_deactivated_mail(
                 keyword=params.keyword,
                 size=params.size,
+                directory=params.directory,
                 apply=True,
                 release_team=params.release_team,
                 dispose_mailbox=params.dispose_mailbox,

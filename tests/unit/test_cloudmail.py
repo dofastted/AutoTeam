@@ -205,6 +205,31 @@ def test_extract_verification_code_uses_plain_text_when_available():
     assert client.extract_verification_code(email_data) == "123456"
 
 
+def test_get_email_by_id_prefers_exact_latest_match(monkeypatch):
+    client = cloudmail.CloudMailClient()
+    calls = []
+
+    monkeypatch.setattr(
+        client,
+        "get_latest_emails",
+        lambda account_id, email_id=0, all_receive=0: calls.append((account_id, email_id, all_receive)) or [
+            {
+                "emailId": 18,
+                "accountId": account_id,
+                "sendEmail": "noreply@tm.openai.com",
+                "subject": "Your ChatGPT code is 888999",
+                "content": "Your ChatGPT code is 888999",
+            }
+        ],
+    )
+
+    email = client.get_email_by_id(43, 18, to_email="tmp-user@example.com")
+
+    assert calls == [(43, 18, 0)]
+    assert email["emailId"] == 18
+    assert client.extract_verification_code(email) == "888999"
+
+
 def test_wait_for_email_allows_zero_timeout_as_indefinite(monkeypatch):
     client = cloudmail.CloudMailClient()
     calls = {"count": 0}

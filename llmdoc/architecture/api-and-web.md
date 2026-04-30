@@ -69,6 +69,10 @@
 - 删除 Sub2API 账号。
 - 改写 `.env` 或登录态。
 
+`POST /api/accounts/login` 是本地 OAuth 验证任务：它启动账号自己的 Codex OAuth 登录，保存 OAuth RT 文件，更新本地账号状态，并保留旧 `session_auth_file`。它不要求 CPA / Sub2API 配置，也不自动同步远端。
+
+`POST /api/accounts/check-deactivated-mail` 是同步确认操作：它先检查邮箱是否收到包含 `deactivated` 的邮件，再按参数决定是否释放 Team 席位和退役邮箱。
+
 卖出账号接口 `POST /api/accounts/{email}/sell` 是同步确认操作：它不操作 Team 席位，只删除已启用 CPA / Sub2API 远端记录，然后把本地账号标记为 `sold`。
 
 后台同步任务应有独立状态字段：

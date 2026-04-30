@@ -12,6 +12,10 @@
       {{ error }}
     </div>
 
+    <div v-if="message" class="mb-4 px-4 py-3 rounded-lg text-sm border" :class="messageClass">
+      {{ message }}
+    </div>
+
     <div v-if="data?.cached" class="mb-4 px-4 py-3 rounded-lg text-sm bg-blue-500/10 text-blue-300 border border-blue-500/20">
       当前显示{{ data.local_snapshot ? '本地账号快照' : '本地缓存' }}
       <span v-if="data.cache_updated_at">，更新时间 {{ formatCacheTime(data.cache_updated_at) }}</span>
@@ -35,6 +39,7 @@
                 <th class="px-4 py-3 font-medium">邮箱</th>
                 <th class="px-4 py-3 font-medium">角色</th>
                 <th class="px-4 py-3 font-medium">类型</th>
+                <th class="px-4 py-3 font-medium">账号状态</th>
                 <th class="px-4 py-3 font-medium">来源</th>
                 <th class="px-4 py-3 font-medium text-right">操作</th>
               </tr>
@@ -61,22 +66,65 @@
                   </span>
                 </td>
                 <td class="px-4 py-3">
+                  <div v-if="m.is_local" class="flex flex-wrap items-center gap-2">
+                    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium"
+                      :class="statusClass(m.status)">
+                      <span class="w-1.5 h-1.5 rounded-full" :class="dotClass(m.status)"></span>
+                      {{ statusLabel(m.status) }}
+                    </span>
+                    <span v-if="m.sync_disabled"
+                      class="px-2 py-0.5 rounded-full text-xs font-medium bg-cyan-500/10 text-cyan-300">
+                      停止同步
+                    </span>
+                    <span v-if="m.has_cpa_archive_file"
+                      class="px-2 py-0.5 rounded-full text-xs font-medium bg-gray-700 text-gray-300">
+                      已归档
+                    </span>
+                  </div>
+                  <span v-else class="text-xs text-gray-500">-</span>
+                </td>
+                <td class="px-4 py-3">
                   <span class="text-xs" :class="m.is_local ? 'text-blue-400' : 'text-gray-500'">
                     {{ sourceLabel(m) }}
                   </span>
                 </td>
                 <td class="px-4 py-3 text-right">
+                  <div class="flex flex-wrap justify-end gap-2">
                   <button
-                    v-if="m.role !== 'account-owner'"
-                    @click="removeMember(m)"
-                    :disabled="removingId === memberKey(m)"
+                    v-if="canSell(m)"
+                    @click="sellMember(m)"
+                    :disabled="actionId === memberKey(m)"
                     class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
-                    :class="removingId === memberKey(m)
+                    :class="actionId === memberKey(m)
+                      ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+                      : 'bg-cyan-600/10 text-cyan-300 border-cyan-500/30 hover:bg-cyan-600/20'"
+                  >
+                    {{ actionId === memberKey(m) && actionType === 'sell' ? '处理中...' : '卖出' }}
+                  </button>
+                  <button
+                    v-if="canRemove(m)"
+                    @click="removeMember(m)"
+                    :disabled="actionId === memberKey(m)"
+                    class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
+                    :class="actionId === memberKey(m)
+                      ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+                      : 'bg-amber-600/10 text-amber-400 border-amber-500/30 hover:bg-amber-600/20'"
+                  >
+                    {{ actionId === memberKey(m) && actionType === 'remove' ? '处理中...' : removeLabel(m) }}
+                  </button>
+                  <button
+                    v-if="canDelete(m)"
+                    @click="deleteMember(m)"
+                    :disabled="actionId === memberKey(m)"
+                    class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
+                    :class="actionId === memberKey(m)
                       ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
                       : 'bg-rose-600/10 text-rose-400 border-rose-500/30 hover:bg-rose-600/20'"
                   >
-                    {{ removingId === memberKey(m) ? '处理中...' : '移出' }}
+                    {{ actionId === memberKey(m) && actionType === 'delete' ? '删除中...' : '删除' }}
                   </button>
+                  <span v-if="!hasActions(m)" class="text-xs text-gray-600">-</span>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -102,7 +150,10 @@ import { api } from '../api.js'
 const data = ref(null)
 const loading = ref(false)
 const error = ref('')
-const removingId = ref('')
+const message = ref('')
+const messageClass = ref('')
+const actionId = ref('')
+const actionType = ref('')
 
 const CACHE_KEY = 'autoteam_team_members'
 
@@ -130,6 +181,12 @@ function memberKey(member) {
   return `${member.type}:${member.user_id}:${member.email}`
 }
 
+function clearTeamCache() {
+  try {
+    localStorage.removeItem(CACHE_KEY)
+  } catch {}
+}
+
 async function fetchMembers({ refresh = false } = {}) {
   loading.value = true
   error.value = ''
@@ -155,7 +212,68 @@ function formatRefreshError(value) {
 
 function sourceLabel(member) {
   if (!member.is_local) return '外部'
-  return member.status ? `本地管理/${member.status}` : '本地管理'
+  return member.status ? `本地管理/${statusLabel(member.status)}` : '本地管理'
+}
+
+function statusClass(s) {
+  return {
+    active: 'bg-green-500/10 text-green-400',
+    exhausted: 'bg-red-500/10 text-red-400',
+    standby: 'bg-yellow-500/10 text-yellow-400',
+    pending: 'bg-gray-500/10 text-gray-400',
+    sold: 'bg-cyan-500/10 text-cyan-300',
+  }[s] || 'bg-gray-500/10 text-gray-400'
+}
+
+function dotClass(s) {
+  return {
+    active: 'bg-green-400',
+    exhausted: 'bg-red-400',
+    standby: 'bg-yellow-400',
+    pending: 'bg-gray-400',
+    sold: 'bg-cyan-300',
+  }[s] || 'bg-gray-400'
+}
+
+function statusLabel(s) {
+  return { active: 'Active', exhausted: 'Used up', standby: 'Standby', pending: 'Pending', sold: 'Sold' }[s] || s || 'Unknown'
+}
+
+function isOwner(member) {
+  return member.role === 'account-owner' || member.is_main_account
+}
+
+function isSold(member) {
+  return member.status === 'sold' || member.sync_disabled
+}
+
+function canSell(member) {
+  return member.type === 'member' && member.is_local && member.status === 'active' && !member.sync_disabled && !isOwner(member)
+}
+
+function canRemove(member) {
+  if (isOwner(member) || isSold(member)) return false
+  return member.type === 'invite' || member.type === 'member'
+}
+
+function canDelete(member) {
+  return member.type === 'member' && member.is_local && !isOwner(member) && !isSold(member)
+}
+
+function hasActions(member) {
+  return canSell(member) || canRemove(member) || canDelete(member)
+}
+
+function removeLabel(member) {
+  return member.type === 'invite' ? '取消邀请' : '移出'
+}
+
+function showMessage(text, kind = 'success') {
+  message.value = text
+  messageClass.value = kind === 'success'
+    ? 'bg-green-500/10 text-green-400 border-green-500/20'
+    : 'bg-red-500/10 text-red-400 border-red-500/20'
+  setTimeout(() => { message.value = '' }, 8000)
 }
 
 async function removeMember(member) {
@@ -163,22 +281,64 @@ async function removeMember(member) {
   const ok = window.confirm(`确认${actionText} ${member.email}？`)
   if (!ok) return
 
-  removingId.value = memberKey(member)
+  actionId.value = memberKey(member)
+  actionType.value = 'remove'
   error.value = ''
   try {
-    await api.removeTeamMember({
+    const result = await api.removeTeamMember({
       email: member.email,
       user_id: member.user_id,
       type: member.type,
     })
-    try {
-      localStorage.removeItem(CACHE_KEY)
-    } catch {}
+    showMessage(result.message || `已${actionText}: ${member.email}`)
+    clearTeamCache()
     await fetchMembers()
   } catch (e) {
     error.value = e.message
   } finally {
-    removingId.value = ''
+    actionId.value = ''
+    actionType.value = ''
+  }
+}
+
+async function sellMember(member) {
+  const ok = window.confirm(`确认卖出账号 ${member.email}？\n系统会保留 Team 席位，但会删除 CPA/Sub2API 远端记录，并停止后续同步。`)
+  if (!ok) return
+
+  actionId.value = memberKey(member)
+  actionType.value = 'sell'
+  error.value = ''
+  try {
+    const result = await api.sellAccount(member.email)
+    const archive = result.cpa_archive_file ? `，归档: ${result.cpa_archive_file}` : ''
+    showMessage((result.message || `已标记为已售: ${member.email}`) + archive)
+    clearTeamCache()
+    await fetchMembers({ refresh: true })
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    actionId.value = ''
+    actionType.value = ''
+  }
+}
+
+async function deleteMember(member) {
+  const ok = window.confirm(`确认删除账号 ${member.email}？\n这会同时清理本地记录、已配置远端、Team/Invite 和邮箱服务账号。`)
+  if (!ok) return
+
+  actionId.value = memberKey(member)
+  actionType.value = 'delete'
+  error.value = ''
+  try {
+    const result = await api.deleteAccount(member.email)
+    showMessage(result.message || `已删除 ${member.email}`)
+    clearTeamCache()
+    await fetchMembers({ refresh: true })
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    actionId.value = ''
+    actionType.value = ''
   }
 }
 

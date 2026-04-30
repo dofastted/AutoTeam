@@ -267,6 +267,57 @@ def test_sync_to_sub2api_updates_existing_same_email_oauth_account(tmp_path, mon
     assert isinstance(local_updates[0][1]["sub2api_synced_at"], float)
 
 
+def test_sync_to_sub2api_uses_rt_auth_file_when_auth_file_is_session(tmp_path, monkeypatch):
+    session_file = tmp_path / "codex-user@example.com-team-acc-session.json"
+    session_file.write_text(
+        json.dumps(
+            {
+                "access_token": "session-access",
+                "email": "user@example.com",
+                "credential_source": "chatgpt_session",
+            }
+        ),
+        encoding="utf-8",
+    )
+    oauth_file = tmp_path / "codex-user@example.com-team-acc-oauth.json"
+    oauth_file.write_text(
+        json.dumps(
+            {
+                "access_token": "oauth-access",
+                "refresh_token": "rt-1",
+                "id_token": _jwt({"email": "user@example.com"}),
+                "expired": 2_000_000_000,
+                "email": "user@example.com",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "user@example.com",
+                "status": "active",
+                "auth_file": str(session_file),
+                "session_auth_file": str(session_file),
+                "rt_auth_file": str(oauth_file),
+            }
+        ],
+    )
+    monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
+    monkeypatch.setattr(sub2api_sync, "_resolve_group_binding", lambda token: ([], []))
+    monkeypatch.setattr(sub2api_sync, "_list_openai_oauth_accounts", lambda token: [])
+    created = []
+    monkeypatch.setattr(sub2api_sync, "_create_account", lambda *args, **kwargs: created.append(kwargs))
+    monkeypatch.setattr("autoteam.accounts.update_account", lambda *_args, **_kwargs: None)
+
+    result = sub2api_sync.sync_to_sub2api()
+
+    assert result["created"] == 1
+    assert created[0]["credentials"]["access_token"] == "oauth-access"
+    assert created[0]["credentials"]["refresh_token"] == "rt-1"
+
+
 def test_sync_to_sub2api_skips_sold_accounts(tmp_path, monkeypatch):
     auth_file = tmp_path / "codex-sold@example.com-team.json"
     auth_file.write_text(json.dumps({"access_token": "new", "email": "sold@example.com"}), encoding="utf-8")

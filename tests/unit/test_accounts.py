@@ -17,6 +17,7 @@ def test_add_and_update_account_persists_data(tmp_path, monkeypatch):
     assert created[0]["mail_account_id"] == 123
     assert created[0]["mail_provider"] == "cloudmail"
     assert created[0]["status"] == accounts.STATUS_PENDING
+    assert created[0]["usage_status"] == accounts.USAGE_NORMAL
 
     updated = accounts.update_account("user@example.com", status=accounts.STATUS_ACTIVE, auth_file="auth.json")
 
@@ -42,10 +43,49 @@ def test_mark_account_sold_keeps_record_and_disables_sync(tmp_path, monkeypatch)
     updated = accounts.mark_account_sold("sold@example.com", remote_cleanup={"cpa": {"count": 1}})
 
     assert updated["status"] == accounts.STATUS_SOLD
+    assert updated["usage_status"] == accounts.USAGE_SOLD
     assert updated["sync_disabled"] is True
     assert updated["sold_at"] > 0
     assert updated["sale_remote_cleanup"] == {"cpa": {"count": 1}}
     assert accounts.load_accounts()[0]["auth_file"] == "auth.json"
+
+
+def test_mark_account_self_use_keeps_record_and_disables_sync(tmp_path, monkeypatch):
+    accounts_file = tmp_path / "accounts.json"
+    monkeypatch.setattr(accounts, "ACCOUNTS_FILE", accounts_file)
+
+    accounts.save_accounts(
+        [
+            {
+                "email": "self@example.com",
+                "status": accounts.STATUS_ACTIVE,
+                "auth_file": "auth.json",
+            }
+        ]
+    )
+
+    updated = accounts.mark_account_self_use("self@example.com", remote_cleanup={"cpa": {"count": 1}})
+
+    assert updated["status"] == accounts.STATUS_ACTIVE
+    assert updated["usage_status"] == accounts.USAGE_SELF_USE
+    assert updated["sync_disabled"] is True
+    assert updated["self_use_at"] > 0
+    assert updated["self_use_remote_cleanup"] == {"cpa": {"count": 1}}
+    assert accounts.load_accounts()[0]["auth_file"] == "auth.json"
+
+
+def test_load_accounts_normalizes_missing_usage_status(tmp_path, monkeypatch):
+    accounts_file = tmp_path / "accounts.json"
+    accounts_file.write_text(
+        '[{"email":"a@example.com","status":"active"},{"email":"b@example.com","status":"sold"}]',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(accounts, "ACCOUNTS_FILE", accounts_file)
+
+    loaded = accounts.load_accounts()
+
+    assert loaded[0]["usage_status"] == accounts.USAGE_NORMAL
+    assert loaded[1]["usage_status"] == accounts.USAGE_SOLD
 
 
 def test_get_active_accounts_excludes_main_account(tmp_path, monkeypatch):

@@ -41,7 +41,9 @@ API 模式下，Playwright 相关操作通过 `src/autoteam/api.py` (`_Playwrigh
 
 批量直注账号优先使用 `build_chatgpt_session_auth_bundle`。直注注册完成并进入 Team 后，`src/autoteam/manager.py` (`_register_direct_once`) 会在关闭同一个浏览器前读取 `https://chatgpt.com/api/auth/session` 的 `accessToken` 和 session cookie，保存为 CPA 兼容 JSON，避免再进入 Codex OAuth consent/callback 页面。
 
-批量 CPA 路径要求拿到 session bundle。浏览器异常或 session 提取失败时，`src/autoteam/cpa_batch.py` (`_create_direct_account`) 会关闭浏览器并重试当前邮箱账号，不把“远端已入席但缺少 session 凭证”的账号当作成功。
+批量 CPA 路径要求拿到 session bundle。`src/autoteam/cpa_batch.py` (`_create_direct_account`) 只执行一次当前邮箱注册；浏览器异常、`https://chatgpt.com/api/auth/error`、未识别邮箱步骤或 session 提取失败都会让当前邮箱失败并换下一个邮箱，不再用 Team 成员检查作为兜底。
+
+直注批量并行由 `src/autoteam/cpa_batch.py` (`_create_direct_accounts_parallel`) 调度。每个 worker 使用独立邮箱客户端和独立 Chromium 槽位，按 `BROWSER_PARALLEL_WORKERS=1..3` 分配目标数；该路径不会调用 `src/autoteam/manager.py` (`_create_new_accounts_parallel`)。
 
 主号 OAuth 入口是 `SessionCodexAuthFlow`、`MainCodexLoginFlow`、`MainCodexSyncFlow`。主号认证文件保存为 `auths/codex-main-*.json`，不进入账号池。
 
@@ -49,4 +51,6 @@ API 模式下，Playwright 相关操作通过 `src/autoteam/api.py` (`_Playwrigh
 
 `src/autoteam/manual_account.py` (`ManualAccountFlow`): 不启动 Chromium。它只生成 OAuth 链接，尝试监听 `http://localhost:1455/auth/callback`，也支持用户粘贴最终 callback URL。
 
-完成后会保存认证文件，按 `plan_type` 和额度结果更新账号状态，并同步到已启用远端。
+完成后会保存认证文件，按 `plan_type` 和额度结果更新本地账号状态。它不自动同步 CPA / Sub2API；远端上传由同步中心或对应同步接口单独触发。
+
+`src/autoteam/api.py` (`post_account_login`): 仪表盘的单账号登录按钮使用本地 OAuth 验证账号。该接口只要求账号对应邮箱 provider 配置，不要求 CPA / Sub2API 配置；成功后写 `auth_file`、`rt_auth_file`，并保留已有 `session_auth_file`。若 OAuth 页面返回 `account_deactivated`，账号会写为 `status=unavailable`、`sync_disabled=true`、`unavailable_reason=account_deactivated`。

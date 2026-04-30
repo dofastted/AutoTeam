@@ -117,6 +117,44 @@ def test_post_cpa_batch_accepts_parallel_workers(monkeypatch):
     assert captured["kwargs"]["parallel_workers"] == 3
 
 
+def test_post_fill_accepts_parallel_workers(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        api,
+        "_current_runtime_env",
+        lambda: {
+            "MAIL_PROVIDER": "mo_email",
+            "MO_EMAIL_BASE_URL": "https://mo.example.com",
+            "MO_EMAIL_API_KEY": "key",
+            "MO_EMAIL_DOMAIN": "example.com",
+            "MO_EMAIL_NAME_PREFIX": "abc",
+            "MO_EMAIL_START_INDEX": "1",
+            "MO_EMAIL_EXPIRY_TIME": "3600000",
+            "SYNC_TARGET_CPA": "true",
+            "CPA_URL": "http://127.0.0.1:8317",
+            "CPA_KEY": "secret",
+        },
+    )
+
+    def fake_start_task(command, func, params, *args, **kwargs):
+        captured["command"] = command
+        captured["params"] = params
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"task_id": "task-fill", "command": command, "params": params}
+
+    monkeypatch.setattr(api, "_start_task", fake_start_task)
+
+    result = api.post_fill(api.TaskParams(parallel_workers=3))
+
+    assert result["command"] == "fill"
+    assert captured["params"]["parallel_workers"] == 3
+    assert captured["params"]["max_add"] >= 1
+    assert captured["args"] == (None,)
+    assert captured["kwargs"]["parallel_workers"] == 3
+
+
 def test_post_cpa_batch_rejects_unknown_join_mode(monkeypatch):
     monkeypatch.setattr(
         api,
@@ -180,57 +218,69 @@ def test_resume_cpa_batch_run_starts_resume_task(tmp_path, monkeypatch):
     assert captured["kwargs"] == {"resume": True}
 
 
-def test_create_direct_account_retries_current_account_after_browser_error(tmp_path, monkeypatch):
+def test_create_direct_account_fails_current_email_after_browser_error(tmp_path, monkeypatch):
     monkeypatch.setattr(accounts, "ACCOUNTS_FILE", tmp_path / "accounts.json")
     monkeypatch.setattr(
         cpa_batch,
         "time",
-        type("FakeTime", (), {"time": staticmethod(lambda: 1000), "sleep": staticmethod(lambda _s: None)})(),
+        type(
+            "FakeTime",
+            (),
+            {
+                "time": staticmethod(lambda: 1000),
+                "sleep": staticmethod(
+                    lambda _s: (_ for _ in ()).throw(AssertionError("same email retry should not sleep"))
+                ),
+            },
+        )(),
     )
-    monkeypatch.setattr("autoteam.manager._is_email_in_team", lambda _email: False)
+    monkeypatch.setattr(
+        "autoteam.manager._is_email_in_team",
+        lambda _email: (_ for _ in ()).throw(AssertionError("team check should not run")),
+    )
     monkeypatch.setattr(cpa_batch, "save_auth_file", lambda _bundle: str(tmp_path / "codex-a-team.json"))
 
     calls = []
 
     def fake_register(_mail_client, email, _password, **kwargs):
         calls.append(email)
-        if len(calls) == 1:
-            raise RuntimeError("browser closed")
-        kwargs["session_bundle_callback"](
-            {
-                "access_token": "token",
-                "id_token": "token",
-                "email": email,
-                "plan_type": "team",
-                "expired": 2000,
-            }
-        )
-        return True
+        raise RuntimeError("browser closed")
 
     monkeypatch.setattr("autoteam.manager._register_direct_once", fake_register)
 
     class FakeMailClient:
         provider_name = "mo_email"
+        deleted = False
 
         def create_temp_email(self):
             return "mail-1", "retry@example.com"
 
         def delete_account(self, _account_id):
-            raise AssertionError("should not delete successful account")
+            self.deleted = True
 
-    email = cpa_batch._create_direct_account(FakeMailClient())
+    mail_client = FakeMailClient()
 
-    assert email == "retry@example.com"
-    assert calls == ["retry@example.com", "retry@example.com"]
+    with pytest.raises(cpa_batch.AccountFlowError, match="直注注册失败: browser closed"):
+        cpa_batch._create_direct_account(mail_client)
+
+    assert calls == ["retry@example.com"]
+    assert mail_client.deleted is True
     saved = accounts.load_accounts()[0]
-    assert saved["status"] == accounts.STATUS_ACTIVE
-    assert saved["auth_file"].endswith("codex-a-team.json")
+    assert saved["status"] == accounts.STATUS_PENDING
+    assert saved["auth_file"] is None
 
 
 def test_create_direct_account_does_not_accept_team_membership_without_session(tmp_path, monkeypatch):
     monkeypatch.setattr(accounts, "ACCOUNTS_FILE", tmp_path / "accounts.json")
-    monkeypatch.setattr(cpa_batch.time, "sleep", lambda _s: None)
-    monkeypatch.setattr("autoteam.manager._is_email_in_team", lambda _email: True)
+    monkeypatch.setattr(
+        cpa_batch.time,
+        "sleep",
+        lambda _s: (_ for _ in ()).throw(AssertionError("same email retry should not sleep")),
+    )
+    monkeypatch.setattr(
+        "autoteam.manager._is_email_in_team",
+        lambda _email: (_ for _ in ()).throw(AssertionError("team check should not run")),
+    )
 
     def fake_register(*_args, **_kwargs):
         raise RuntimeError("ChatGPT session 提取失败: no token")
@@ -249,7 +299,7 @@ def test_create_direct_account_does_not_accept_team_membership_without_session(t
 
     mail_client = FakeMailClient()
 
-    with pytest.raises(cpa_batch.AccountFlowError, match="连续 3 次直注注册失败"):
+    with pytest.raises(cpa_batch.AccountFlowError, match="直注注册失败: ChatGPT session 提取失败: no token"):
         cpa_batch._create_direct_account(mail_client)
 
     assert mail_client.deleted is True

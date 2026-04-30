@@ -210,3 +210,37 @@ def test_auto_reuse_skip_reason_detects_google_provider_and_gmail():
         == "Google 登录账号暂不支持自动复用"
     )
     assert manager._auto_reuse_skip_reason({"email": "user@example.com"}) is None
+
+
+def test_complete_direct_about_you_uses_shared_fill_logic(monkeypatch):
+    calls = []
+
+    class FakePage:
+        url = "https://chatgpt.com/auth/about-you"
+
+    def fake_fill(page, *, email=None, logger=None, log_prefix=None, submit_timeout=12):
+        calls.append(
+            {
+                "page": page,
+                "email": email,
+                "logger": logger,
+                "log_prefix": log_prefix,
+                "submit_timeout": submit_timeout,
+            }
+        )
+        return True
+
+    monkeypatch.setattr(manager, "fill_about_you_page", fake_fill)
+
+    result = manager._complete_direct_about_you(FakePage())
+
+    assert result is True
+    assert calls == [
+        {
+            "page": calls[0]["page"],
+            "email": None,
+            "logger": manager.logger,
+            "log_prefix": "[直接注册]",
+            "submit_timeout": 12,
+        }
+    ]

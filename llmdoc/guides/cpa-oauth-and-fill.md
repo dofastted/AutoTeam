@@ -25,9 +25,10 @@
 - 只允许账号池里的 active 账号。
 - 主号不能走该接口。
 - 必须有 CPA 配置。
-- 本地已有 `auth_file` 时直接上传 CPA。
-- 本地没有 `auth_file` 时，按账号邮箱 provider 执行 Codex OAuth。
+- 本地已有可用的 OAuth RT 文件时直接上传 CPA。
+- 只有 `session_auth_file` 或缺少 RT 文件时，才按账号邮箱 provider 执行 Codex OAuth。
 - OAuth 返回 `plan_type=team` 才继续上传。
+- 成功后会写 `auth_file`、`rt_auth_file`，并保留已有 `session_auth_file`。
 - 上传失败会让后台任务失败。
 
 ## 批量 CPA JSON
@@ -43,24 +44,26 @@
 
 直注和邀请流程创建邮箱后，会立刻把真实邮箱写入账号池和 `flow_runs.json`。后续注册、凭证保存、额度检查、CPA 上传各自写阶段事件，避免浏览器流程卡住时页面只看到 `attempt-*` 占位记录。
 
-直注流程注册成功后优先保存 ChatGPT Web session 凭证：
+直注流程注册成功后先保存 ChatGPT Web session 备份，再生成 OAuth RT 凭证：
 
 - `src/autoteam/manager.py` (`_register_direct_once`): 注册完成后在关闭浏览器前回传 session bundle。
 - `src/autoteam/codex_auth.py` (`build_chatgpt_session_auth_bundle`): 读取 `/api/auth/session` 的 `accessToken`、session cookie、账号 ID 和 `plan_type`。
-- `src/autoteam/cpa_batch.py` (`_create_direct_account`): 将 session bundle 保存为 `auths/codex-{email}-{plan_type}-{hash}.json`。浏览器异常或 session 提取失败时重试当前邮箱账号。
-- `src/autoteam/cpa_batch.py` (`_verify_and_upload_cpa`): 批量流程不再回退到浏览器 Codex OAuth；没有 session 凭证时直接失败并记录原因。
-- `src/autoteam/cpa_batch.py` (`_CpaUploadWorker`): session 凭证保存后，CPA 额度检查和上传在内部 worker 线程执行；主线程可以继续注册后续账号。
+- `src/autoteam/cpa_batch.py` (`_create_direct_account`): 将 session bundle 保存为 `auths/codex-{email}-{plan_type}-{hash}-session.json`，并写入 `session_auth_file`。浏览器异常、认证错误页或 session 提取失败时，当前邮箱直接失败并换下一个邮箱。
+- `src/autoteam/cpa_batch.py` (`_create_direct_accounts_parallel`): 直注批量并行 worker。按窗口数拆分目标，每个 worker 单独创建邮箱、注册、保存 session 凭证。
+- `src/autoteam/cpa_batch.py` (`_verify_and_upload_cpa`): 优先使用 `rt_auth_file` 或可用的 `auth_file`；缺少 OAuth RT 文件时自动调用 `login_codex_via_browser` 打开该账号的 Codex OAuth 链接，拦截 callback 换 RT，保存为 `auths/codex-{email}-{plan_type}-{hash}-oauth.json`。
+- `src/autoteam/cpa_batch.py` (`_CpaUploadWorker`): OAuth RT 凭证保存后，CPA 额度检查和上传在内部 worker 线程执行；主线程可以继续注册后续账号。
 
 成功条件：
 
 - 账号已注册并进入 Team。
 - 本地状态为 `active`。
-- session 凭证或认证文件解析出的 `plan_type` 是 `team`。
+- OAuth RT 文件解析出的 `plan_type` 是 `team`。
 - `check_codex_quota` 返回 `ok`。
 - `upload_to_cpa` 返回成功。
+- 本地账号写入 `cpa_status=success` 和 `usage_status=inventory`。
 - 若 Sub2API 已启用，CPA 上传成功后会尝试把该账号单独同步到 Sub2API；Sub2API 失败会写入警告事件，不回滚已完成的 CPA 上传。
 
-注册阶段会对当前邮箱账号最多尝试 3 次。CPA 认证、额度检查或上传阶段失败时，会对同一个已知邮箱继续重试，累计失败 3 次后才把该账号记录为 `failed`。若连续 2 个账号都在注册阶段失败，批量任务会暂停，避免继续消耗新邮箱。若已完成账号的成功率接近跌破 95%，批量任务也会写入 `pause_requested` 并暂停。任务可通过 `/api/cpa-batch/runs/{run_id}/resume` 按原 run_id 继续执行。
+注册阶段不重试同一个邮箱，也不通过 Team 成员检查兜底。`https://chatgpt.com/api/auth/error`、未识别邮箱步骤、浏览器异常或缺少 session 凭证都会让当前邮箱失败，后续继续创建新邮箱。CPA 认证、额度检查或上传阶段失败时，会对同一个已知邮箱继续重试，累计失败 3 次后才把该账号记录为 `failed`。若连续 2 个账号都在注册阶段失败，批量任务会暂停，避免继续消耗新邮箱。若已完成账号的成功率接近跌破 95%，批量任务也会写入 `pause_requested` 并暂停。任务可通过 `/api/cpa-batch/runs/{run_id}/resume` 按原 run_id 继续执行。
 
 暂停规则：
 
@@ -68,6 +71,7 @@
 - 当前浏览器阶段不强制中断；已提交的 CPA worker 会完成当前账号检查和上传。
 - 阶段结束后不再创建下一个账号，运行记录标记为 `paused`。
 - 服务启动时会把上次遗留的 `running` 批量记录标记为失败，并把仍在运行的账号记录写成严重错误。
+- 恢复某个批量任务前，`src/autoteam/flow_runs.py` (`fail_running_flow_accounts`) 会先把该任务里遗留的 `running` 账号记录标记为失败，避免旧窗口状态一直显示运行中。
 
 ## 历史账号 CPA / Sub2API 补传
 
@@ -164,6 +168,18 @@
 - CPA / Sub2API 同步结果。
 
 后台任务最终结果包含 `attempted`、`succeeded`、`failed`、`success_rate` 和 `batches`。
+
+## 本地 hook 监督
+
+`tools/codex-hook/check_and_invoke.py` 会按 `.autoteam-hook/runtime/campaign.json` 的配置定时巡检。
+
+当前默认：
+
+- 每 10 分钟触发一次。
+- 优先检查当前 managed run 是否还在运行。
+- 没有运行中的 run 时，优先恢复未完成 run；没有可恢复 run 时再启动新批次。
+- 检查成功账号是否已经写入 `plan_type`、`auth_file`、`cpa_uploaded_at`、`qualified_at`。
+- 通过 `/api/cpa/files` 检查 CPA 远端是否已经存在对应 auth 文件，避免只看本地成功状态。
 
 ## 修改注意
 

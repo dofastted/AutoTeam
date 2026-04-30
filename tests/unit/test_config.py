@@ -34,7 +34,7 @@ def test_playwright_browser_mode_controls_visibility(monkeypatch):
     reloaded = importlib.reload(config)
 
     assert reloaded.PLAYWRIGHT_BROWSER_MODE == "embedded"
-    assert reloaded.get_playwright_launch_options()["headless"] is True
+    assert reloaded.get_playwright_launch_options()["headless"] is False
 
     monkeypatch.setenv("PLAYWRIGHT_BROWSER_MODE", "")
     monkeypatch.setenv("PLAYWRIGHT_HEADLESS", "true")

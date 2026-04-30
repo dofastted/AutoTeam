@@ -130,8 +130,9 @@ async function doExecute(action, param) {
       messageClass.value = 'bg-green-500/10 text-green-400 border border-green-500/20'
       emit('refresh')
     } else {
+      const parallelWorkers = normalizeParallelWorkers(props.parallelWorkers)
       const result = action.key === 'rotate' || action.key === 'fill'
-        ? await api[action.method](param, props.parallelWorkers)
+        ? await api[action.method](param, parallelWorkers)
         : await api[action.method](param)
       message.value = `任务已提交: ${result.task_id}`
       messageClass.value = 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
@@ -142,5 +143,11 @@ async function doExecute(action, param) {
     messageClass.value = 'bg-red-500/10 text-red-400 border border-red-500/20'
   }
   setTimeout(() => { message.value = '' }, 8000)
+}
+
+function normalizeParallelWorkers(value) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return null
+  return Math.min(3, Math.max(1, Math.floor(parsed)))
 }
 </script>

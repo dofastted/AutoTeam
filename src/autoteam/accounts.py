@@ -18,7 +18,23 @@ STATUS_ACTIVE = "active"  # 在 team 中，额度可用
 STATUS_EXHAUSTED = "exhausted"  # 在 team 中，额度用完
 STATUS_STANDBY = "standby"  # 已移出 team，等待额度恢复
 STATUS_PENDING = "pending"  # 已邀请，等待注册完成
+STATUS_UNAVAILABLE = "unavailable"  # 账号已不可用，例如 account_deactivated
 STATUS_SOLD = "sold"  # 已售出，保留 Team 席位但停止同步和轮转
+
+# 业务属性。不要复用 status，status 仍只表达 Team/生命周期。
+USAGE_NORMAL = "normal"  # 普通轮转账号
+USAGE_INVENTORY = "inventory"  # CPA 库存账号
+USAGE_SELF_USE = "self_use"  # 自用，本地保留，远端下架
+USAGE_SOLD = "sold"  # 已售出，本地保留，远端下架
+VALID_USAGE_STATUSES = {USAGE_NORMAL, USAGE_INVENTORY, USAGE_SELF_USE, USAGE_SOLD}
+
+# 注册与 CPA 阶段结果
+REGISTRATION_STATUS_PENDING = "pending"
+REGISTRATION_STATUS_SUCCESS = "success"
+REGISTRATION_STATUS_FAILED = "failed"
+CPA_STATUS_SUCCESS = "success"
+CPA_STATUS_FAILED = "failed"
+CPA_STATUS_PENDING = "pending"
 
 
 def _normalized_email(value):
@@ -29,13 +45,31 @@ def _is_main_account_email(email):
     return bool(_normalized_email(email)) and _normalized_email(email) == _normalized_email(get_admin_email())
 
 
+def _normalize_account_record(acc):
+    if not isinstance(acc, dict):
+        return acc
+    usage_status = (acc.get("usage_status") or "").strip().lower()
+    if usage_status not in VALID_USAGE_STATUSES:
+        if acc.get("status") == STATUS_SOLD:
+            usage_status = USAGE_SOLD
+        elif acc.get("self_use_at"):
+            usage_status = USAGE_SELF_USE
+        else:
+            usage_status = USAGE_NORMAL
+    acc["usage_status"] = usage_status
+    return acc
+
+
 def load_accounts():
     """加载账号列表"""
     with _ACCOUNTS_LOCK:
         if ACCOUNTS_FILE.exists():
             text = read_text(ACCOUNTS_FILE).strip()
             if text:
-                return json.loads(text)
+                data = json.loads(text)
+                if isinstance(data, list):
+                    return [_normalize_account_record(acc) for acc in data]
+                return data
         return []
 
 
@@ -86,6 +120,7 @@ def add_account(email, password, cloudmail_account_id=None, *, mail_provider=Non
                 "password": password,
                 **mail_fields,
                 "status": STATUS_PENDING,
+                "usage_status": USAGE_NORMAL,
                 "auth_file": None,  # CPA 认证文件路径
                 "quota_exhausted_at": None,  # 额度用完的时间
                 "quota_resets_at": None,  # 额度恢复时间
@@ -107,14 +142,34 @@ def update_account(email, **kwargs):
         return acc
 
 
+def mark_account_usage_status(email, usage_status, **kwargs):
+    """更新账号业务属性。sold/self_use 应走专用函数，因为需要远端下架记录。"""
+    usage_status = (usage_status or "").strip().lower()
+    if usage_status not in {USAGE_NORMAL, USAGE_INVENTORY}:
+        raise ValueError(f"不允许直接设置业务属性: {usage_status}")
+    return update_account(email, usage_status=usage_status, **kwargs)
+
+
 def mark_account_sold(email, *, remote_cleanup=None):
     """标记账号已售出，保留本地记录和 Team 席位。"""
     return update_account(
         email,
         status=STATUS_SOLD,
+        usage_status=USAGE_SOLD,
         sync_disabled=True,
         sold_at=time.time(),
         sale_remote_cleanup=remote_cleanup or {},
+    )
+
+
+def mark_account_self_use(email, *, remote_cleanup=None):
+    """标记账号为自用，保留本地记录和 Team 席位，但停止远端同步。"""
+    return update_account(
+        email,
+        usage_status=USAGE_SELF_USE,
+        sync_disabled=True,
+        self_use_at=time.time(),
+        self_use_remote_cleanup=remote_cleanup or {},
     )
 
 

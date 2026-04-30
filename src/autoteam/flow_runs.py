@@ -122,6 +122,42 @@ def mark_interrupted_running_runs(reason: str = "服务重启或任务中断") -
         return changed
 
 
+def fail_running_flow_accounts(run_id: str, reason: str = "恢复前清理遗留运行记录") -> int:
+    """Mark lingering running account records as failed for one flow run."""
+    with _FLOW_RUNS_LOCK:
+        runs = load_flow_runs()
+        changed = 0
+        now = _now()
+        for run in runs:
+            if run.get("run_id") != run_id:
+                continue
+            for account in run.get("accounts", []):
+                if account.get("status") not in ACTIVE_FLOW_STATUSES:
+                    continue
+                account["status"] = "failed"
+                if account.get("error_level") not in {"warn", "error", "fatal"}:
+                    account["error_level"] = "error"
+                account["error_message"] = account.get("error_message") or reason
+                account["finished_at"] = account.get("finished_at") or now
+                account.setdefault("events", []).append(
+                    {
+                        "ts": now,
+                        "stage": account.get("stage") or "interrupted",
+                        "message": reason,
+                        "error_level": account["error_level"],
+                    }
+                )
+                changed += 1
+            if changed:
+                run["attempted_count"] = len(run.get("accounts", []))
+                run["success_count"] = sum(1 for item in run.get("accounts", []) if item.get("status") == "success")
+                run["failed_count"] = sum(1 for item in run.get("accounts", []) if item.get("status") == "failed")
+            break
+        if changed:
+            save_flow_runs(runs)
+        return changed
+
+
 def request_flow_pause(run_id: str) -> dict | None:
     return update_flow_run(run_id, pause_requested=True)
 

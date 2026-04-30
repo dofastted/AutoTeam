@@ -268,6 +268,20 @@ class CloudMailClient:
                 return [data]
         return []
 
+    def get_email_by_id(self, account_id, email_id, to_email=None):
+        emails = self.get_latest_emails(account_id, email_id=email_id, all_receive=0)
+        if emails:
+            for email in emails:
+                if str(email.get("emailId")) == str(email_id):
+                    return email
+            return emails[0]
+
+        if to_email:
+            for email in self.search_emails_by_recipient(to_email, size=10, account_id=account_id):
+                if str(email.get("emailId")) == str(email_id):
+                    return email
+        return None
+
     def wait_for_email(self, to_email, timeout=None, sender_keyword=None):
         """轮询等待邮件到达（用 admin API 按收件人搜索）"""
         timeout = EMAIL_POLL_TIMEOUT if timeout is None else timeout

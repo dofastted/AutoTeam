@@ -259,6 +259,7 @@ const emit = defineEmits(['task-started', 'refresh'])
 
 const joinMode = ref('direct')
 const parallelWorkers = ref(1)
+const parallelWorkersInitialized = ref(false)
 const runs = ref([])
 const selectedRunId = ref('')
 const loadingRuns = ref(false)
@@ -383,6 +384,7 @@ watch(
 )
 
 onMounted(() => {
+  loadParallelWorkersConfig()
   loadRuns()
   manageTimer()
 })
@@ -426,11 +428,31 @@ async function loadRuns() {
   }
 }
 
+function normalizeParallelWorkers(value) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return 1
+  return Math.min(3, Math.max(1, Math.floor(parsed)))
+}
+
+async function loadParallelWorkersConfig() {
+  if (parallelWorkersInitialized.value) return
+  parallelWorkersInitialized.value = true
+  try {
+    const result = await api.getRuntimeConfig()
+    const field = (result.fields || []).find(item => item.key === 'BROWSER_PARALLEL_WORKERS')
+    const configured = field?.value ?? field?.default
+    parallelWorkers.value = normalizeParallelWorkers(configured)
+  } catch (e) {
+    console.warn('加载并行窗口数配置失败', e)
+    parallelWorkers.value = normalizeParallelWorkers(parallelWorkers.value)
+  }
+}
+
 async function startBatch() {
   if (batchDisabled.value || submitting.value) return
   submitting.value = true
   try {
-    const result = await api.startCpaBatch(joinMode.value, null, null, parallelWorkers.value)
+    const result = await api.startCpaBatch(joinMode.value, null, null, normalizeParallelWorkers(parallelWorkers.value))
     selectedRunId.value = result.params?.run_id || ''
     setMessage(`批量任务已提交: ${result.task_id}`)
     emit('task-started')

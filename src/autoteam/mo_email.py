@@ -169,7 +169,12 @@ class MoEmailClient:
             item.get("address") or item.get("email") or item.get("mailAddress") or item.get("name") or ""
         ).strip()
         account_id = (
-            item.get("id") or item.get("emailId") or item.get("accountId") or item.get("address_id") or item.get("_id")
+            item.get("userId")
+            or item.get("id")
+            or item.get("emailId")
+            or item.get("accountId")
+            or item.get("address_id")
+            or item.get("_id")
         )
         return {
             **item,
@@ -185,7 +190,7 @@ class MoEmailClient:
         remaining = max(1, int(size or _PAGE_LIMIT))
 
         while remaining > 0:
-            params = {"cursor": cursor} if cursor else None
+            params = {"cursor": cursor, "size": min(_PAGE_LIMIT, remaining)} if cursor else {"size": min(_PAGE_LIMIT, remaining)}
             payload = self._request("GET", "/api/emails", label="获取邮箱列表", params=params)
             page_items = self._list_from_payload(payload, ("emails", "items", "results", "list"))
             if not page_items:
@@ -286,7 +291,7 @@ class MoEmailClient:
         try:
             for account in self.list_accounts(size=1000):
                 if self._normalize_email(account.get("email")) == target:
-                    return account.get("accountId")
+                    return account.get("accountId") or account.get("userId")
         except Exception:
             pass
         return None
@@ -337,6 +342,12 @@ class MoEmailClient:
             message = payload
         return message
 
+    def get_email_by_id(self, account_id, email_id, to_email=None):
+        if account_id is None or email_id is None:
+            return None
+        detail = self._get_message_detail(account_id, email_id)
+        return self._normalize_message_item(detail, account_id=account_id, to_email=to_email)
+
     def search_emails_by_recipient(self, to_email, size=10, account_id=None):
         target_email = str(to_email or "").strip()
         if not target_email:
@@ -346,11 +357,20 @@ class MoEmailClient:
         if resolved_account_id is None:
             return []
 
-        payload = self._request(
-            "GET",
-            f"/api/emails/{quote(str(resolved_account_id), safe='')}",
-            label="获取邮件列表",
-        )
+        payload = None
+        for candidate_account_id in (resolved_account_id,):
+            try:
+                payload = self._request(
+                    "GET",
+                    f"/api/emails/{quote(str(candidate_account_id), safe='')}",
+                    label="获取邮件列表",
+                )
+                break
+            except Exception:
+                continue
+        if payload is None:
+            return []
+
         page_items = self._list_from_payload(payload, ("messages", "emails", "items", "results", "list"))
         emails = []
         for item in page_items[: max(1, int(size or 10))]:

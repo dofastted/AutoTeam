@@ -61,6 +61,41 @@ def test_build_chatgpt_session_auth_bundle_from_page():
     assert bundle["credential_source"] == "chatgpt_session"
 
 
+def test_save_auth_file_keeps_session_and_oauth_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(codex_auth, "AUTH_DIR", tmp_path)
+    monkeypatch.setattr(codex_auth, "ensure_auth_dir", lambda: tmp_path.mkdir(exist_ok=True))
+    monkeypatch.setattr(codex_auth, "ensure_auth_file_permissions", lambda _path: None)
+
+    session_bundle = {
+        "email": "user@example.com",
+        "account_id": "acc-1",
+        "plan_type": "team",
+        "access_token": "session-access",
+        "id_token": "session-id",
+        "refresh_token": "",
+        "expired": 2000000000,
+        "credential_source": "chatgpt_session",
+    }
+    oauth_bundle = {
+        "email": "user@example.com",
+        "account_id": "acc-1",
+        "plan_type": "team",
+        "access_token": "oauth-access",
+        "id_token": "oauth-id",
+        "refresh_token": "rt-1",
+        "expired": 2000000000,
+    }
+
+    session_path = codex_auth.save_auth_file(session_bundle, source="session")
+    oauth_path = codex_auth.save_auth_file(oauth_bundle, source="oauth")
+
+    assert session_path != oauth_path
+    assert session_path.endswith("-session.json")
+    assert oauth_path.endswith("-oauth.json")
+    assert (tmp_path / session_path.split("/")[-1]).exists()
+    assert (tmp_path / oauth_path.split("/")[-1]).exists()
+
+
 def test_login_codex_via_session_uses_unified_flow_and_returns_bundle(monkeypatch):
     events = []
 
@@ -141,3 +176,85 @@ def test_refresh_main_auth_file_saves_bundle_from_session_login(monkeypatch):
         "auth_file": "/tmp/acc-1.json",
         "plan_type": "team",
     }
+
+
+def test_poll_verification_code_by_mail_id_uses_exact_message_id_and_skips_used_ids():
+    calls = []
+
+    class FakeMailClient:
+        def search_emails_by_recipient(self, email, size=5, account_id=None):
+            calls.append(("search", email, size, account_id))
+            return [
+                {
+                    "emailId": "mail-1",
+                    "sendEmail": "noreply@tm.openai.com",
+                    "subject": "Your code",
+                    "content": "placeholder",
+                },
+                {
+                    "emailId": "mail-2",
+                    "sendEmail": "noreply@tm.openai.com",
+                    "subject": "Your code",
+                    "content": "placeholder",
+                },
+            ]
+
+        def get_email_by_id(self, account_id, email_id, to_email=None):
+            calls.append(("get", account_id, email_id, to_email))
+            return {
+                "emailId": email_id,
+                "sendEmail": "noreply@tm.openai.com",
+                "subject": "Your code",
+                "text": "Your temporary OpenAI login code is 654321" if email_id == "mail-2" else "no code",
+            }
+
+        def extract_verification_code(self, email_data):
+            return "654321" if email_data.get("emailId") == "mail-2" else None
+
+    otp, email_id = codex_auth._poll_verification_code_by_mail_id(
+        FakeMailClient(),
+        "tmp-user@example.com",
+        mail_account_id="acct-1",
+        used_email_ids={"mail-1"},
+        timeout_seconds=1,
+        poll_interval_seconds=0,
+    )
+
+    assert (otp, email_id) == ("654321", "mail-2")
+    assert calls == [
+        ("search", "tmp-user@example.com", 5, "acct-1"),
+        ("get", "acct-1", "mail-2", "tmp-user@example.com"),
+    ]
+
+
+def test_poll_verification_code_by_mail_id_ignores_invite_mail_and_sender_mismatch():
+    class FakeMailClient:
+        def search_emails_by_recipient(self, email, size=5, account_id=None):
+            return [
+                {
+                    "emailId": "mail-1",
+                    "sendEmail": "invite@openai.com",
+                    "subject": "You've been invited",
+                    "content": "Your code is 111111",
+                },
+                {
+                    "emailId": "mail-2",
+                    "sendEmail": "billing@example.com",
+                    "subject": "Your code",
+                    "content": "Your code is 222222",
+                },
+            ]
+
+        def extract_verification_code(self, email_data):
+            return "999999"
+
+    otp, email_id = codex_auth._poll_verification_code_by_mail_id(
+        FakeMailClient(),
+        "tmp-user@example.com",
+        mail_account_id="acct-1",
+        used_email_ids=set(),
+        timeout_seconds=0,
+        poll_interval_seconds=0,
+    )
+
+    assert (otp, email_id) == (None, None)

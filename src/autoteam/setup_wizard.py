@@ -344,6 +344,8 @@ def _verify_cpa():
     logger.info("[验证] CPA 配置...")
 
     try:
+        import requests
+
         resp = outbound_proxy.request(
             "GET",
             f"{cpa_url}/v0/management/auth-files",

@@ -14,6 +14,7 @@ from playwright.sync_api import sync_playwright
 
 import autoteam.display  # noqa: F401
 from autoteam import outbound_proxy
+from autoteam.about_you import fill_about_you_page
 from autoteam.admin_state import (
     get_admin_email,
     get_admin_session_token,
@@ -295,9 +296,62 @@ def _is_google_redirect(page):
         return False
 
 
+def _is_cloudflare_challenge_visible(page):
+    try:
+        body = page.locator("body").inner_text(timeout=1000).lower()
+        if "verifying" in body and "cloudflare" in body:
+            return True
+        if "verify you are human" in body:
+            return True
+    except Exception:
+        pass
+
+    try:
+        return page.locator('iframe[src*="challenges.cloudflare.com"], iframe[title*="Cloudflare"]').first.is_visible(
+            timeout=500
+        )
+    except Exception:
+        return False
+
+
+def _wait_for_auth_page_ready(page, *, timeout_seconds=75):
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        try:
+            if page.locator('input[name="email"], input[id="email-input"], input[id="email"]').first.is_visible(
+                timeout=1000
+            ):
+                return True
+        except Exception:
+            pass
+
+        try:
+            if page.locator('button:has-text("登录"), button:has-text("Log in")').first.is_visible(timeout=1000):
+                return True
+        except Exception:
+            pass
+
+        if not _is_cloudflare_challenge_visible(page):
+            try:
+                if page.locator("body").inner_text(timeout=1000).strip():
+                    return True
+            except Exception:
+                pass
+
+        time.sleep(2)
+
+    return False
+
+
 _OTP_INPUT_SELECTORS = (
     'input[name="code"], input[inputmode="numeric"], input[autocomplete="one-time-code"], '
     'input[placeholder*="验证码"], input[placeholder*="code" i]'
+)
+_OTP_LOGIN_SELECTORS = (
+    'button:has-text("一次性验证码"), button:has-text("邮箱验证码"), '
+    'button:has-text("one-time"), button:has-text("email login"), '
+    'a:has-text("一次性验证码"), a:has-text("邮箱验证码"), '
+    'a:has-text("one-time"), a:has-text("email login")'
 )
 _OTP_INVALID_HINTS = (
     "invalid code",
@@ -310,10 +364,72 @@ _OTP_INVALID_HINTS = (
     "验证码已过期",
 )
 
+LAST_OAUTH_FAILURE_REASON = None
+LAST_OAUTH_FAILURE_TEXT = ""
+
+
+def _set_last_oauth_failure(reason: str | None, text: str = ""):
+    global LAST_OAUTH_FAILURE_REASON, LAST_OAUTH_FAILURE_TEXT
+    LAST_OAUTH_FAILURE_REASON = reason
+    LAST_OAUTH_FAILURE_TEXT = text or ""
+
 
 def _is_otp_input_visible(page, timeout=500):
     try:
         return page.locator(_OTP_INPUT_SELECTORS).first.is_visible(timeout=timeout)
+    except Exception:
+        return False
+
+
+def _click_email_otp_login(page, timeout=3000):
+    try:
+        otp_btn = page.locator(_OTP_LOGIN_SELECTORS).first
+        if otp_btn.is_visible(timeout=timeout):
+            otp_btn.click()
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _auth_error_excerpt(page):
+    try:
+        body = page.locator("body").inner_text(timeout=1500).strip()
+    except Exception:
+        return ""
+    return body.replace("\n", " ")[:300]
+
+
+def _classify_auth_error_text(text: str):
+    value = (text or "").lower()
+    if "account_deactivated" in value:
+        return "account_deactivated"
+    if "operation timed out" in value:
+        return "operation_timed_out"
+    if "oops, an error occurred" in value:
+        return "auth_error"
+    return None
+
+
+def _is_auth_error_page(page):
+    url = (page.url or "").lower()
+    if "api/auth/error" in url or "auth/error" in url:
+        return True
+    text = _auth_error_excerpt(page).lower()
+    return bool(_classify_auth_error_text(text))
+
+
+def _retry_auth_error_page(page):
+    try:
+        retry = page.locator('button:has-text("Try again"), a:has-text("Try again")').first
+        if retry.is_visible(timeout=1500):
+            retry.click()
+            return True
+    except Exception:
+        pass
+    try:
+        page.go_back(wait_until="domcontentloaded", timeout=30000)
+        return True
     except Exception:
         return False
 
@@ -353,7 +469,85 @@ def _wait_for_otp_submit_result(page, timeout=12):
     return "pending", None
 
 
-def login_codex_via_browser(email, password, mail_client=None):
+def _fetch_mail_message_by_id(mail_client, *, email, mail_account_id, email_id):
+    if not email_id:
+        return None
+
+    get_by_id = getattr(mail_client, "get_email_by_id", None)
+    if callable(get_by_id):
+        try:
+            return get_by_id(mail_account_id, email_id, to_email=email)
+        except TypeError:
+            return get_by_id(mail_account_id, email_id)
+        except Exception:
+            return None
+
+    try:
+        emails = mail_client.search_emails_by_recipient(email, size=10, account_id=mail_account_id)
+    except Exception:
+        return None
+
+    for item in emails:
+        if str(item.get("emailId") or "") == str(email_id):
+            return item
+    return None
+
+
+def _poll_verification_code_by_mail_id(
+    mail_client,
+    email,
+    *,
+    mail_account_id,
+    used_email_ids,
+    timeout_seconds=120,
+    poll_interval_seconds=3,
+    sender_keywords=("openai", "chatgpt"),
+):
+    """
+    通过 mail api 拿到候选邮件列表后，按 mail id 逐封读取“对应邮件”。
+    这里不强制要求必须是登录后的新邮件，只跳过已经处理过的 mail id，
+    这样可以兼容服务端延迟、排序漂移，以及“先有列表、后补正文”的情况。
+    返回 (otp_code, email_id)；超时返回 (None, None)。
+    """
+    deadline = time.time() + timeout_seconds
+
+    while time.time() < deadline:
+        emails = mail_client.search_emails_by_recipient(email, size=5, account_id=mail_account_id)
+        for em in emails:
+            email_id = em.get("emailId", 0)
+            if email_id in used_email_ids:
+                continue
+
+            sender = (
+                em.get("sendEmail")
+                or em.get("sender")
+                or em.get("from")
+                or em.get("from_address")
+                or ""
+            ).lower()
+            if sender_keywords and not any(keyword in sender for keyword in sender_keywords):
+                continue
+
+            subj = (em.get("subject") or "").lower()
+            if "invited" in subj or "invitation" in subj:
+                continue
+
+            message = _fetch_mail_message_by_id(
+                mail_client,
+                email=email,
+                mail_account_id=mail_account_id,
+                email_id=email_id,
+            ) or em
+            otp = mail_client.extract_verification_code(message)
+            if otp:
+                return otp, email_id
+
+        time.sleep(poll_interval_seconds)
+
+    return None, None
+
+
+def login_codex_via_browser(email, password, mail_client=None, mail_account_id=None):
     """
     通过 Playwright 自动完成 Codex OAuth 登录。
     mail_client: CloudMailClient 实例，用于自动读取登录验证码。
@@ -362,12 +556,12 @@ def login_codex_via_browser(email, password, mail_client=None):
     code_verifier, code_challenge = _generate_pkce()
     state = secrets.token_urlsafe(16)
     _used_email_ids: set[object] = set()  # 记录已尝试过的邮件，避免重复提交同一封验证码邮件
-    _email_ids_before_login: set[object] = set()
 
     chatgpt_account_id = get_chatgpt_account_id()
 
     auth_url = _build_auth_url(code_challenge, state)
 
+    _set_last_oauth_failure(None, "")
     logger.info("[Codex] 开始 OAuth 登录: %s", email)
 
     auth_code = None
@@ -404,35 +598,13 @@ def login_codex_via_browser(email, password, mail_client=None):
             )
             logger.debug("[Codex] 登录前已注入 _account cookie = %s", chatgpt_account_id)
 
-        # 在登录开始前记录现有邮件 ID，后续只接受新邮件。Mo Email 的 ID 可能是字符串。
-        _email_id_before_login = 0
-        if mail_client:
-            try:
-                _pre = mail_client.search_emails_by_recipient(email, size=10)
-                if _pre:
-                    _email_ids_before_login = {item.get("emailId", 0) for item in _pre}
-                    _email_id_before_login = _pre[0].get("emailId", 0)
-            except Exception:
-                pass
-
-        def _is_new_mail_id(email_id):
-            if email_id in _used_email_ids or email_id in _email_ids_before_login:
-                return False
-            try:
-                return int(email_id) > int(_email_id_before_login)
-            except Exception:
-                return True
-
         logger.info("[Codex] 先登录 ChatGPT 选择 Team workspace...")
         _page = context.new_page()
         _page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=60000)
-        time.sleep(5)
-
-        # Cloudflare
-        for _i in range(12):
-            if "verify you are human" not in _page.content()[:2000].lower():
-                break
-            time.sleep(5)
+        if not _wait_for_auth_page_ready(_page, timeout_seconds=90):
+            _screenshot(_page, "codex_00_cloudflare_timeout.png")
+            logger.warning("[Codex] ChatGPT 登录页未通过 Cloudflare 验证，停止本次登录")
+            return None
 
         # 点击登录
         try:
@@ -443,12 +615,25 @@ def login_codex_via_browser(email, password, mail_client=None):
 
         # 输入邮箱（避免误点 Google/Microsoft 第三方登录按钮）
         try:
-            ei = _page.locator('input[name="email"], input[id="email-input"], input[id="email"]').first
-            if ei.is_visible(timeout=5000):
+            for attempt in range(3):
+                ei = _page.locator('input[name="email"], input[id="email-input"], input[id="email"]').first
+                if not ei.is_visible(timeout=5000):
+                    break
                 ei.fill(email)
                 time.sleep(0.5)
                 _click_primary_auth_button(_page, ei, ["Continue", "继续"])
-                time.sleep(3)
+                time.sleep(5)
+                if not _is_auth_error_page(_page):
+                    break
+                _screenshot(_page, f"codex_00_email_auth_error_attempt{attempt + 1}.png")
+                logger.warning(
+                    "[Codex] ChatGPT 邮箱提交后认证错误，重试第 %d/3 次: %s",
+                    attempt + 1,
+                    _auth_error_excerpt(_page),
+                )
+                if not _retry_auth_error_page(_page):
+                    return None
+                _wait_for_auth_page_ready(_page, timeout_seconds=45)
         except Exception:
             pass
 
@@ -461,16 +646,11 @@ def login_codex_via_browser(email, password, mail_client=None):
                     time.sleep(0.5)
                     _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
                 else:
-                    # 没有密码，点击"使用一次性验证码登录"
-                    otp_btn = _page.locator(
-                        'button:has-text("一次性验证码"), button:has-text("one-time"), button:has-text("email login")'
-                    ).first
-                    if otp_btn.is_visible(timeout=3000):
+                    if _click_email_otp_login(_page):
                         logger.info("[Codex] 无密码，点击一次性验证码登录")
-                        otp_btn.click()
                     else:
-                        # fallback: 提交空密码让页面报错，然后找验证码按钮
-                        _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
+                        logger.warning("[Codex] 无密码且未找到一次性验证码入口，停止本次登录")
+                        return None
                 time.sleep(8)
         except Exception:
             pass
@@ -479,22 +659,13 @@ def login_codex_via_browser(email, password, mail_client=None):
         try:
             ci = _page.locator('input[name="code"]').first
             if ci.is_visible(timeout=5000) and mail_client:
-                logger.info("[Codex] ChatGPT 登录需要验证码，等待 emailId > %s 的新邮件...", _email_id_before_login)
-                otp = None
-                otp_email_id = 0
-                t0 = time.time()
-                while time.time() - t0 < 120:
-                    for em in mail_client.search_emails_by_recipient(email, size=5):
-                        email_id = em.get("emailId", 0)
-                        if not _is_new_mail_id(email_id):
-                            continue
-                        otp = mail_client.extract_verification_code(em)
-                        if otp:
-                            otp_email_id = email_id
-                            break
-                    if otp:
-                        break
-                    time.sleep(3)
+                logger.info("[Codex] ChatGPT 登录需要验证码，按 mail api 返回的 mail id 读取对应邮件...")
+                otp, otp_email_id = _poll_verification_code_by_mail_id(
+                    mail_client,
+                    email,
+                    mail_account_id=mail_account_id,
+                    used_email_ids=_used_email_ids,
+                )
                 if otp:
                     _used_email_ids.add(otp_email_id)
                     ci.fill(otp)
@@ -579,7 +750,19 @@ def login_codex_via_browser(email, password, mail_client=None):
                 email_input.fill(email)
                 time.sleep(0.5)
                 _click_primary_auth_button(page, email_input, ["Continue", "继续"])
-                time.sleep(3)
+                _wait_for_auth_page_ready(page, timeout_seconds=90)
+
+                if _is_auth_error_page(page):
+                    _screenshot(page, f"codex_02_auth_error_attempt{attempt + 1}.png")
+                    logger.warning(
+                        "[Codex] OAuth 邮箱提交后认证错误，重试第 %d/2 次: %s",
+                        attempt + 1,
+                        _auth_error_excerpt(page),
+                    )
+                    if not _retry_auth_error_page(page):
+                        return None
+                    _wait_for_auth_page_ready(page, timeout_seconds=45)
+                    continue
 
                 if not _is_google_redirect(page):
                     break
@@ -592,16 +775,23 @@ def login_codex_via_browser(email, password, mail_client=None):
         except Exception:
             _screenshot(page, "codex_02_no_email.png")
 
-        # 输入密码
+        # 输入密码 / 邮箱验证码登录
         try:
             for attempt in range(2):
                 pwd_input = page.locator('input[name="password"], input[type="password"]').first
                 if not pwd_input.is_visible(timeout=5000):
                     break
 
-                pwd_input.fill(password)
-                time.sleep(0.5)
-                _click_primary_auth_button(page, pwd_input, ["Continue", "继续", "Log in"])
+                if password:
+                    pwd_input.fill(password)
+                    time.sleep(0.5)
+                    _click_primary_auth_button(page, pwd_input, ["Continue", "继续", "Log in"])
+                else:
+                    if _click_email_otp_login(page):
+                        logger.info("[Codex] 无密码，点击一次性验证码登录")
+                    else:
+                        logger.warning("[Codex] 无密码且未找到一次性验证码入口，停止本次登录")
+                        return None
                 time.sleep(5)
 
                 if not _is_google_redirect(page):
@@ -628,27 +818,13 @@ def login_codex_via_browser(email, password, mail_client=None):
             code_input = None
 
         if code_input and mail_client:
-            logger.info("[Codex] 需要登录验证码，等待 emailId > %s 的新邮件...", _email_id_before_login)
-
-            start_t = time.time()
-            otp_code = None
-            otp_email_id = 0
-            while time.time() - start_t < 120:
-                emails = mail_client.search_emails_by_recipient(email, size=5)
-                for em in emails:
-                    email_id = em.get("emailId", 0)
-                    if not _is_new_mail_id(email_id):
-                        continue
-                    subj = em.get("subject", "").lower()
-                    if "invited" in subj or "invitation" in subj:
-                        continue
-                    otp_code = mail_client.extract_verification_code(em)
-                    if otp_code:
-                        otp_email_id = email_id
-                        break
-                if otp_code:
-                    break
-                time.sleep(3)
+            logger.info("[Codex] 需要登录验证码，按 mail api 返回的 mail id 读取对应邮件...")
+            otp_code, otp_email_id = _poll_verification_code_by_mail_id(
+                mail_client,
+                email,
+                mail_account_id=mail_account_id,
+                used_email_ids=_used_email_ids,
+            )
 
             if otp_code:
                 _used_email_ids.add(otp_email_id)
@@ -669,39 +845,7 @@ def login_codex_via_browser(email, password, mail_client=None):
         if "about-you" in page.url:
             logger.info("[Codex] 检测到 about-you 页面，填写个人信息...")
             try:
-                name_input = page.locator('input[name="name"]').first
-                if name_input.is_visible(timeout=3000):
-                    name_input.fill("User")
-
-                # 自适应：生日日期（spinbutton）或年龄（普通 input）
-                spinbuttons = page.locator('[role="spinbutton"]').all()
-                if len(spinbuttons) >= 3:
-                    # 类型 A：React Aria DateField
-                    try:
-                        page.locator("text=生日日期").click()
-                        time.sleep(0.5)
-                    except Exception:
-                        pass
-                    for sb, val in zip(spinbuttons[:3], ["1995", "06", "15"]):
-                        sb.click(force=True)
-                        time.sleep(0.2)
-                        page.keyboard.type(val, delay=80)
-                        time.sleep(0.3)
-                    logger.info("[Codex] 填入生日: 1995/06/15 (spinbutton)")
-                else:
-                    # 类型 B：普通年龄数字输入框
-                    age_input = page.locator('input[name="age"], input[placeholder*="年龄"]').first
-                    try:
-                        if age_input.is_visible(timeout=3000):
-                            age_input.fill("25")
-                            logger.info("[Codex] 填入年龄: 25")
-                    except Exception:
-                        logger.warning("[Codex] 未找到年龄/生日输入框")
-
-                time.sleep(0.5)
-                page.locator(
-                    'button:has-text("继续"), button:has-text("Continue"), button:has-text("完成帐户创建"), button[type="submit"]'
-                ).first.click()
+                fill_about_you_page(page, email=email, logger=logger, log_prefix="[Codex]")
                 time.sleep(5)
                 _screenshot(page, "codex_03d_after_aboutyou.png")
                 logger.info("[Codex] about-you 完成，当前 URL: %s", page.url)
@@ -835,15 +979,11 @@ def login_codex_via_browser(email, password, mail_client=None):
                         time.sleep(0.5)
                         _click_primary_auth_button(page, pwd_field, ["Continue", "继续", "Log in"])
                     else:
-                        # 没密码，点"使用一次性验证码登录"
-                        otp_btn = page.locator(
-                            'button:has-text("一次性验证码"), button:has-text("one-time"), button:has-text("email login")'
-                        ).first
-                        if otp_btn.is_visible(timeout=3000):
+                        if _click_email_otp_login(page):
                             logger.info("[Codex] 无密码，点击一次性验证码登录 (step %d)", step + 1)
-                            otp_btn.click()
                         else:
-                            _click_primary_auth_button(page, pwd_field, ["Continue", "继续", "Log in"])
+                            logger.warning("[Codex] 无密码且未找到一次性验证码入口 (step %d)", step + 1)
+                            return None
                     time.sleep(5)
                     _screenshot(page, f"codex_04_password_{step + 1}.png")
                     continue
@@ -855,37 +995,23 @@ def login_codex_via_browser(email, password, mail_client=None):
                 otp_input = page.locator(_OTP_INPUT_SELECTORS).first
                 if otp_input.is_visible(timeout=2000) and mail_client:
                     logger.info(
-                        "[Codex] 需要邮箱验证码 (step %d)，等待 emailId > %s 的新邮件...",
+                        "[Codex] 需要邮箱验证码 (step %d)，按 mail api 返回的 mail id 读取对应邮件...",
                         step + 1,
-                        _email_id_before_login,
                     )
+                    page_left_code = False
+                    if not _is_otp_input_visible(page, timeout=300):
+                        page_left_code = True
+                        logger.info("[Codex] 验证码页已退出，继续后续授权流程")
+
                     otp = None
                     otp_email_id = 0
-                    page_left_code = False
-                    t0 = time.time()
-                    while time.time() - t0 < 120:
-                        if not _is_otp_input_visible(page, timeout=300):
-                            page_left_code = True
-                            logger.info("[Codex] 验证码页已退出，继续后续授权流程")
-                            break
-                        for em in mail_client.search_emails_by_recipient(email, size=5):
-                            # 只接受比快照更新的邮件
-                            email_id = em.get("emailId", 0)
-                            if not _is_new_mail_id(email_id):
-                                continue
-                            sender = (em.get("sendEmail") or "").lower()
-                            if "openai" not in sender and "chatgpt" not in sender:
-                                continue
-                            subj = (em.get("subject") or "").lower()
-                            if "invited" in subj or "invitation" in subj:
-                                continue
-                            otp = mail_client.extract_verification_code(em)
-                            if otp:
-                                otp_email_id = email_id
-                                break
-                        if otp:
-                            break
-                        time.sleep(3)
+                    if not page_left_code:
+                        otp, otp_email_id = _poll_verification_code_by_mail_id(
+                            mail_client,
+                            email,
+                            mail_account_id=mail_account_id,
+                            used_email_ids=_used_email_ids,
+                        )
                     if otp:
                         submit_ok = False
                         for submit_attempt in range(1, 3):
@@ -937,6 +1063,10 @@ def login_codex_via_browser(email, password, mail_client=None):
                         continue
                     if page_left_code:
                         continue
+                    logger.warning("[Codex] 验证码页未从 mail api 获取到可用 mail id 对应验证码，停止继续点击空流程")
+                    _set_last_oauth_failure("otp_mail_not_found", "mail api 未返回可用 mail id 对应验证码")
+                    _screenshot(page, f"codex_04_otp_mail_not_found_step{step + 1}.png")
+                    return None
             except Exception:
                 pass
 
@@ -974,7 +1104,9 @@ def login_codex_via_browser(email, password, mail_client=None):
 
         if not auth_code:
             _screenshot(page, "codex_05_no_callback.png")
-            logger.warning("[Codex] 未获取到 auth code，当前 URL: %s", page.url)
+            failure_text = _auth_error_excerpt(page)
+            _set_last_oauth_failure(_classify_auth_error_text(failure_text) or "no_callback", failure_text)
+            logger.warning("[Codex] 未获取到 auth code，当前 URL: %s，页面: %s", page.url, failure_text)
 
     if not auth_code:
         logger.error("[Codex] OAuth 登录失败: 未获取到 authorization code")
@@ -1393,21 +1525,37 @@ def login_main_codex():
     return login_codex_via_session()
 
 
-def save_auth_file(bundle):
-    """保存 CPA 兼容的认证文件。同一邮箱只保留一个文件，优先 team。"""
+def _auth_file_source_suffix(bundle, source=None):
+    source = (source or "").strip().lower()
+    if source in {"session", "chatgpt_session"}:
+        return "session"
+    if source in {"oauth", "oauth_rt", "rt"}:
+        return "oauth"
+    if bundle.get("credential_source") == "chatgpt_session":
+        return "session"
+    if bundle.get("refresh_token"):
+        return "oauth"
+    return "auth"
+
+
+def save_auth_file(bundle, source=None):
+    """保存账号池认证文件，同一邮箱不同来源文件可以共存。"""
     ensure_auth_dir()
 
     email = bundle["email"]
     plan_type = bundle.get("plan_type", "unknown")
     account_id = bundle.get("account_id", "")
-    hash_id = hashlib.md5(account_id.encode()).hexdigest()[:8]
+    hash_id = hashlib.md5(account_id.encode()).hexdigest()[:8] if account_id else "unknown"
+    source_suffix = _auth_file_source_suffix(bundle, source=source)
 
-    # 清理同一邮箱的旧文件（避免 free/team 并存）
+    # 只清理同一来源旧文件；ChatGPT session 和 OAuth RT 必须同时保留。
     for old in AUTH_DIR.glob(f"codex-{email}-*.json"):
-        old.unlink()
-        logger.info("[Codex] 清理旧文件: %s", old.name)
+        old_source = "session" if old.stem.endswith("-session") else "oauth" if old.stem.endswith("-oauth") else "auth"
+        if old_source == source_suffix:
+            old.unlink()
+            logger.info("[Codex] 清理同来源旧文件: %s", old.name)
 
-    filename = f"codex-{email}-{plan_type}-{hash_id}.json"
+    filename = f"codex-{email}-{plan_type}-{hash_id}-{source_suffix}.json"
     filepath = AUTH_DIR / filename
     return _write_auth_file(filepath, bundle)
 
@@ -1531,7 +1679,7 @@ def get_quota_exhausted_info(quota_info, *, limit_reached=False):
 def check_codex_quota(access_token, account_id=None):
     """
     通过 /backend-api/wham/usage 查询 Codex 额度状态，不消耗额度。
-    返回 ("ok", quota_info) | ("exhausted", exhausted_info) | ("auth_error", None)
+    返回 ("ok", quota_info) | ("exhausted", exhausted_info) | ("account_deactivated", info) | ("auth_error", None)
     quota_info = {"primary_pct": int, "primary_resets_at": int, "weekly_pct": int, "weekly_resets_at": int}
     """
     if not account_id:
@@ -1555,6 +1703,11 @@ def check_codex_quota(access_token, account_id=None):
         logger.error("[Codex] 请求异常: %s", e)
         return "auth_error", None
 
+    lowered_body = (resp.text or "").lower()
+
+    if "account_deactivated" in lowered_body:
+        return "account_deactivated", {"status_code": resp.status_code, "body": resp.text[:500]}
+
     if resp.status_code in (401, 403):
         return "auth_error", None
 
@@ -1566,6 +1719,10 @@ def check_codex_quota(access_token, account_id=None):
         data = resp.json()
     except Exception:
         return "auth_error", None
+
+    serialized = json.dumps(data, ensure_ascii=False).lower()
+    if "account_deactivated" in serialized:
+        return "account_deactivated", data
 
     rate_limit = data.get("rate_limit") or {}
     primary = rate_limit.get("primary_window") or {}
