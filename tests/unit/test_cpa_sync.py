@@ -3,6 +3,130 @@ import json
 from autoteam import accounts, cpa_sync
 
 
+def test_sync_to_cpa_uploads_only_local_rt_files_and_does_not_delete_remote(tmp_path, monkeypatch):
+    accounts_file = tmp_path / "accounts.json"
+    monkeypatch.setattr(accounts, "ACCOUNTS_FILE", accounts_file)
+    monkeypatch.setattr(cpa_sync, "AUTH_DIR", tmp_path)
+
+    rt_file = tmp_path / "codex-active@example.com-team-acc-oauth.json"
+    rt_file.write_text(
+        json.dumps({"access_token": "at", "refresh_token": "rt", "email": "active@example.com"}),
+        encoding="utf-8",
+    )
+    session_file = tmp_path / "codex-session@example.com-team-acc-session.json"
+    session_file.write_text(
+        json.dumps(
+            {
+                "access_token": "session-at",
+                "refresh_token": "",
+                "email": "session@example.com",
+                "credential_source": "chatgpt_session",
+            }
+        ),
+        encoding="utf-8",
+    )
+    standby_file = tmp_path / "codex-standby@example.com-team-acc-oauth.json"
+    standby_file.write_text(
+        json.dumps({"access_token": "at", "refresh_token": "rt", "email": "standby@example.com"}),
+        encoding="utf-8",
+    )
+    accounts.save_accounts(
+        [
+            {
+                "email": "active@example.com",
+                "status": accounts.STATUS_ACTIVE,
+                "rt_auth_file": str(rt_file),
+            },
+            {
+                "email": "session@example.com",
+                "status": accounts.STATUS_ACTIVE,
+                "session_auth_file": str(session_file),
+            },
+            {
+                "email": "missing@example.com",
+                "status": accounts.STATUS_ACTIVE,
+            },
+            {
+                "email": "standby@example.com",
+                "status": accounts.STATUS_STANDBY,
+                "rt_auth_file": str(standby_file),
+            },
+        ]
+    )
+
+    monkeypatch.setattr(
+        cpa_sync,
+        "list_cpa_files",
+        lambda: [{"name": "codex-old@example.com-team-acc-oauth.json", "email": "old@example.com"}],
+    )
+    uploaded = []
+    deleted = []
+    monkeypatch.setattr(cpa_sync, "upload_to_cpa", lambda path: uploaded.append(path.name) or True)
+    monkeypatch.setattr(cpa_sync, "delete_from_cpa", lambda name: deleted.append(name) or True)
+
+    result = cpa_sync.sync_to_cpa()
+
+    assert uploaded == [rt_file.name]
+    assert deleted == []
+    assert result["uploaded"] == 1
+    assert result["deleted"] == 0
+    assert result["skipped"] == 2
+    assert result["skipped_accounts"] == [
+        {"email": "session@example.com", "reason": "session_file_not_uploadable"},
+        {"email": "missing@example.com", "reason": "missing_oauth_rt_file"},
+    ]
+    latest = accounts.find_account(accounts.load_accounts(), "active@example.com")
+    assert latest["cpa_uploaded_at"] > 0
+
+
+def test_sync_to_cpa_skips_remote_existing_by_email_or_name(tmp_path, monkeypatch):
+    accounts_file = tmp_path / "accounts.json"
+    monkeypatch.setattr(accounts, "ACCOUNTS_FILE", accounts_file)
+    monkeypatch.setattr(cpa_sync, "AUTH_DIR", tmp_path)
+
+    name_match_file = tmp_path / "codex-name@example.com-team-acc-oauth.json"
+    name_match_file.write_text(
+        json.dumps({"access_token": "at", "refresh_token": "rt", "email": "name@example.com"}),
+        encoding="utf-8",
+    )
+    email_match_file = tmp_path / "codex-email@example.com-team-acc-oauth.json"
+    email_match_file.write_text(
+        json.dumps({"access_token": "at", "refresh_token": "rt", "email": "email@example.com"}),
+        encoding="utf-8",
+    )
+    accounts.save_accounts(
+        [
+            {
+                "email": "name@example.com",
+                "status": accounts.STATUS_ACTIVE,
+                "rt_auth_file": str(name_match_file),
+            },
+            {
+                "email": "email@example.com",
+                "status": accounts.STATUS_ACTIVE,
+                "rt_auth_file": str(email_match_file),
+            },
+        ]
+    )
+
+    monkeypatch.setattr(
+        cpa_sync,
+        "list_cpa_files",
+        lambda: [
+            {"name": name_match_file.name, "email": "other@example.com"},
+            {"name": "codex-old-email@example.com-team-acc-oauth.json", "email": "email@example.com"},
+        ],
+    )
+    uploaded = []
+    monkeypatch.setattr(cpa_sync, "upload_to_cpa", lambda path: uploaded.append(path.name) or True)
+
+    result = cpa_sync.sync_to_cpa()
+
+    assert uploaded == []
+    assert result["uploaded"] == 0
+    assert result["skipped_existing"] == 2
+
+
 def test_maintain_cpa_inventory_uploads_only_inventory_rt_files(tmp_path, monkeypatch):
     accounts_file = tmp_path / "accounts.json"
     monkeypatch.setattr(accounts, "ACCOUNTS_FILE", accounts_file)

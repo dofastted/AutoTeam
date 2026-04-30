@@ -11,7 +11,7 @@ from pathlib import Path
 
 from autoteam import outbound_proxy
 from autoteam.auth_storage import AUTH_DIR, ensure_auth_dir, ensure_auth_file_permissions
-from autoteam.codex_auth import CODEX_CLIENT_ID, CODEX_TOKEN_URL
+from autoteam.codex_auth import CODEX_CLIENT_ID, CODEX_TOKEN_URL, select_oauth_rt_auth_file
 from autoteam.config import CPA_KEY, CPA_URL
 from autoteam.textio import read_text, write_text
 
@@ -701,9 +701,9 @@ def sync_from_cpa():
 
 def sync_to_cpa():
     """
-    同步本地认证文件到 CPA，只同步 active 状态的账号。
-    - active 且 CPA 没有 → 上传
-    - CPA 有但不是 active（或本地已删除）→ 从 CPA 删除
+    上传本地已完成的 OAuth RT 认证文件到 CPA。
+
+    普通同步不启动浏览器、不补 OAuth、不上传 ChatGPT session 备份，也不删除远端文件。
     """
     from autoteam.accounts import STATUS_ACTIVE, load_accounts, save_accounts
 
@@ -713,60 +713,64 @@ def sync_to_cpa():
     if accounts_path_repaired:
         save_accounts(accounts)
 
-    # 修复断裂的 auth_file 路径
-    changed = False
+    active_files: dict[str, tuple[dict, Path]] = {}
+    skipped_accounts = []
     for acc in accounts:
-        auth_path = acc.get("auth_file")
-        if auth_path and not Path(auth_path).exists():
-            matches = list(AUTH_DIR.glob(f"codex-{acc['email']}-*.json"))
-            if matches:
-                acc["auth_file"] = str(matches[0].resolve())
-                changed = True
-    if changed:
-        save_accounts(accounts)
+        if acc["status"] != STATUS_ACTIVE or acc.get("sync_disabled"):
+            continue
+        email = (acc.get("email") or "").strip().lower()
+        auth_path = select_oauth_rt_auth_file(acc)
+        if not auth_path:
+            reason = "session_file_not_uploadable" if acc.get("session_auth_file") else "missing_oauth_rt_file"
+            skipped_accounts.append({"email": email, "reason": reason})
+            continue
+        path = Path(auth_path)
+        active_files[path.name] = (acc, path)
 
-    # active 账号的认证文件
-    active_files = {}
-    for acc in accounts:
-        if acc["status"] == STATUS_ACTIVE and not acc.get("sync_disabled"):
-            path = _account_auth_path_for_cpa(acc)
-            if path:
-                active_files[path.name] = path
-
-    # CPA 认证文件
     cpa_files = list_cpa_files()
     cpa_names = {f["name"]: f for f in cpa_files}
+    cpa_emails = {(f.get("email") or "").strip().lower() for f in cpa_files if f.get("email")}
 
     logger.info("[CPA] active 认证文件: %d, CPA 认证文件: %d", len(active_files), len(cpa_files))
 
-    # 上传：所有 active 认证文件（覆盖同名文件，确保 token 最新）
     uploaded = 0
-    for name, path in active_files.items():
+    skipped_existing = 0
+    changed = False
+    for name, (acc, path) in active_files.items():
+        email = (acc.get("email") or "").strip().lower()
+        if name in cpa_names or email in cpa_emails:
+            skipped_existing += 1
+            continue
         logger.info("[CPA] 上传: %s", name)
         if upload_to_cpa(path):
             uploaded += 1
+            acc["cpa_uploaded_at"] = time.time()
+            changed = True
 
-    # 删除：CPA 中有但不在 active 列表的（仅限本地管理的账号）
-    deleted = 0
-    for name, cpa_file in cpa_names.items():
-        email = cpa_file.get("email", "").lower()
-        if email in local_emails and name not in active_files:
-            logger.info("[CPA] 删除非 active 文件: %s (%s)", name, email)
-            if delete_from_cpa(name):
-                deleted += 1
+    if changed:
+        save_accounts(accounts)
 
-    logger.info("[CPA] 同步完成: 上传 %d, 删除 %d, 本地去重 %d", uploaded, deleted, local_duplicates_deleted)
-
-    # 最终状态
-    final_cpa = list_cpa_files()
-    final_local_managed = [f for f in final_cpa if f.get("email", "").lower() in local_emails]
-    logger.info("[CPA] CPA 中本地管理: %d, 本地 active: %d", len(final_local_managed), len(active_files))
+    final_remote_count = len(cpa_files) + uploaded
+    final_local_managed = [
+        f for f in cpa_files if (f.get("email") or "").strip().lower() in local_emails
+    ]
+    logger.info(
+        "[CPA] 同步完成: 上传 %d, 远端已有跳过 %d, 无 RT 跳过 %d, 本地去重 %d",
+        uploaded,
+        skipped_existing,
+        len(skipped_accounts),
+        local_duplicates_deleted,
+    )
     return {
         "uploaded": uploaded,
-        "deleted": deleted,
+        "deleted": 0,
+        "skipped_existing": skipped_existing,
+        "skipped": len(skipped_accounts),
+        "skipped_accounts": skipped_accounts,
         "local_duplicates_deleted": local_duplicates_deleted,
         "local_active": len(active_files),
         "cpa_local_managed": len(final_local_managed),
+        "cpa_remote_total": final_remote_count,
     }
 
 
