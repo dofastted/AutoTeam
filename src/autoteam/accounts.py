@@ -79,6 +79,125 @@ def save_accounts(accounts):
         write_text(ACCOUNTS_FILE, json.dumps(accounts, indent=2, ensure_ascii=False))
 
 
+def migrate_legacy_auth_file_metadata(*, apply=False):
+    """
+    将旧账号记录中的 OAuth auth_file 元数据补写到 rt_auth_file。
+
+    该迁移只修改 accounts.json 里的路径字段，不读取或改写 token 文件内容。
+    ChatGPT session 备份文件不会被提升为可同步凭证。
+    """
+    from autoteam.codex_auth import (
+        get_existing_session_auth_file,
+        is_uploadable_oauth_rt_file,
+        load_auth_file_data,
+    )
+
+    with _ACCOUNTS_LOCK:
+        accounts = load_accounts()
+        result = {
+            "dry_run": not apply,
+            "total": len(accounts),
+            "changed": 0,
+            "migrated": 0,
+            "already_rt_auth_file": 0,
+            "missing_auth_file": 0,
+            "session_auth_file_not_promoted": 0,
+            "invalid_auth_file": 0,
+            "no_auth_file": 0,
+            "invalid_rt_auth_file": 0,
+            "accounts": [],
+        }
+        changed = False
+
+        for acc in accounts:
+            if not isinstance(acc, dict):
+                continue
+            email = acc.get("email") or ""
+            rt_auth_file = str(acc.get("rt_auth_file") or "").strip()
+            auth_file = str(acc.get("auth_file") or "").strip()
+
+            if rt_auth_file:
+                if is_uploadable_oauth_rt_file(rt_auth_file):
+                    result["already_rt_auth_file"] += 1
+                    result["accounts"].append(
+                        {
+                            "email": email,
+                            "status": "already_rt_auth_file",
+                            "rt_auth_file": rt_auth_file,
+                        }
+                    )
+                    continue
+                result["invalid_rt_auth_file"] += 1
+                result["accounts"].append(
+                    {
+                        "email": email,
+                        "status": "invalid_rt_auth_file",
+                        "rt_auth_file": rt_auth_file,
+                    }
+                )
+                continue
+
+            if not auth_file:
+                result["no_auth_file"] += 1
+                result["accounts"].append({"email": email, "status": "no_auth_file"})
+                continue
+
+            auth_path = Path(auth_file)
+            if not auth_path.exists() or not auth_path.is_file():
+                result["missing_auth_file"] += 1
+                result["accounts"].append(
+                    {
+                        "email": email,
+                        "status": "missing_auth_file",
+                        "auth_file": auth_file,
+                    }
+                )
+                continue
+
+            auth_data = load_auth_file_data(auth_path)
+            session_auth_file = get_existing_session_auth_file(acc)
+            if auth_data.get("credential_source") == "chatgpt_session" or session_auth_file == auth_file:
+                result["session_auth_file_not_promoted"] += 1
+                result["accounts"].append(
+                    {
+                        "email": email,
+                        "status": "session_auth_file_not_promoted",
+                        "auth_file": auth_file,
+                    }
+                )
+                continue
+
+            if not is_uploadable_oauth_rt_file(auth_path):
+                result["invalid_auth_file"] += 1
+                result["accounts"].append(
+                    {
+                        "email": email,
+                        "status": "invalid_auth_file",
+                        "auth_file": auth_file,
+                    }
+                )
+                continue
+
+            result["migrated"] += 1
+            result["changed"] += 1
+            result["accounts"].append(
+                {
+                    "email": email,
+                    "status": "migrated",
+                    "auth_file": auth_file,
+                    "rt_auth_file": auth_file,
+                }
+            )
+            if apply:
+                acc["rt_auth_file"] = auth_file
+                changed = True
+
+        if apply and changed:
+            save_accounts(accounts)
+
+        return result
+
+
 def find_account(accounts, email):
     """按邮箱查找账号"""
     for acc in accounts:

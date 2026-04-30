@@ -1213,6 +1213,10 @@ class DeactivatedMailCheckParams(BaseModel):
     dispose_mailbox: bool = True
 
 
+class AuthMetadataMigrationParams(BaseModel):
+    apply: bool = False
+
+
 def _normalized_email(value: str | None) -> str:
     return (value or "").strip().lower()
 
@@ -2562,6 +2566,16 @@ def post_check_deactivated_mail(params: DeactivatedMailCheckParams = Deactivated
         }
     finally:
         _playwright_lock.release()
+
+
+@app.post("/api/accounts/migrate-auth-metadata")
+def post_migrate_auth_metadata(params: AuthMetadataMigrationParams = AuthMetadataMigrationParams()):
+    """将旧 auth_file 元数据迁移到 rt_auth_file；默认只报告不写入。"""
+    from autoteam.accounts import migrate_legacy_auth_file_metadata
+
+    result = migrate_legacy_auth_file_metadata(apply=params.apply)
+    message = "已迁移旧认证文件元数据" if params.apply else "已生成旧认证文件元数据迁移报告"
+    return {"message": message, "result": result}
 
 
 @app.post("/api/sync/sub2api")
