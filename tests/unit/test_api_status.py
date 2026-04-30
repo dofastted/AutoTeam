@@ -67,9 +67,12 @@ def test_get_status_normalizes_main_account_status_from_saved_auth(tmp_path, mon
         "standby": 0,
         "exhausted": 0,
         "pending": 0,
+        "unavailable": 0,
         "sold": 0,
         "total": 1,
     }
+    assert result["usage_summary"]["normal"] == 1
+    assert result["cpa_summary"]["inventory_missing_to_100"] == 100
 
 
 def test_get_status_can_skip_live_quota_checks(tmp_path, monkeypatch):
@@ -103,6 +106,40 @@ def test_get_status_can_skip_live_quota_checks(tmp_path, monkeypatch):
     assert result["quota_cache"] == {}
     assert result["accounts"][0]["last_quota"]["primary_pct"] == 30
     assert result["summary"]["active"] == 1
+    assert result["usage_summary"]["normal"] == 1
+
+
+def test_get_status_includes_unavailable_summary(tmp_path, monkeypatch):
+    auth_file = tmp_path / "codex-unavailable.json"
+    auth_file.write_text(json.dumps({"access_token": "token-user"}), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "dead@example.com",
+                "status": "unavailable",
+                "auth_file": str(auth_file),
+                "sync_disabled": True,
+                "unavailable_reason": "account_deactivated",
+            }
+        ],
+    )
+
+    result = api.get_status(realtime_quota=False)
+
+    assert result["summary"] == {
+        "active": 0,
+        "standby": 0,
+        "exhausted": 0,
+        "pending": 0,
+        "unavailable": 1,
+        "sold": 0,
+        "total": 1,
+    }
+    assert result["usage_summary"]["normal"] == 1
+    assert result["accounts"][0]["status"] == "unavailable"
+    assert result["accounts"][0]["sync_disabled"] is True
 
 
 def test_post_sell_account_marks_sold_and_deletes_configured_targets(tmp_path, monkeypatch):
@@ -149,6 +186,68 @@ def test_post_sell_account_marks_sold_and_deletes_configured_targets(tmp_path, m
     assert result["cpa_archive_file"] == str(archive_file)
     assert accounts_data[0]["status"] == "sold"
     assert accounts_data[0]["sync_disabled"] is True
+
+
+def test_post_self_use_account_marks_usage_and_deletes_configured_targets(tmp_path, monkeypatch):
+    auth_file = tmp_path / "codex-self@example.com-team.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    archive_file = tmp_path / "archive" / auth_file.name
+    accounts_data = [
+        {
+            "email": "self@example.com",
+            "status": "active",
+            "auth_file": str(auth_file),
+        }
+    ]
+    cleanup_calls = []
+
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: list(accounts_data))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr("autoteam.auth_archive.archive_account_auth_file", lambda _email, _auth: str(archive_file))
+    monkeypatch.setattr(
+        "autoteam.sync_targets.delete_account_from_configured_targets",
+        lambda email, **kwargs: cleanup_calls.append((email, kwargs)) or {"cpa": {"count": 1}},
+    )
+
+    def fake_update(email, **kwargs):
+        accounts_data[0].update(kwargs)
+        return accounts_data[0]
+
+    monkeypatch.setattr("autoteam.accounts.update_account", fake_update)
+    monkeypatch.setattr(
+        "autoteam.accounts.mark_account_self_use",
+        lambda email, remote_cleanup=None: fake_update(
+            email,
+            usage_status="self_use",
+            sync_disabled=True,
+            self_use_at=123,
+            self_use_remote_cleanup=remote_cleanup or {},
+        ),
+    )
+
+    result = api.post_self_use_account("self@example.com")
+
+    assert cleanup_calls == [("self@example.com", {"auth_names": [auth_file.name]})]
+    assert result["usage_status"] == "self_use"
+    assert result["cpa_archive_file"] == str(archive_file)
+    assert accounts_data[0]["usage_status"] == "self_use"
+    assert accounts_data[0]["sync_disabled"] is True
+
+
+def test_post_account_usage_status_allows_normal_inventory_only(monkeypatch):
+    accounts_data = [{"email": "stock@example.com", "status": "active", "usage_status": "normal"}]
+
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: list(accounts_data))
+
+    def fake_mark(email, usage_status):
+        accounts_data[0]["usage_status"] = usage_status
+        return accounts_data[0]
+
+    monkeypatch.setattr("autoteam.accounts.mark_account_usage_status", fake_mark)
+
+    result = api.post_account_usage_status("stock@example.com", api.UsageStatusParams(usage_status="inventory"))
+
+    assert result == {"email": "stock@example.com", "usage_status": "inventory"}
 
 
 def test_sanitize_account_keeps_exportable_main_account_active_without_live_quota(tmp_path, monkeypatch):
@@ -247,6 +346,11 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
                 "PLAYWRIGHT_HEADLESS=false",
                 "PLAYWRIGHT_PROXY_URL=socks5://127.0.0.1:1080",
                 "PLAYWRIGHT_PROXY_BYPASS=localhost,127.0.0.1",
+                "OUTBOUND_PROXY_ENABLED=true",
+                "OUTBOUND_PROXY_POOL=http://127.0.0.1:10808",
+                "OUTBOUND_PROXY_BYPASS=localhost,127.0.0.1,::1",
+                "OUTBOUND_PROXY_STRATEGY=task-sticky",
+                "OUTBOUND_PROXY_FAILOVER=true",
                 "API_KEY=runtime-key",
             ]
         ),
@@ -267,6 +371,11 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
         "PLAYWRIGHT_HEADLESS",
         "PLAYWRIGHT_PROXY_URL",
         "PLAYWRIGHT_PROXY_BYPASS",
+        "OUTBOUND_PROXY_ENABLED",
+        "OUTBOUND_PROXY_POOL",
+        "OUTBOUND_PROXY_BYPASS",
+        "OUTBOUND_PROXY_STRATEGY",
+        "OUTBOUND_PROXY_FAILOVER",
         "API_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -286,6 +395,10 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
     assert fields["PLAYWRIGHT_PROXY_URL"]["value"] == "socks5://127.0.0.1:1080"
     assert fields["PLAYWRIGHT_PROXY_URL"]["runtime_required"] is False
     assert fields["PLAYWRIGHT_PROXY_BYPASS"]["value"] == "localhost,127.0.0.1"
+    assert fields["OUTBOUND_PROXY_ENABLED"]["value"] == "true"
+    assert fields["OUTBOUND_PROXY_POOL"]["value"] == "http://127.0.0.1:10808"
+    assert fields["OUTBOUND_PROXY_BYPASS"]["value"] == "localhost,127.0.0.1,::1"
+    assert fields["OUTBOUND_PROXY_FAILOVER"]["value"] == "true"
     assert fields["API_KEY"]["value"] == "runtime-key"
     assert fields["API_KEY"]["runtime_required"] is True
 
@@ -423,6 +536,111 @@ def test_put_runtime_config_allows_partial_runtime_fields_when_api_key_exists(mo
     assert written["PLAYWRIGHT_BROWSER_MODE"] == "embedded"
     assert written["PLAYWRIGHT_HEADLESS"] == "true"
     assert "CPA_URL" not in written
+
+
+def test_put_runtime_config_proxy_change_skips_existing_cpa_validation(monkeypatch):
+    written = {}
+
+    def fake_write_env(key, value):
+        written[key] = value
+
+    monkeypatch.setattr("autoteam.setup_wizard._write_env", fake_write_env)
+    monkeypatch.setattr("autoteam.setup_wizard._verify_mail_provider", lambda provider=None: True)
+    monkeypatch.setattr(
+        "autoteam.setup_wizard._verify_cpa",
+        lambda: (_ for _ in ()).throw(AssertionError("cpa verify should not run for proxy-only changes")),
+    )
+    monkeypatch.setattr("autoteam.setup_wizard._verify_sub2api", lambda: True)
+    monkeypatch.setattr("importlib.reload", lambda module: module)
+    monkeypatch.setattr(api, "API_KEY", "old-key")
+
+    monkeypatch.setenv("API_KEY", "old-key")
+    monkeypatch.setenv("MAIL_PROVIDER", "mo_email")
+    monkeypatch.setenv("MO_EMAIL_BASE_URL", "https://mo.gymbro.cloud")
+    monkeypatch.setenv("MO_EMAIL_API_KEY", "mail-key")
+    monkeypatch.setenv("MO_EMAIL_DOMAIN", "gymbro.cloud")
+    monkeypatch.setenv("MO_EMAIL_NAME_PREFIX", "abc")
+    monkeypatch.setenv("MO_EMAIL_START_INDEX", "1")
+    monkeypatch.setenv("MO_EMAIL_EXPIRY_TIME", "3600000")
+    monkeypatch.setenv("SYNC_TARGET_CPA", "true")
+    monkeypatch.setenv("CPA_URL", "http://127.0.0.1:8317")
+    monkeypatch.setenv("CPA_KEY", "cpa-key")
+    monkeypatch.setenv("OUTBOUND_PROXY_ENABLED", "true")
+    monkeypatch.setenv("OUTBOUND_PROXY_POOL", "http://127.0.0.1:10808")
+    monkeypatch.setenv("OUTBOUND_PROXY_BYPASS", "localhost,127.0.0.1,::1")
+    monkeypatch.setenv("OUTBOUND_PROXY_STRATEGY", "task-sticky")
+    monkeypatch.setenv("OUTBOUND_PROXY_FAILOVER", "true")
+
+    result = api.put_runtime_config(
+        api.SetupConfig(
+            MAIL_PROVIDER="mo_email",
+            MO_EMAIL_BASE_URL="https://mo.gymbro.cloud",
+            MO_EMAIL_API_KEY="mail-key",
+            MO_EMAIL_DOMAIN="gymbro.cloud",
+            MO_EMAIL_NAME_PREFIX="abc",
+            MO_EMAIL_START_INDEX="1",
+            MO_EMAIL_EXPIRY_TIME="3600000",
+            SYNC_TARGET_CPA="true",
+            CPA_URL="http://127.0.0.1:8317",
+            CPA_KEY="cpa-key",
+            OUTBOUND_PROXY_ENABLED="true",
+            OUTBOUND_PROXY_POOL="http://127.0.0.1:10809",
+            OUTBOUND_PROXY_BYPASS="localhost,127.0.0.1,::1",
+            OUTBOUND_PROXY_STRATEGY="task-sticky",
+            OUTBOUND_PROXY_FAILOVER="true",
+            API_KEY="old-key",
+        )
+    )
+
+    assert result["message"] == "配置保存成功"
+    assert written["OUTBOUND_PROXY_POOL"] == "http://127.0.0.1:10809"
+
+
+def test_put_runtime_config_cpa_change_still_validates_cpa(monkeypatch):
+    written = {}
+
+    def fake_write_env(key, value):
+        written[key] = value
+
+    monkeypatch.setattr("autoteam.setup_wizard._write_env", fake_write_env)
+    monkeypatch.setattr("autoteam.setup_wizard._verify_mail_provider", lambda provider=None: True)
+    monkeypatch.setattr("autoteam.setup_wizard._verify_cpa", lambda: False)
+    monkeypatch.setattr("autoteam.setup_wizard._verify_sub2api", lambda: True)
+    monkeypatch.setattr("importlib.reload", lambda module: module)
+    monkeypatch.setattr(api, "API_KEY", "old-key")
+
+    monkeypatch.setenv("API_KEY", "old-key")
+    monkeypatch.setenv("MAIL_PROVIDER", "mo_email")
+    monkeypatch.setenv("MO_EMAIL_BASE_URL", "https://mo.gymbro.cloud")
+    monkeypatch.setenv("MO_EMAIL_API_KEY", "mail-key")
+    monkeypatch.setenv("MO_EMAIL_DOMAIN", "gymbro.cloud")
+    monkeypatch.setenv("MO_EMAIL_NAME_PREFIX", "abc")
+    monkeypatch.setenv("MO_EMAIL_START_INDEX", "1")
+    monkeypatch.setenv("MO_EMAIL_EXPIRY_TIME", "3600000")
+    monkeypatch.setenv("SYNC_TARGET_CPA", "true")
+    monkeypatch.setenv("CPA_URL", "http://127.0.0.1:8317")
+    monkeypatch.setenv("CPA_KEY", "old-cpa-key")
+
+    result = api.put_runtime_config(
+        api.SetupConfig(
+            MAIL_PROVIDER="mo_email",
+            MO_EMAIL_BASE_URL="https://mo.gymbro.cloud",
+            MO_EMAIL_API_KEY="mail-key",
+            MO_EMAIL_DOMAIN="gymbro.cloud",
+            MO_EMAIL_NAME_PREFIX="abc",
+            MO_EMAIL_START_INDEX="1",
+            MO_EMAIL_EXPIRY_TIME="3600000",
+            SYNC_TARGET_CPA="true",
+            CPA_URL="http://127.0.0.1:8317",
+            CPA_KEY="new-cpa-key",
+            API_KEY="old-key",
+        )
+    )
+
+    assert result.status_code == 400
+    assert json.loads(result.body)["message"] == "CPA 连接失败"
+    assert written == {}
+    assert api.os.environ["CPA_KEY"] == "old-cpa-key"
 
 
 def test_get_runtime_config_source_returns_env_content(tmp_path, monkeypatch):
@@ -709,6 +927,11 @@ def test_put_runtime_config_source_applies_env_and_updates_api_key(tmp_path, mon
         "PLAYWRIGHT_BROWSER_MODE",
         "PLAYWRIGHT_PROXY_URL",
         "PLAYWRIGHT_PROXY_BYPASS",
+        "OUTBOUND_PROXY_ENABLED",
+        "OUTBOUND_PROXY_POOL",
+        "OUTBOUND_PROXY_BYPASS",
+        "OUTBOUND_PROXY_STRATEGY",
+        "OUTBOUND_PROXY_FAILOVER",
         "API_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -974,6 +1197,54 @@ def test_auto_check_falls_back_when_exhausted_quota_has_no_reset_time(tmp_path, 
         "weekly_resets_at": 0,
     }
     assert exhausted_update["quota_resets_at"] == 20000
+
+
+def test_auto_check_marks_account_unavailable_when_quota_reports_account_deactivated(tmp_path, monkeypatch):
+    auth_file = tmp_path / "deactivated.json"
+    auth_file.write_text('{"access_token": "token-deactivated"}', encoding="utf-8")
+
+    updates = []
+    started = []
+
+    def fake_update_account(email, **kwargs):
+        updates.append((email, kwargs))
+
+    _set_pool_runtime_config(monkeypatch)
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 1, "target_seats": 5})
+    monkeypatch.setattr(api, "_auto_check_stop", __import__("threading").Event())
+    monkeypatch.setattr(api, "_auto_check_restart", __import__("threading").Event())
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [{"email": "dead@example.com", "status": "active", "auth_file": str(auth_file)}],
+    )
+    monkeypatch.setattr(
+        "autoteam.codex_auth.check_codex_quota",
+        lambda _token: ("account_deactivated", {"status_code": 403, "body": "account_deactivated"}),
+    )
+    monkeypatch.setattr("autoteam.accounts.update_account", fake_update_account)
+    monkeypatch.setattr(api, "_auto_check_team_member_count", lambda: 5)
+    monkeypatch.setattr(api, "_start_task", lambda *args, **kwargs: started.append((args, kwargs)))
+
+    stop_event = api._auto_check_stop
+    wait_calls = {"count": 0}
+
+    def fake_wait(_seconds):
+        wait_calls["count"] += 1
+        return wait_calls["count"] > 1
+
+    monkeypatch.setattr(stop_event, "wait", fake_wait)
+
+    api._auto_check_loop()
+
+    assert len(updates) == 1
+    email, payload = updates[0]
+    assert email == "dead@example.com"
+    assert payload["status"] == "unavailable"
+    assert payload["sync_disabled"] is True
+    assert payload["unavailable_reason"] == "account_deactivated"
+    assert payload["unavailable_at"]
+    assert started == []
 
 
 def test_auto_check_triggers_rotate_when_active_count_is_below_target(tmp_path, monkeypatch):
@@ -1246,7 +1517,36 @@ def test_auto_check_wait_returns_restart_soon_after_config_update(monkeypatch):
     elapsed = time.monotonic() - started
 
     assert result == "restart"
-    assert elapsed < 0.5
+    assert elapsed < 1.0
+
+
+def test_run_task_sets_finished_at_for_completed_task(monkeypatch):
+    lock = threading.Lock()
+    task = {
+        "task_id": "task-finish",
+        "command": "check",
+        "params": {},
+        "status": "pending",
+        "created_at": time.time(),
+        "started_at": None,
+        "finished_at": None,
+        "result": None,
+        "error": None,
+    }
+
+    monkeypatch.setattr(api, "_tasks", {"task-finish": task})
+    monkeypatch.setattr(api, "_task_threads", {"task-finish": object()})
+    monkeypatch.setattr(api, "_current_task_id", None)
+    monkeypatch.setattr(api, "_playwright_lock", lock)
+
+    api._run_task("task-finish", lambda: {"ok": True})
+
+    assert task["status"] == "completed"
+    assert task["result"] == {"ok": True}
+    assert task["finished_at"] is not None
+    assert api._current_task_id is None
+    assert "task-finish" not in api._task_threads
+    assert lock.locked() is False
 
 
 def test_post_stop_all_tasks_marks_running_task_stopped(monkeypatch):
@@ -1281,7 +1581,8 @@ def test_post_stop_all_tasks_marks_running_task_stopped(monkeypatch):
     monkeypatch.setattr(api, "_admin_login_api", None)
     monkeypatch.setattr(api, "_main_codex_flow", None)
     monkeypatch.setattr(api, "_manual_account_flow", None)
-    monkeypatch.setattr(api, "_auto_check_restart", threading.Event())
+    restart_event = threading.Event()
+    monkeypatch.setattr(api, "_auto_check_restart", restart_event)
     monkeypatch.setattr(api, "_raise_thread_exit", lambda _thread: "requested")
 
     result = api.post_stop_all_tasks()
@@ -1299,6 +1600,7 @@ def test_post_stop_all_tasks_marks_running_task_stopped(monkeypatch):
     assert task["error"] == "用户强制停止"
     assert thread.joined is True
     assert lock.locked() is True
+    assert restart_event.is_set() is False
 
 
 def test_post_stop_all_tasks_stops_pending_flows_and_releases_lock(monkeypatch):
@@ -1326,7 +1628,8 @@ def test_post_stop_all_tasks_stops_pending_flows_and_releases_lock(monkeypatch):
     monkeypatch.setattr(api, "_main_codex_step", "password_required")
     monkeypatch.setattr(api, "_main_codex_action", "login")
     monkeypatch.setattr(api, "_manual_account_flow", manual)
-    monkeypatch.setattr(api, "_auto_check_restart", threading.Event())
+    restart_event = threading.Event()
+    monkeypatch.setattr(api, "_auto_check_restart", restart_event)
 
     result = api.post_stop_all_tasks()
 
@@ -1345,3 +1648,4 @@ def test_post_stop_all_tasks_stops_pending_flows_and_releases_lock(monkeypatch):
     assert api._main_codex_action is None
     assert api._manual_account_flow is None
     assert lock.locked() is False
+    assert restart_event.is_set() is False

@@ -143,6 +143,8 @@ _MO_EMAIL_REQUIRED_KEYS = (
 _CPA_REQUIRED_KEYS = ("CPA_URL", "CPA_KEY")
 _SUB2API_REQUIRED_KEYS = ("SUB2API_URL", "SUB2API_EMAIL", "SUB2API_PASSWORD")
 _SYNC_TARGET_TOGGLE_KEYS = ("SYNC_TARGET_CPA", "SYNC_TARGET_SUB2API")
+_CPA_VERIFY_KEYS = ("SYNC_TARGET_CPA", *_CPA_REQUIRED_KEYS)
+_SUB2API_VERIFY_KEYS = ("SYNC_TARGET_SUB2API", "SUB2API_GROUP", *_SUB2API_REQUIRED_KEYS)
 
 _ALL_RUNTIME_ENV_KEYS = [
     "MAIL_PROVIDER",
@@ -578,26 +580,55 @@ def _maybe_reload_runtime_config_from_env_file(*, force: bool = False):
     return True
 
 
-def _verify_runtime_integrations(previous_env: dict[str, str | None] | None = None):
+def _changed_runtime_keys(previous_env: dict[str, str | None], current_values: dict[str, str]) -> set[str]:
+    changed = set()
+    for key, value in current_values.items():
+        if (previous_env.get(key) or "") != (value or ""):
+            changed.add(key)
+    return changed
+
+
+def _should_verify_runtime_keys(changed_keys: set[str] | None, keys: tuple[str, ...] | set[str]) -> bool:
+    return changed_keys is None or bool(changed_keys.intersection(keys))
+
+
+def _verify_runtime_integrations(
+    previous_env: dict[str, str | None] | None = None,
+    changed_keys: set[str] | None = None,
+):
     from autoteam.mail_provider import get_mail_provider_name, get_mail_provider_prompt, get_mail_provider_required_keys
     from autoteam.setup_wizard import _verify_cpa, _verify_mail_provider, _verify_sub2api
 
     errors = []
     mail_provider = get_mail_provider_name()
     mail_keys = tuple(get_mail_provider_required_keys(mail_provider))
-    cpa_keys = ("CPA_URL", "CPA_KEY")
-    sub2api_keys = ("SUB2API_URL", "SUB2API_EMAIL", "SUB2API_PASSWORD")
+    mail_verify_keys = {"MAIL_PROVIDER", *mail_keys}
 
     mail_values = [os.environ.get(key, "") for key in mail_keys]
-    cpa_values = [os.environ.get(key, "") for key in cpa_keys]
-    sub2api_values = [os.environ.get(key, "") for key in sub2api_keys]
+    cpa_values = [os.environ.get(key, "") for key in _CPA_REQUIRED_KEYS]
+    sub2api_values = [os.environ.get(key, "") for key in _SUB2API_REQUIRED_KEYS]
     sync_states = _effective_sync_target_states()
 
-    if mail_keys and all(mail_values) and not _verify_mail_provider(mail_provider):
+    if (
+        _should_verify_runtime_keys(changed_keys, mail_verify_keys)
+        and mail_keys
+        and all(mail_values)
+        and not _verify_mail_provider(mail_provider)
+    ):
         errors.append(f"{get_mail_provider_prompt(mail_provider)} 连接失败")
-    if sync_states.get("cpa") and all(cpa_values) and not _verify_cpa():
+    if (
+        _should_verify_runtime_keys(changed_keys, _CPA_VERIFY_KEYS)
+        and sync_states.get("cpa")
+        and all(cpa_values)
+        and not _verify_cpa()
+    ):
         errors.append("CPA 连接失败")
-    if sync_states.get("sub2api") and all(sub2api_values) and not _verify_sub2api():
+    if (
+        _should_verify_runtime_keys(changed_keys, _SUB2API_VERIFY_KEYS)
+        and sync_states.get("sub2api")
+        and all(sub2api_values)
+        and not _verify_sub2api()
+    ):
         errors.append("Sub2API 连接失败")
     if errors:
         api_key = ""
@@ -631,12 +662,13 @@ def _save_runtime_config(data: dict[str, str]):
         )
 
     previous_env = {key: os.environ.get(key) for key in env_keys}
+    changed_keys = _changed_runtime_keys(previous_env, merged)
     try:
         for key, value in merged.items():
             os.environ[key] = value
         _reload_runtime_config_modules()
 
-        verify_result = _verify_runtime_integrations(previous_env)
+        verify_result = _verify_runtime_integrations(previous_env, changed_keys)
         if verify_result:
             _restore_runtime_env(previous_env)
             _reload_runtime_config_modules()
@@ -732,7 +764,9 @@ def put_runtime_config_source(config: SourceConfig):
                 os.environ.pop(key, None)
 
         _reload_runtime_config_modules()
-        verify_result = _verify_runtime_integrations(previous_env)
+        current_values = {key: os.environ.get(key, "") for key in env_keys}
+        changed_keys = _changed_runtime_keys(previous_env, current_values)
+        verify_result = _verify_runtime_integrations(previous_env, changed_keys)
         if verify_result:
             _restore_runtime_source_text(previous_exists, previous_content)
             _restore_runtime_env(previous_env)
@@ -857,6 +891,13 @@ def _run_with_chatgpt_session(callback):
         return callback(chatgpt)
     finally:
         chatgpt.stop()
+
+
+def _team_remover_factory(remove_from_team):
+    def _team_remover(email: str, _acc: dict | None = None):
+        return _run_with_chatgpt_session(lambda chatgpt: remove_from_team(chatgpt, email, return_status=True))
+
+    return _team_remover
 
 
 def _current_busy_detail(default_message: str):
@@ -1049,7 +1090,7 @@ def _run_task(task_id: str, func, *args, **kwargs):
             task["error"] = str(e) or e.__class__.__name__
             logger.error("[API] 任务 %s 异常退出: %s", task_id[:8], task["error"])
     finally:
-        if task.get("status") not in ("stopped", "failed", "completed"):
+        if task.get("status") in ("stopped", "failed", "completed") and not task.get("finished_at"):
             task["finished_at"] = time.time()
         if _current_task_id == task_id:
             _current_task_id = None
@@ -1155,6 +1196,22 @@ class SellAccountParams(BaseModel):
     note: str | None = None
 
 
+class UsageStatusParams(BaseModel):
+    usage_status: str
+
+
+class UnusableDirParams(BaseModel):
+    directory: str = "auths/unusable/account_deactivated"
+
+
+class DeactivatedMailCheckParams(BaseModel):
+    keyword: str = "deactivated"
+    size: int = 30
+    apply: bool = False
+    release_team: bool = True
+    dispose_mailbox: bool = True
+
+
 def _normalized_email(value: str | None) -> str:
     return (value or "").strip().lower()
 
@@ -1181,9 +1238,10 @@ def _quota_snapshot_status(quota_info: dict | None) -> str:
 
 
 def _resolve_status_auth_file(acc: dict) -> str:
-    auth_file = (acc.get("auth_file") or "").strip()
-    if auth_file and Path(auth_file).exists():
-        return auth_file
+    for key in ("rt_auth_file", "auth_file", "session_auth_file"):
+        auth_file = (acc.get(key) or "").strip()
+        if auth_file and Path(auth_file).exists():
+            return auth_file
 
     if _is_main_account_email(acc.get("email")):
         from autoteam.codex_auth import get_saved_main_auth_file
@@ -1213,6 +1271,18 @@ def _sanitize_account(acc: dict, quota_snapshot: dict | None = None) -> dict:
     sanitized["is_main_account"] = _is_main_account_email(acc.get("email"))
     sanitized["status"] = _display_account_status(acc, quota_snapshot)
     return sanitized
+
+
+def _existing_auth_names_for_account(acc: dict) -> list[str]:
+    names = []
+    for key in ("auth_file", "rt_auth_file", "session_auth_file"):
+        value = acc.get(key) or ""
+        if not value:
+            continue
+        name = Path(value).name
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 def _admin_status():
@@ -1970,11 +2040,11 @@ def post_sell_account(email: str, params: SellAccountParams = SellAccountParams(
     if acc.get("status") != STATUS_ACTIVE:
         raise HTTPException(status_code=400, detail=f"账号状态为 {acc.get('status')}，不是 active")
 
-    auth_file = acc.get("auth_file") or ""
+    auth_file = acc.get("rt_auth_file") or acc.get("auth_file") or ""
     if not auth_file or not Path(auth_file).exists():
         raise HTTPException(status_code=400, detail="账号缺少本地 CPA 认证文件，不能标记为合格已售账号")
 
-    auth_names = [Path(auth_file).name]
+    auth_names = _existing_auth_names_for_account(acc)
     archive_path = acc.get("cpa_archive_file") or ""
     if not archive_path or not Path(archive_path).exists():
         archive_path = archive_account_auth_file(email, auth_file)
@@ -1998,6 +2068,69 @@ def post_sell_account(email: str, params: SellAccountParams = SellAccountParams(
         "cpa_archive_file": (updates or {}).get("cpa_archive_file") or archive_path,
         "remote_cleanup": remote_cleanup,
     }
+
+
+@app.post("/api/accounts/{email}/self-use")
+def post_self_use_account(email: str, params: SellAccountParams = SellAccountParams()):
+    """标记账号为自用：远端下架，本地账号和 auth 保留。"""
+    from autoteam.accounts import STATUS_ACTIVE, find_account, load_accounts, mark_account_self_use, update_account
+    from autoteam.auth_archive import archive_account_auth_file
+    from autoteam.sync_targets import delete_account_from_configured_targets
+
+    email = email.strip().lower()
+    if _is_main_account_email(email):
+        raise HTTPException(status_code=400, detail="主号不允许标记为自用")
+
+    accounts = load_accounts()
+    acc = find_account(accounts, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if acc.get("status") != STATUS_ACTIVE:
+        raise HTTPException(status_code=400, detail=f"账号状态为 {acc.get('status')}，不是 active")
+
+    auth_file = acc.get("rt_auth_file") or acc.get("auth_file") or ""
+    archive_path = acc.get("cpa_archive_file") or ""
+    if auth_file and Path(auth_file).exists() and (not archive_path or not Path(archive_path).exists()):
+        archive_path = archive_account_auth_file(email, auth_file)
+        update_account(email, cpa_archive_file=archive_path)
+
+    auth_names = _existing_auth_names_for_account(acc)
+    try:
+        remote_cleanup = delete_account_from_configured_targets(email, auth_names=auth_names)
+    except Exception as exc:
+        logger.exception("[API] 自用账号远端删除失败: %s", email)
+        raise HTTPException(status_code=502, detail=f"远端删除失败: {exc}") from exc
+
+    updates = mark_account_self_use(email, remote_cleanup=remote_cleanup)
+    if params.note:
+        updates = update_account(email, self_use_note=params.note)
+
+    return {
+        "message": f"已标记为自用并停止同步: {email}",
+        "email": email,
+        "usage_status": "self_use",
+        "auth_file": auth_file,
+        "cpa_archive_file": (updates or {}).get("cpa_archive_file") or archive_path,
+        "remote_cleanup": remote_cleanup,
+    }
+
+
+@app.post("/api/accounts/{email}/usage-status")
+def post_account_usage_status(email: str, params: UsageStatusParams):
+    """切换账号业务属性，仅允许 normal/inventory 这种不需要远端下架的状态。"""
+    from autoteam.accounts import USAGE_INVENTORY, USAGE_NORMAL, find_account, load_accounts, mark_account_usage_status
+
+    email = email.strip().lower()
+    accounts = load_accounts()
+    acc = find_account(accounts, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    usage_status = (params.usage_status or "").strip().lower()
+    if usage_status not in {USAGE_NORMAL, USAGE_INVENTORY}:
+        raise HTTPException(status_code=400, detail="usage_status 只允许 normal 或 inventory")
+    updated = mark_account_usage_status(email, usage_status)
+    return {"email": email, "usage_status": updated.get("usage_status")}
 
 
 class LoginAccountParams(BaseModel):
@@ -2026,7 +2159,7 @@ def post_account_cpa_auth(email: str):
         _require_account_mail_configs(acc, "CPA 认证")
 
     def _run():
-        from autoteam.accounts import STATUS_ACTIVE, STATUS_EXHAUSTED, update_account
+        from autoteam.accounts import STATUS_ACTIVE, STATUS_EXHAUSTED, STATUS_UNAVAILABLE, update_account
         from autoteam.auth_archive import archive_account_auth_file
         from autoteam.codex_auth import (
             check_codex_quota,
@@ -2036,7 +2169,7 @@ def post_account_cpa_auth(email: str):
             save_auth_file,
         )
         from autoteam.cpa_sync import upload_to_cpa
-        from autoteam.mail_provider import get_mail_client_for_account
+        from autoteam.mail_provider import get_account_mail_account_id, get_mail_client_for_account
 
         latest = find_account(load_accounts(), email)
         if not latest:
@@ -2050,7 +2183,12 @@ def post_account_cpa_auth(email: str):
             logger.info("[CPA认证] 本地缺少认证文件，开始 Codex 登录: %s", email)
             mail_client = get_mail_client_for_account(latest)
             mail_client.login()
-            bundle = login_codex_via_browser(email, latest.get("password", ""), mail_client=mail_client)
+            bundle = login_codex_via_browser(
+                email,
+                latest.get("password", ""),
+                mail_client=mail_client,
+                mail_account_id=get_account_mail_account_id(latest),
+            )
             if not bundle:
                 raise RuntimeError(f"Codex 登录失败: {email}")
 
@@ -2076,6 +2214,15 @@ def post_account_cpa_auth(email: str):
                             quota_exhausted_at=time.time(),
                             quota_resets_at=quota_result_resets_at(info) or int(time.time() + 18000),
                         )
+                    elif st == "account_deactivated":
+                        update_account(
+                            email,
+                            status=STATUS_UNAVAILABLE,
+                            sync_disabled=True,
+                            unavailable_reason="account_deactivated",
+                            unavailable_at=time.time(),
+                        )
+                        raise RuntimeError(f"{email} 已返回 account_deactivated，已标记不可用")
             else:
                 raise RuntimeError(f"{email} 登录后 plan={plan_type}，不是 team")
 
@@ -2114,7 +2261,7 @@ def post_account_login(params: LoginAccountParams):
     _require_sync_target_configs("登录账号")
 
     def _run():
-        from autoteam.accounts import STATUS_ACTIVE, update_account
+        from autoteam.accounts import STATUS_ACTIVE, STATUS_UNAVAILABLE, update_account
         from autoteam.auth_archive import archive_account_auth_file
         from autoteam.codex_auth import (
             check_codex_quota,
@@ -2123,11 +2270,16 @@ def post_account_login(params: LoginAccountParams):
             quota_result_resets_at,
             save_auth_file,
         )
-        from autoteam.mail_provider import get_mail_client_for_account
+        from autoteam.mail_provider import get_account_mail_account_id, get_mail_client_for_account
 
         mail_client = get_mail_client_for_account(acc)
         mail_client.login()
-        bundle = login_codex_via_browser(email, acc.get("password", ""), mail_client=mail_client)
+        bundle = login_codex_via_browser(
+            email,
+            acc.get("password", ""),
+            mail_client=mail_client,
+            mail_account_id=get_account_mail_account_id(acc),
+        )
         if bundle:
             auth_file = save_auth_file(bundle)
             archive_path = archive_account_auth_file(email, auth_file)
@@ -2151,6 +2303,15 @@ def post_account_login(params: LoginAccountParams):
                             quota_exhausted_at=time.time(),
                             quota_resets_at=quota_result_resets_at(info) or int(time.time() + 18000),
                         )
+                    elif st == "account_deactivated":
+                        update_account(
+                            email,
+                            status=STATUS_UNAVAILABLE,
+                            sync_disabled=True,
+                            unavailable_reason="account_deactivated",
+                            unavailable_at=time.time(),
+                        )
+                        raise RuntimeError(f"{email} 已返回 account_deactivated，已标记不可用")
             # 同步到已启用远端
             from autoteam.sync_targets import sync_to_configured_targets as sync_to_cpa
 
@@ -2176,6 +2337,9 @@ def get_status(realtime_quota: bool = True):
         STATUS_PENDING,
         STATUS_SOLD,
         STATUS_STANDBY,
+        STATUS_UNAVAILABLE,
+        USAGE_INVENTORY,
+        VALID_USAGE_STATUSES,
         load_accounts,
     )
     from autoteam.codex_auth import check_codex_quota, quota_result_quota_info
@@ -2213,13 +2377,37 @@ def get_status(realtime_quota: bool = True):
         "standby": sum(1 for a in sanitized_accounts if a["status"] == STATUS_STANDBY),
         "exhausted": sum(1 for a in sanitized_accounts if a["status"] == STATUS_EXHAUSTED),
         "pending": sum(1 for a in sanitized_accounts if a["status"] == STATUS_PENDING),
+        "unavailable": sum(1 for a in sanitized_accounts if a["status"] == STATUS_UNAVAILABLE),
         "sold": sum(1 for a in sanitized_accounts if a["status"] == STATUS_SOLD),
         "total": len(sanitized_accounts),
+    }
+    usage_summary = {status: 0 for status in sorted(VALID_USAGE_STATUSES)}
+    for account in sanitized_accounts:
+        usage_status = (account.get("usage_status") or "normal").strip().lower()
+        usage_summary[usage_status] = usage_summary.get(usage_status, 0) + 1
+
+    inventory_ready = [
+        account
+        for account in sanitized_accounts
+        if (account.get("usage_status") or "").strip().lower() == USAGE_INVENTORY
+        and account.get("cpa_status") == "success"
+        and not account.get("sync_disabled")
+        and bool(account.get("rt_auth_file") or account.get("auth_file"))
+    ]
+    cpa_summary = {
+        "success": sum(1 for a in sanitized_accounts if a.get("cpa_status") == "success"),
+        "failed": sum(1 for a in sanitized_accounts if a.get("cpa_status") == "failed"),
+        "pending": sum(1 for a in sanitized_accounts if a.get("cpa_status") == "pending"),
+        "cloud_stocked": sum(1 for a in sanitized_accounts if a.get("cloud_stocked_at")),
+        "inventory_ready": len(inventory_ready),
+        "inventory_missing_to_100": max(0, 100 - len(inventory_ready)),
     }
 
     return {
         "accounts": sanitized_accounts,
         "summary": summary,
+        "usage_summary": usage_summary,
+        "cpa_summary": cpa_summary,
         "quota_cache": quota_cache,
     }
 
@@ -2244,6 +2432,91 @@ def post_sync_cpa():
 
     result = sync_to_cpa()
     return {"message": "已同步到 CPA", "result": result}
+
+
+@app.post("/api/sync/cpa-stock")
+def post_sync_cpa_stock():
+    """维护 CPA 云端库存，至少保留 100 个库存 RT 文件。"""
+    _require_cpa_configs("维护 CPA 库存")
+
+    from autoteam.cpa_sync import maintain_cpa_inventory
+
+    result = maintain_cpa_inventory(target=100)
+    return {"message": "已维护 CPA 库存", "result": result}
+
+
+@app.post("/api/sync/cpa/cleanup-401")
+def post_cleanup_cpa_401():
+    """删除 CPA 远端 401 文件，并按返回名单标记本地账号不可用。"""
+    _require_cpa_configs("清理 CPA 401")
+
+    from autoteam.cpa_sync import delete_http401_from_cpa
+
+    result = delete_http401_from_cpa()
+    return {"message": "已清理 CPA 401 文件", "result": result}
+
+
+@app.post("/api/sync/cpa/cleanup-invalid-rt")
+def post_cleanup_cpa_invalid_rt():
+    """直接刷新 CPA OAuth RT 文件，删除明确失效的远端文件。"""
+    _require_cpa_configs("清理 CPA 失效 RT")
+
+    from autoteam.cpa_sync import cleanup_invalid_cpa_refresh_tokens
+
+    result = cleanup_invalid_cpa_refresh_tokens()
+    return {"message": "已清理 CPA 失效 RT 文件", "result": result}
+
+
+@app.post("/api/accounts/mark-unusable/account-deactivated")
+def post_mark_unusable_account_deactivated(params: UnusableDirParams = UnusableDirParams()):
+    """按 auths/unusable/account_deactivated 目录标记本地账号不可用。"""
+    from autoteam.cpa_sync import mark_unusable_account_deactivated_from_dir
+
+    result = mark_unusable_account_deactivated_from_dir(params.directory)
+    return {"message": "已按 account_deactivated 目录标记本地账号", "result": result}
+
+
+@app.post("/api/accounts/check-deactivated-mail")
+def post_check_deactivated_mail(params: DeactivatedMailCheckParams = DeactivatedMailCheckParams()):
+    """检查邮箱是否收到 deactivated 邮件，并在命中时释放 Team 席位。"""
+    from autoteam.account_deactivation import check_deactivated_mail
+
+    if not params.apply:
+        return {
+            "message": "已完成 deactivated 邮件检查（dry-run）",
+            "result": check_deactivated_mail(
+                keyword=params.keyword,
+                size=params.size,
+                apply=False,
+                release_team=params.release_team,
+                dispose_mailbox=params.dispose_mailbox,
+            ),
+        }
+
+    if not _playwright_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再操作"))
+
+    try:
+        from autoteam.account_deactivation import check_deactivated_mail
+        from autoteam.manager import remove_from_team
+
+        def _run_check():
+            return check_deactivated_mail(
+                keyword=params.keyword,
+                size=params.size,
+                apply=True,
+                release_team=params.release_team,
+                dispose_mailbox=params.dispose_mailbox,
+                team_remover=_team_remover_factory(remove_from_team) if params.release_team else None,
+            )
+
+        result = _pw_executor.run(_run_check)
+        return {
+            "message": "已完成 deactivated 邮件检查并处理命中账号",
+            "result": result,
+        }
+    finally:
+        _playwright_lock.release()
 
 
 @app.post("/api/sync/sub2api")
@@ -2307,15 +2580,46 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
     if not get_admin_session_token() or not account_id:
         raise HTTPException(status_code=400, detail="请先完成管理员登录")
 
-    cached = load_team_members_cache()
-    if cached and not refresh:
-        return {**cached, "cached": True}
+    def _local_account_summary(account: dict | None) -> dict:
+        if not account:
+            return {}
+        auth_file = account.get("auth_file") or ""
+        cpa_archive_file = account.get("cpa_archive_file") or ""
+        return {
+            "status": account.get("status", ""),
+            "sync_disabled": bool(account.get("sync_disabled")),
+            "is_main_account": _is_main_account_email(account.get("email")),
+            "auth_file": auth_file,
+            "has_auth_file": bool(auth_file),
+            "cpa_archive_file": cpa_archive_file,
+            "has_cpa_archive_file": bool(cpa_archive_file),
+            "sold_at": account.get("sold_at"),
+        }
 
-    def _local_snapshot(refresh_error: str = ""):
+    def _local_accounts_by_email() -> dict[str, dict]:
         from autoteam.accounts import load_accounts
 
+        return {(a.get("email") or "").lower(): a for a in load_accounts() if a.get("email")}
+
+    def _attach_local_account_fields(payload: dict) -> dict:
+        local_accounts = _local_accounts_by_email()
         members = []
-        for account in load_accounts():
+        for member in payload.get("members") or []:
+            email = (member.get("email") or "").lower()
+            local_account = local_accounts.get(email)
+            enriched = dict(member)
+            enriched["is_local"] = local_account is not None
+            enriched.update(_local_account_summary(local_account))
+            members.append(enriched)
+        return {**payload, "members": members}
+
+    cached = load_team_members_cache()
+    if cached and not refresh:
+        return {**_attach_local_account_fields(cached), "cached": True}
+
+    def _local_snapshot(refresh_error: str = ""):
+        members = []
+        for account in _local_accounts_by_email().values():
             email = (account.get("email") or "").lower()
             if not email:
                 continue
@@ -2326,7 +2630,7 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
                     "user_id": "",
                     "is_local": True,
                     "type": "member",
-                    "status": account.get("status", ""),
+                    **_local_account_summary(account),
                 }
             )
         payload = {
@@ -2342,30 +2646,32 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
         return payload
 
     def _format_team_payload(members, invites):
-        from autoteam.accounts import load_accounts
-
-        local_emails = {a["email"].lower() for a in load_accounts()}
+        local_accounts = _local_accounts_by_email()
         result = []
         for m in members:
             email = (m.get("email") or "").lower()
+            local_account = local_accounts.get(email)
             result.append(
                 {
                     "email": m.get("email", ""),
                     "role": m.get("role", ""),
                     "user_id": m.get("user_id") or m.get("id", ""),
-                    "is_local": email in local_emails,
+                    "is_local": local_account is not None,
                     "type": "member",
+                    **_local_account_summary(local_account),
                 }
             )
         for inv in invites:
             email = (inv.get("email_address") or inv.get("email") or "").lower()
+            local_account = local_accounts.get(email)
             result.append(
                 {
                     "email": email,
                     "role": inv.get("role", ""),
                     "user_id": inv.get("id", ""),
-                    "is_local": email in local_emails,
+                    "is_local": local_account is not None,
                     "type": "invite",
+                    **_local_account_summary(local_account),
                 }
             )
         return {
@@ -2380,6 +2686,7 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
         access_token = get_chatgpt_access_token()
         if not access_token:
             return None
+
 
         headers = {
             "authorization": f"Bearer {access_token}",
@@ -2810,7 +3117,6 @@ def post_stop_all_tasks():
     reason = "用户强制停止"
     stopped_tasks = _request_stop_all_tasks(reason)
     stopped_flows = _stop_pending_flows(reason)
-    _auto_check_restart.set()
     logger.warning(
         "[API] 用户请求强制停止全部工作: tasks=%d flows=%d",
         len(stopped_tasks),
@@ -2935,7 +3241,7 @@ def _auto_check_wait(interval_seconds, poll_seconds=0.2):
 
 def _auto_check_loop():
     """后台巡检线程：定期检查额度，多个账号低于阈值时自动轮转"""
-    from autoteam.accounts import STATUS_ACTIVE, load_accounts
+    from autoteam.accounts import STATUS_ACTIVE, STATUS_UNAVAILABLE, load_accounts, update_account
     from autoteam.codex_auth import check_codex_quota
 
     while not _auto_check_stop.is_set():
@@ -2996,6 +3302,15 @@ def _auto_check_loop():
                             low_accounts.append((acc["email"], remaining, status, info))
                     elif status == "exhausted":
                         low_accounts.append((acc["email"], 0, status, info))
+                    elif status == "account_deactivated":
+                        logger.warning("[%s] 巡检发现 account_deactivated，标记为不可用并跳过", acc["email"])
+                        update_account(
+                            acc["email"],
+                            status=STATUS_UNAVAILABLE,
+                            sync_disabled=True,
+                            unavailable_reason="account_deactivated",
+                            unavailable_at=time.time(),
+                        )
                 except Exception:
                     pass
 
