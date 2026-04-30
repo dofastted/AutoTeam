@@ -5,7 +5,7 @@
         <div>
           <h2 class="text-lg font-semibold text-white">CPA 凭证检查</h2>
           <p class="text-sm text-gray-400 mt-1">
-            对比 active 席位账号和 CPA 认证文件。缺少凭证时，可直接为该账号完成 Codex 认证并上传到 CPA。
+            对比 active 席位账号、本地 OAuth RT 文件和 CPA 文件。只有 OAuth RT 文件会上传；只有缺 RT 时才会启动 Codex 认证。
           </p>
         </div>
         <button
@@ -27,11 +27,11 @@
           <div class="mt-1 text-xl font-semibold text-white">{{ cpaSummary.active }}</div>
         </div>
         <div class="rounded-lg border border-gray-800 bg-gray-950/40 px-3 py-3">
-          <div class="text-xs text-gray-500">CPA 已有</div>
-          <div class="mt-1 text-xl font-semibold text-emerald-300">{{ cpaSummary.ready }}</div>
+          <div class="text-xs text-gray-500">本地 RT</div>
+          <div class="mt-1 text-xl font-semibold text-cyan-300">{{ cpaSummary.localRt }}</div>
         </div>
         <div class="rounded-lg border border-gray-800 bg-gray-950/40 px-3 py-3">
-          <div class="text-xs text-gray-500">待处理</div>
+          <div class="text-xs text-gray-500">CPA 缺少</div>
           <div class="mt-1 text-xl font-semibold text-amber-300">{{ cpaSummary.missing }}</div>
         </div>
       </div>
@@ -41,14 +41,16 @@
           <thead>
             <tr class="text-gray-400 text-left border-b border-gray-800">
               <th class="px-4 py-3 font-medium">邮箱</th>
-              <th class="px-4 py-3 font-medium">本地凭证</th>
-              <th class="px-4 py-3 font-medium">CPA 凭证</th>
+              <th class="px-4 py-3 font-medium">Session</th>
+              <th class="px-4 py-3 font-medium">OAuth RT</th>
+              <th class="px-4 py-3 font-medium">CPA</th>
+              <th class="px-4 py-3 font-medium">Sub2API</th>
               <th class="px-4 py-3 font-medium text-right">操作</th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="!cpaLoading && cpaRows.length === 0">
-              <td colspan="4" class="px-4 py-6 text-center text-gray-500">暂无 active 席位账号</td>
+              <td colspan="6" class="px-4 py-6 text-center text-gray-500">暂无 active 席位账号</td>
             </tr>
             <tr
               v-for="row in cpaRows"
@@ -59,11 +61,21 @@
               <td class="px-4 py-3">
                 <span
                   class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium border"
-                  :class="row.hasLocalAuth
+                  :class="row.hasSessionBackup
+                    ? 'bg-sky-500/10 text-sky-300 border-sky-500/20'
+                    : 'bg-gray-500/10 text-gray-400 border-gray-500/20'"
+                >
+                  {{ row.hasSessionBackup ? '已有' : '无' }}
+                </span>
+              </td>
+              <td class="px-4 py-3">
+                <span
+                  class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium border"
+                  :class="row.hasOAuthRt
                     ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
                     : 'bg-amber-500/10 text-amber-300 border-amber-500/20'"
                 >
-                  {{ row.hasLocalAuth ? '已有' : '缺少' }}
+                  {{ row.hasOAuthRt ? '可上传' : '缺少' }}
                 </span>
               </td>
               <td class="px-4 py-3">
@@ -76,6 +88,16 @@
                   {{ row.hasCpaAuth ? '已有' : '缺少' }}
                 </span>
               </td>
+              <td class="px-4 py-3">
+                <span
+                  class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium border"
+                  :class="row.hasSub2apiSync
+                    ? 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20'
+                    : 'bg-gray-500/10 text-gray-400 border-gray-500/20'"
+                >
+                  {{ row.hasSub2apiSync ? '已传' : '未传' }}
+                </span>
+              </td>
               <td class="px-4 py-3 text-right">
                 <button
                   @click="startCpaAuth(row.email)"
@@ -85,7 +107,7 @@
                     ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
                     : 'bg-cyan-600/10 text-cyan-300 border-cyan-500/30 hover:bg-cyan-600/20'"
                 >
-                  {{ cpaActionEmail === row.email ? '提交中...' : row.hasCpaAuth ? '重新上传' : '认证并上传' }}
+                  {{ cpaActionLabel(row) }}
                 </button>
               </td>
             </tr>
@@ -262,22 +284,26 @@ const cpaRows = computed(() => {
       const email = String(acc.email || '').trim().toLowerCase()
       return {
         email,
-        hasLocalAuth: !!acc.auth_file,
+        hasSessionBackup: !!acc.session_auth_file,
+        hasOAuthRt: !!acc.rt_auth_file,
         hasCpaAuth: cpaEmailSet.value.has(email),
+        hasSub2apiSync: !!acc.sub2api_synced_at,
       }
     })
     .sort((a, b) => {
       if (a.hasCpaAuth !== b.hasCpaAuth) return a.hasCpaAuth ? 1 : -1
-      if (a.hasLocalAuth !== b.hasLocalAuth) return a.hasLocalAuth ? 1 : -1
+      if (a.hasOAuthRt !== b.hasOAuthRt) return a.hasOAuthRt ? 1 : -1
       return a.email.localeCompare(b.email)
     })
 })
 const cpaSummary = computed(() => {
   const active = cpaRows.value.length
   const ready = cpaRows.value.filter((row) => row.hasCpaAuth).length
+  const localRt = cpaRows.value.filter((row) => row.hasOAuthRt).length
   return {
     active,
     ready,
+    localRt,
     missing: active - ready,
   }
 })
@@ -381,6 +407,13 @@ async function refreshCpaStatus() {
 
 function cpaActionDisabled(row) {
   return !!props.runningTask || cpaActionEmail.value === row.email || cpaLoading.value
+}
+
+function cpaActionLabel(row) {
+  if (cpaActionEmail.value === row.email) return '提交中...'
+  if (row.hasCpaAuth && row.hasOAuthRt) return '重新上传 RT'
+  if (row.hasOAuthRt) return '上传 RT'
+  return '认证并上传'
 }
 
 async function startCpaAuth(email) {

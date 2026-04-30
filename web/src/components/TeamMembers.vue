@@ -40,6 +40,7 @@
                 <th class="px-4 py-3 font-medium">角色</th>
                 <th class="px-4 py-3 font-medium">类型</th>
                 <th class="px-4 py-3 font-medium">账号状态</th>
+                <th class="px-4 py-3 font-medium">认证</th>
                 <th class="px-4 py-3 font-medium">来源</th>
                 <th class="px-4 py-3 font-medium text-right">操作</th>
               </tr>
@@ -79,6 +80,23 @@
                     <span v-if="m.has_cpa_archive_file"
                       class="px-2 py-0.5 rounded-full text-xs font-medium bg-gray-700 text-gray-300">
                       已归档
+                    </span>
+                  </div>
+                  <span v-else class="text-xs text-gray-500">-</span>
+                </td>
+                <td class="px-4 py-3">
+                  <div v-if="m.is_local" class="flex flex-wrap gap-1.5">
+                    <span class="px-2 py-0.5 rounded-full text-xs font-medium" :class="authBadgeClass(m.has_session_auth_file, 'session')">
+                      Session
+                    </span>
+                    <span class="px-2 py-0.5 rounded-full text-xs font-medium" :class="authBadgeClass(m.has_rt_auth_file, 'rt')">
+                      RT
+                    </span>
+                    <span class="px-2 py-0.5 rounded-full text-xs font-medium" :class="authBadgeClass(m.has_cpa_uploaded, 'cpa')">
+                      CPA
+                    </span>
+                    <span class="px-2 py-0.5 rounded-full text-xs font-medium" :class="authBadgeClass(m.has_sub2api_sync, 'sub2api')">
+                      Sub2API
                     </span>
                   </div>
                   <span v-else class="text-xs text-gray-500">-</span>
@@ -237,6 +255,16 @@ function dotClass(s) {
 
 function statusLabel(s) {
   return { active: 'Active', exhausted: 'Used up', standby: 'Standby', pending: 'Pending', sold: 'Sold' }[s] || s || 'Unknown'
+}
+
+function authBadgeClass(enabled, type) {
+  if (!enabled) return 'bg-gray-700/70 text-gray-400'
+  return {
+    session: 'bg-sky-500/10 text-sky-300',
+    rt: 'bg-emerald-500/10 text-emerald-300',
+    cpa: 'bg-cyan-500/10 text-cyan-300',
+    sub2api: 'bg-indigo-500/10 text-indigo-300',
+  }[type] || 'bg-gray-700/70 text-gray-300'
 }
 
 function isOwner(member) {

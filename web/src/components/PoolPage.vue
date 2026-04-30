@@ -18,7 +18,7 @@
         <div>
           <h3 class="text-lg font-semibold text-white">补账号完整流程</h3>
           <p class="text-sm text-gray-400 mt-1">
-            直注注册、Team 入席、OAuth 认证、CPA JSON 上传在一个任务里执行，并保留每个账号的阶段记录。
+            直注注册、Team 入席、session 备份、OAuth RT 认证、CPA JSON 上传在一个任务里执行，并保留每个账号的阶段记录。
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-3">
@@ -77,7 +77,7 @@
               ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
               : 'bg-emerald-600/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-600/20'"
           >
-            {{ syncSubmitting ? '推送中...' : 'CPA 推送云端' }}
+            {{ syncSubmitting ? '上传中...' : '上传本地 RT 到 CPA' }}
           </button>
           <button
             @click="pushSub2api"
@@ -87,7 +87,7 @@
               ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
               : 'bg-indigo-600/10 text-indigo-300 border-indigo-500/30 hover:bg-indigo-600/20'"
           >
-            {{ sub2apiSubmitting ? '推送中...' : 'Sub2API 推送云端' }}
+            {{ sub2apiSubmitting ? '上传中...' : '上传本地 RT 到 Sub2API' }}
           </button>
           <button
             @click="pushOAuth"
@@ -97,7 +97,7 @@
               ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
               : 'bg-blue-600/10 text-blue-300 border-blue-500/30 hover:bg-blue-600/20'"
           >
-            {{ oauthSubmitting ? '推送中...' : 'OAuth 凭证推送' }}
+            {{ oauthSubmitting ? '上传中...' : '上传主号 OAuth' }}
           </button>
           <button
             @click="loadRuns"
@@ -114,6 +114,9 @@
       </div>
       <div v-if="message" class="mt-4 px-4 py-3 rounded-lg text-sm border" :class="messageClass">
         {{ message }}
+      </div>
+      <div v-if="syncDetailLines.length" class="mt-2 rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3 text-xs text-gray-300">
+        <div v-for="line in syncDetailLines" :key="line" class="leading-5">{{ line }}</div>
       </div>
 
       <div v-if="activeRun" class="mt-4 grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -271,6 +274,7 @@ const sub2apiSubmitting = ref(false)
 const oauthSubmitting = ref(false)
 const message = ref('')
 const messageClass = ref('')
+const syncDetailLines = ref([])
 let refreshTimer = null
 
 const adminReady = computed(() => !!props.adminStatus?.configured)
@@ -405,12 +409,14 @@ function manageTimer() {
 
 function setMessage(text, type = 'success') {
   message.value = text
+  if (type !== 'success') syncDetailLines.value = []
   messageClass.value = type === 'success'
     ? 'bg-green-500/10 text-green-400 border-green-500/20'
     : 'bg-red-500/10 text-red-400 border-red-500/20'
   window.clearTimeout(setMessage._timer)
   setMessage._timer = window.setTimeout(() => {
     message.value = ''
+    syncDetailLines.value = []
   }, 8000)
 }
 
@@ -499,7 +505,8 @@ async function pushCpa() {
   syncSubmitting.value = true
   try {
     const result = await api.postSyncCpa()
-    setMessage(result.message || 'CPA 已推送到云端')
+    syncDetailLines.value = formatSyncResult(result.result, 'CPA')
+    setMessage(result.message || '已上传本地 RT 到 CPA')
     emit('refresh')
   } catch (e) {
     setMessage(e.message, 'error')
@@ -513,7 +520,8 @@ async function pushSub2api() {
   sub2apiSubmitting.value = true
   try {
     const result = await api.postSyncSub2api()
-    setMessage(result.message || 'Sub2API 已推送到云端')
+    syncDetailLines.value = formatSyncResult(result.result, 'Sub2API')
+    setMessage(result.message || '已上传本地 RT 到 Sub2API')
     emit('refresh')
   } catch (e) {
     setMessage(e.message, 'error')
@@ -527,7 +535,8 @@ async function pushOAuth() {
   oauthSubmitting.value = true
   try {
     const result = await api.postSyncSavedMainCodex()
-    setMessage(result.message || 'OAuth 凭证已推送到已启用云端')
+    syncDetailLines.value = formatSyncResult(result.result, '主号')
+    setMessage(result.message || '主号 OAuth 已上传到已启用远端')
     emit('refresh')
   } catch (e) {
     setMessage(e.message, 'error')
@@ -653,6 +662,41 @@ function stageLabel(value) {
     completed: '完成',
     interrupted: '已中断',
   }[value] || value || '-'
+}
+
+function formatSyncResult(result, label) {
+  if (!result || typeof result !== 'object') return []
+  const lines = []
+  appendTargetResult(lines, label, result)
+  return lines.slice(0, 8)
+}
+
+function appendTargetResult(lines, label, result) {
+  if (!result || typeof result !== 'object') return
+  const parts = []
+  if (Number.isFinite(Number(result.uploaded))) parts.push(`上传 ${result.uploaded}`)
+  if (Number.isFinite(Number(result.created))) parts.push(`创建 ${result.created}`)
+  if (Number.isFinite(Number(result.updated))) parts.push(`更新 ${result.updated}`)
+  if (Number.isFinite(Number(result.skipped_existing))) parts.push(`远端已有 ${result.skipped_existing}`)
+  if (Number.isFinite(Number(result.skipped))) parts.push(`跳过 ${result.skipped}`)
+  if (parts.length) lines.push(`${label}: ${parts.join('，')}`)
+
+  const skippedAccounts = Array.isArray(result.skipped_accounts) ? result.skipped_accounts : []
+  skippedAccounts.slice(0, 5).forEach((item) => {
+    lines.push(`${label} 跳过 ${item.email || '-'}: ${syncSkipReasonLabel(item.reason)}`)
+  })
+
+  const warnings = Array.isArray(result.warnings) ? result.warnings : []
+  warnings.slice(0, 5).forEach((item) => {
+    lines.push(`${label}: ${item}`)
+  })
+}
+
+function syncSkipReasonLabel(value) {
+  return {
+    missing_oauth_rt_file: '缺少 OAuth RT 文件',
+    session_file_not_uploadable: '只有 session 备份，不能上传',
+  }[value] || value || '未知原因'
 }
 
 function formatTime(ts) {

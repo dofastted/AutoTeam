@@ -2643,6 +2643,8 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
         if not account:
             return {}
         auth_file = account.get("auth_file") or ""
+        rt_auth_file = account.get("rt_auth_file") or ""
+        session_auth_file = account.get("session_auth_file") or ""
         cpa_archive_file = account.get("cpa_archive_file") or ""
         return {
             "status": account.get("status", ""),
@@ -2650,6 +2652,10 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
             "is_main_account": _is_main_account_email(account.get("email")),
             "auth_file": auth_file,
             "has_auth_file": bool(auth_file),
+            "has_rt_auth_file": bool(rt_auth_file),
+            "has_session_auth_file": bool(session_auth_file),
+            "has_cpa_uploaded": bool(account.get("cpa_uploaded_at") or account.get("cpa_status") == "success"),
+            "has_sub2api_sync": bool(account.get("sub2api_synced_at")),
             "cpa_archive_file": cpa_archive_file,
             "has_cpa_archive_file": bool(cpa_archive_file),
             "sold_at": account.get("sold_at"),

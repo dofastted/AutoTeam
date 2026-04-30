@@ -32,8 +32,11 @@
     </div>
 
     <!-- 结果提示 -->
-    <div v-if="message" class="mt-4 px-4 py-3 rounded-lg text-sm" :class="messageClass">
+    <div v-if="message" class="mt-4 px-4 py-3 rounded-lg text-sm border" :class="messageClass">
       {{ message }}
+    </div>
+    <div v-if="detailLines.length" class="mt-2 rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-3 text-xs text-gray-300">
+      <div v-for="line in detailLines" :key="line" class="leading-5">{{ line }}</div>
     </div>
   </div>
 </template>
@@ -65,8 +68,8 @@ const actions = [
   { key: 'fill', group: 'pool', label: '补满成员', method: 'startFill', needParam: false, style: 'bg-violet-600 text-white border-violet-500' },
   { key: 'add', group: 'pool', label: '添加账号', method: 'startAdd', needParam: false, style: 'bg-amber-600 text-white border-amber-500' },
   { key: 'cleanup', group: 'pool', label: '清理成员', method: 'startCleanup', needParam: false, style: 'bg-rose-600 text-white border-rose-500' },
-  { key: 'sync', group: 'sync', label: '同步远端', method: 'postSync', needParam: false, sync: true, allowWithoutAdmin: true, style: 'bg-cyan-600 text-white border-cyan-500' },
-  { key: 'sync-sub2api', group: 'sync', label: '同步 Sub2API', method: 'postSyncSub2api', needParam: false, sync: true, allowWithoutAdmin: true, style: 'bg-indigo-600 text-white border-indigo-500' },
+  { key: 'sync', group: 'sync', label: '上传本地 RT 到远端', method: 'postSync', needParam: false, sync: true, allowWithoutAdmin: true, style: 'bg-cyan-600 text-white border-cyan-500' },
+  { key: 'sync-sub2api', group: 'sync', label: '上传本地 RT 到 Sub2API', method: 'postSyncSub2api', needParam: false, sync: true, allowWithoutAdmin: true, style: 'bg-indigo-600 text-white border-indigo-500' },
   { key: 'pull-cpa', group: 'sync', label: '拉取 CPA', method: 'postSyncFromCpa', needParam: false, sync: true, allowWithoutAdmin: true, style: 'bg-emerald-600 text-white border-emerald-500' },
   { key: 'sync-accounts', group: 'sync', label: '同步账号', method: 'postSyncAccounts', needParam: false, sync: true, allowWithoutAdmin: true, style: 'bg-sky-600 text-white border-sky-500' },
 ]
@@ -77,6 +80,7 @@ const paramValue = ref(999)
 const pendingAction = ref(null)
 const message = ref('')
 const messageClass = ref('')
+const detailLines = ref([])
 const adminReady = computed(() => !!props.adminStatus?.configured)
 const visibleActions = computed(() => {
   if (props.mode === 'all') return actions
@@ -89,7 +93,7 @@ const panelTitle = computed(() => {
 })
 const adminHint = computed(() => {
   if (props.mode === 'sync') {
-    return '同步类操作可独立使用：同步账号、同步已启用远端、同步 Sub2API、拉取 CPA。'
+    return '同步只上传本地已有 OAuth RT 文件；缺少 RT 的账号请先到 OAuth 登录页认证。'
   }
   return '请先在「配置面板」页完成管理员登录后，轮转/补满/清理等账号池操作才会开放。'
 })
@@ -104,6 +108,7 @@ function isDisabled(action) {
 async function execute(action) {
   if (isDisabled(action)) return
   message.value = ''
+  detailLines.value = []
   if (action.needParam) {
     pendingAction.value = action
     paramLabel.value = action.paramName === 'target' ? '目标成员数' : '最大席位'
@@ -127,7 +132,8 @@ async function doExecute(action, param) {
     if (action.sync) {
       const result = await api[action.method]()
       message.value = result.message || '操作完成'
-      messageClass.value = 'bg-green-500/10 text-green-400 border border-green-500/20'
+      messageClass.value = 'bg-green-500/10 text-green-400 border-green-500/20'
+      detailLines.value = formatSyncResult(result.result)
       emit('refresh')
     } else {
       const parallelWorkers = normalizeParallelWorkers(props.parallelWorkers)
@@ -135,19 +141,58 @@ async function doExecute(action, param) {
         ? await api[action.method](param, parallelWorkers)
         : await api[action.method](param)
       message.value = `任务已提交: ${result.task_id}`
-      messageClass.value = 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
+      messageClass.value = 'bg-blue-500/10 text-blue-400 border-blue-500/20'
       emit('task-started')
     }
   } catch (e) {
     message.value = e.message
-    messageClass.value = 'bg-red-500/10 text-red-400 border border-red-500/20'
+    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
   }
-  setTimeout(() => { message.value = '' }, 8000)
+  setTimeout(() => {
+    message.value = ''
+    detailLines.value = []
+  }, 12000)
 }
 
 function normalizeParallelWorkers(value) {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return null
   return Math.min(3, Math.max(1, Math.floor(parsed)))
+}
+
+function formatSyncResult(result) {
+  if (!result || typeof result !== 'object') return []
+  const lines = []
+  appendTargetResult(lines, 'CPA', result.cpa || result)
+  appendTargetResult(lines, 'Sub2API', result.sub2api)
+  return lines.slice(0, 8)
+}
+
+function appendTargetResult(lines, label, result) {
+  if (!result || typeof result !== 'object') return
+  const parts = []
+  if (Number.isFinite(Number(result.uploaded))) parts.push(`上传 ${result.uploaded}`)
+  if (Number.isFinite(Number(result.created))) parts.push(`创建 ${result.created}`)
+  if (Number.isFinite(Number(result.updated))) parts.push(`更新 ${result.updated}`)
+  if (Number.isFinite(Number(result.skipped_existing))) parts.push(`远端已有 ${result.skipped_existing}`)
+  if (Number.isFinite(Number(result.skipped))) parts.push(`跳过 ${result.skipped}`)
+  if (parts.length) lines.push(`${label}: ${parts.join('，')}`)
+
+  const skippedAccounts = Array.isArray(result.skipped_accounts) ? result.skipped_accounts : []
+  skippedAccounts.slice(0, 5).forEach((item) => {
+    lines.push(`${label} 跳过 ${item.email || '-'}: ${syncSkipReasonLabel(item.reason)}`)
+  })
+
+  const warnings = Array.isArray(result.warnings) ? result.warnings : []
+  warnings.slice(0, 5).forEach((item) => {
+    lines.push(`${label}: ${item}`)
+  })
+}
+
+function syncSkipReasonLabel(value) {
+  return {
+    missing_oauth_rt_file: '缺少 OAuth RT 文件',
+    session_file_not_uploadable: '只有 session 备份，不能上传',
+  }[value] || value || '未知原因'
 }
 </script>
