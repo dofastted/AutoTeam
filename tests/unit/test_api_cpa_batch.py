@@ -43,6 +43,7 @@ def test_post_cpa_batch_starts_fixed_size_task(monkeypatch):
         "join_mode": "invite",
         "target": 100,
         "batch_size": 20,
+        "parallel_workers": 1,
     }
     assert captured["kwargs"]["join_mode"] == "invite"
 
@@ -80,6 +81,40 @@ def test_post_cpa_batch_accepts_single_validation_target(monkeypatch):
     assert result["params"]["target"] == 1
     assert captured["params"]["batch_size"] == 1
     assert captured["kwargs"]["target"] == 1
+
+
+def test_post_cpa_batch_accepts_parallel_workers(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        api,
+        "_current_runtime_env",
+        lambda: {
+            "MAIL_PROVIDER": "mo_email",
+            "MO_EMAIL_BASE_URL": "https://mo.example.com",
+            "MO_EMAIL_API_KEY": "key",
+            "MO_EMAIL_DOMAIN": "example.com",
+            "MO_EMAIL_NAME_PREFIX": "abc",
+            "MO_EMAIL_START_INDEX": "1",
+            "MO_EMAIL_EXPIRY_TIME": "3600000",
+            "CPA_URL": "http://127.0.0.1:8317",
+            "CPA_KEY": "secret",
+        },
+    )
+    monkeypatch.setattr(api, "_admin_status", lambda: {"configured": True})
+    monkeypatch.setattr("uuid.uuid4", lambda: type("FakeUuid", (), {"hex": "runid1234567890"})())
+
+    def fake_start_task(command, func, params, *args, **kwargs):
+        captured["params"] = params
+        captured["kwargs"] = kwargs
+        return {"task_id": "task-1", "command": command, "params": params}
+
+    monkeypatch.setattr(api, "_start_task", fake_start_task)
+
+    api.post_cpa_batch(api.CpaBatchParams(join_mode="direct", parallel_workers=3))
+
+    assert captured["params"]["parallel_workers"] == 3
+    assert captured["kwargs"]["parallel_workers"] == 3
 
 
 def test_post_cpa_batch_rejects_unknown_join_mode(monkeypatch):
@@ -147,7 +182,11 @@ def test_resume_cpa_batch_run_starts_resume_task(tmp_path, monkeypatch):
 
 def test_create_direct_account_retries_current_account_after_browser_error(tmp_path, monkeypatch):
     monkeypatch.setattr(accounts, "ACCOUNTS_FILE", tmp_path / "accounts.json")
-    monkeypatch.setattr(cpa_batch, "time", type("FakeTime", (), {"time": staticmethod(lambda: 1000), "sleep": staticmethod(lambda _s: None)})())
+    monkeypatch.setattr(
+        cpa_batch,
+        "time",
+        type("FakeTime", (), {"time": staticmethod(lambda: 1000), "sleep": staticmethod(lambda _s: None)})(),
+    )
     monkeypatch.setattr("autoteam.manager._is_email_in_team", lambda _email: False)
     monkeypatch.setattr(cpa_batch, "save_auth_file", lambda _bundle: str(tmp_path / "codex-a-team.json"))
 

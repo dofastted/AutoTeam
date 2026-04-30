@@ -6,6 +6,9 @@
 - password
 - account_id
 - workspace_name
+- access_token
+- access_token_updated_at
+- oai_device_id
 - updated_at
 
 兼容：
@@ -34,6 +37,9 @@ def _normalize_state(data):
         "password": data.get("password", "") or "",
         "account_id": data.get("account_id", "") or "",
         "workspace_name": data.get("workspace_name", "") or "",
+        "access_token": data.get("access_token", "") or "",
+        "access_token_updated_at": data.get("access_token_updated_at"),
+        "oai_device_id": data.get("oai_device_id", "") or "",
         "updated_at": data.get("updated_at"),
     }
 
@@ -59,6 +65,9 @@ def _load_state_from_file(path: Path):
             "session_token": raw,
             "account_id": "",
             "workspace_name": "",
+            "access_token": "",
+            "access_token_updated_at": None,
+            "oai_device_id": "",
             "updated_at": path.stat().st_mtime,
         }
 
@@ -143,6 +152,14 @@ def get_chatgpt_workspace_name():
     return state.get("workspace_name", "")
 
 
+def get_chatgpt_access_token():
+    return load_admin_state().get("access_token", "")
+
+
+def get_chatgpt_oai_device_id():
+    return load_admin_state().get("oai_device_id", "")
+
+
 def get_admin_state_summary():
     state = load_admin_state()
     return {
@@ -151,6 +168,8 @@ def get_admin_state_summary():
         "account_id": state.get("account_id", ""),
         "workspace_name": state.get("workspace_name", ""),
         "session_present": bool(state.get("session_token")),
+        "access_token_present": bool(state.get("access_token")),
+        "access_token_updated_at": state.get("access_token_updated_at"),
         "password_saved": bool(state.get("password")),
         "updated_at": state.get("updated_at"),
     }

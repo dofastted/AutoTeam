@@ -21,7 +21,7 @@
 
 主要页面：
 
-- `web/src/components/Dashboard.vue`: 账号统计、账号列表、登录、移出、删除、导出。
+- `web/src/components/Dashboard.vue`: 账号统计、账号列表、登录、移出、卖出、删除、导出。
 - `web/src/components/TeamMembers.vue`: Team 成员和邀请。
 - `web/src/components/PoolPage.vue`: 账号池操作入口，包含批量 CPA JSON 启动、运行记录和账号明细。
 - `web/src/components/SyncPage.vue`: 同步操作入口。
@@ -43,3 +43,45 @@
 批量 CPA JSON 任务还会写入 `flow_runs.json`。页面通过 `/api/cpa-batch/runs` 和 `/api/cpa-batch/runs/{run_id}` 读取持久记录，避免只依赖内存任务历史。暂停请求通过 `/api/cpa-batch/runs/{run_id}/pause` 写入记录，任务会在当前账号阶段结束后停止继续新账号。
 
 服务启动时，`src/autoteam/api.py` 会调用 `src/autoteam/flow_runs.py` (`mark_interrupted_running_runs`) 标记遗留的 `running` 批量记录为失败。账号池操作页显示邮箱创建、注册、OAuth、额度检查和 CPA 上传阶段。
+
+## 前台操作与后台同步
+
+前台账号操作应只等待本地状态变化完成，不应同步等待 CPA / Sub2API 的全量远端操作。推荐交互：
+
+- 用户点击账号操作按钮。
+- 后端完成本地账号状态、`auth_file`、任务记录写入。
+- 后端返回 `202` 或本地操作结果。
+- 后台同步任务继续处理 CPA / Sub2API。
+- 前端显示本地结果和后台同步任务状态。
+
+适合异步的操作：
+
+- CPA 文件增量上传。
+- Sub2API 单账号创建或更新。
+- 批量补传历史账号认证文件。
+- 远端数量核对。
+- 可自动重试的网络失败。
+
+不适合悄悄异步的操作：
+
+- Team 移出或取消邀请。
+- 删除远端 CPA 文件。
+- 删除 Sub2API 账号。
+- 改写 `.env` 或登录态。
+
+卖出账号接口 `POST /api/accounts/{email}/sell` 是同步确认操作：它不操作 Team 席位，只删除已启用 CPA / Sub2API 远端记录，然后把本地账号标记为 `sold`。
+
+后台同步任务应有独立状态字段：
+
+- `queued`
+- `running`
+- `paused`
+- `completed`
+- `failed`
+
+错误策略：
+
+- 可重试错误按配置自动重试。
+- 连续失败达到上限时暂停任务。
+- 不可重试错误立即暂停。
+- 前端提供恢复按钮，不自动反复启动失败任务。

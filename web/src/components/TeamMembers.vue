@@ -2,14 +2,20 @@
   <div>
     <div class="flex items-center justify-between mb-6">
       <h2 class="text-xl font-bold text-white">Team 成员</h2>
-      <button @click="fetchMembers" :disabled="loading"
+      <button @click="fetchMembers({ refresh: true })" :disabled="loading"
         class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-sm rounded-lg border border-gray-700 transition disabled:opacity-50">
-        {{ loading ? '加载中...' : '刷新' }}
+        {{ loading ? '验证中...' : '验证刷新' }}
       </button>
     </div>
 
     <div v-if="error" class="mb-4 px-4 py-3 rounded-lg text-sm bg-red-500/10 text-red-400 border border-red-500/20">
       {{ error }}
+    </div>
+
+    <div v-if="data?.cached" class="mb-4 px-4 py-3 rounded-lg text-sm bg-blue-500/10 text-blue-300 border border-blue-500/20">
+      当前显示{{ data.local_snapshot ? '本地账号快照' : '本地缓存' }}
+      <span v-if="data.cache_updated_at">，更新时间 {{ formatCacheTime(data.cache_updated_at) }}</span>
+      <span v-if="data.refresh_error" class="block mt-1 text-amber-300">远端验证失败：{{ formatRefreshError(data.refresh_error) }}</span>
     </div>
 
     <div v-if="data" class="space-y-4">
@@ -56,7 +62,7 @@
                 </td>
                 <td class="px-4 py-3">
                   <span class="text-xs" :class="m.is_local ? 'text-blue-400' : 'text-gray-500'">
-                    {{ m.is_local ? '本地管理' : '外部' }}
+                    {{ sourceLabel(m) }}
                   </span>
                 </td>
                 <td class="px-4 py-3 text-right">
@@ -124,17 +130,32 @@ function memberKey(member) {
   return `${member.type}:${member.user_id}:${member.email}`
 }
 
-async function fetchMembers() {
+async function fetchMembers({ refresh = false } = {}) {
   loading.value = true
   error.value = ''
   try {
-    data.value = await api.getTeamMembers()
+    data.value = await api.getTeamMembers({ refresh })
     saveCache(data.value)
   } catch (e) {
     error.value = e.message
   } finally {
     loading.value = false
   }
+}
+
+function formatCacheTime(ts) {
+  const d = new Date(Number(ts) * 1000)
+  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+function formatRefreshError(value) {
+  if (typeof value === 'string') return value
+  return value?.message || JSON.stringify(value)
+}
+
+function sourceLabel(member) {
+  if (!member.is_local) return '外部'
+  return member.status ? `本地管理/${member.status}` : '本地管理'
 }
 
 async function removeMember(member) {
@@ -166,7 +187,7 @@ onMounted(() => {
   if (cached) {
     data.value = cached
   } else {
-    fetchMembers()
+    fetchMembers({ refresh: false })
   }
 })
 </script>

@@ -52,6 +52,10 @@ const props = defineProps({
     type: String,
     default: 'all',
   },
+  parallelWorkers: {
+    type: Number,
+    default: null,
+  },
 })
 const emit = defineEmits(['task-started', 'refresh'])
 
@@ -126,7 +130,9 @@ async function doExecute(action, param) {
       messageClass.value = 'bg-green-500/10 text-green-400 border border-green-500/20'
       emit('refresh')
     } else {
-      const result = await api[action.method](param)
+      const result = action.key === 'rotate' || action.key === 'fill'
+        ? await api[action.method](param, props.parallelWorkers)
+        : await api[action.method](param)
       message.value = `任务已提交: ${result.task_id}`
       messageClass.value = 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
       emit('task-started')

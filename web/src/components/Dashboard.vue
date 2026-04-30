@@ -60,7 +60,7 @@
               <td class="px-4 py-3 text-gray-400 text-xs">{{ quotaReset(acc, 'weekly') }}</td>
               <td class="px-4 py-3 text-right space-x-2">
                 <button
-                  v-if="!acc.is_main_account && acc.status !== 'active'"
+                  v-if="!acc.is_main_account && acc.status !== 'active' && acc.status !== 'sold'"
                   @click="loginAccount(acc.email)"
                   :disabled="actionDisabled || actionEmail === acc.email"
                   class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
@@ -80,7 +80,17 @@
                   {{ actionEmail === acc.email && actionType === 'kick' ? '移出中...' : '移出' }}
                 </button>
                 <button
-                  v-if="acc.status === 'active' || acc.is_main_account"
+                  v-if="!acc.is_main_account && acc.status === 'active'"
+                  @click="sellAccount(acc.email)"
+                  :disabled="actionDisabled || actionEmail === acc.email"
+                  class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
+                  :class="actionDisabled || actionEmail === acc.email
+                    ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+                    : 'bg-cyan-600/10 text-cyan-300 border-cyan-500/30 hover:bg-cyan-600/20'">
+                  {{ actionEmail === acc.email && actionType === 'sell' ? '处理中...' : '卖出' }}
+                </button>
+                <button
+                  v-if="acc.status === 'active' || acc.status === 'sold' || acc.is_main_account"
                   @click="exportCodexAuth(acc.email)"
                   :disabled="actionEmail === acc.email"
                   class="px-3 py-1.5 rounded-lg text-xs font-medium border transition bg-cyan-600/10 text-cyan-400 border-cyan-500/30 hover:bg-cyan-600/20">
@@ -187,6 +197,7 @@ const cards = computed(() => {
     { label: '活跃', value: s.active, color: 'text-green-400' },
     { label: '待命', value: s.standby, color: 'text-yellow-400' },
     { label: '额度用完', value: s.exhausted, color: 'text-red-400' },
+    { label: '已售', value: s.sold || 0, color: 'text-cyan-300' },
     { label: '总计', value: s.total, color: 'text-white' },
   ]
 })
@@ -197,6 +208,7 @@ function statusClass(s) {
     exhausted: 'bg-red-500/10 text-red-400',
     standby: 'bg-yellow-500/10 text-yellow-400',
     pending: 'bg-gray-500/10 text-gray-400',
+    sold: 'bg-cyan-500/10 text-cyan-300',
   }[s] || 'bg-gray-500/10 text-gray-400'
 }
 
@@ -206,11 +218,12 @@ function dotClass(s) {
     exhausted: 'bg-red-400',
     standby: 'bg-yellow-400',
     pending: 'bg-gray-400',
+    sold: 'bg-cyan-300',
   }[s] || 'bg-gray-400'
 }
 
 function statusLabel(s) {
-  return { active: 'Active', exhausted: 'Used up', standby: 'Standby', pending: 'Pending' }[s] || s
+  return { active: 'Active', exhausted: 'Used up', standby: 'Standby', pending: 'Pending', sold: 'Sold' }[s] || s
 }
 
 function quota(acc, type) {
@@ -335,6 +348,31 @@ async function kickAccount(email) {
   try {
     const result = await api.kickAccount(email)
     message.value = result.message || `已将 ${email} 移出 Team`
+    messageClass.value = 'bg-green-500/10 text-green-400 border-green-500/20'
+    emit('refresh')
+  } catch (e) {
+    message.value = e.message
+    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
+  } finally {
+    actionEmail.value = ''
+    actionType.value = ''
+    setTimeout(() => { message.value = '' }, 8000)
+  }
+}
+
+async function sellAccount(email) {
+  if (actionDisabled.value) return
+
+  const ok = window.confirm(`确认卖出账号 ${email}？\n系统会保留 Team 席位，但会删除 CPA/Sub2API 远端记录，并停止后续同步。`)
+  if (!ok) return
+
+  actionEmail.value = email
+  actionType.value = 'sell'
+  message.value = ''
+  try {
+    const result = await api.sellAccount(email)
+    const archive = result.cpa_archive_file ? `，归档: ${result.cpa_archive_file}` : ''
+    message.value = (result.message || `已标记为已售: ${email}`) + archive
     messageClass.value = 'bg-green-500/10 text-green-400 border-green-500/20'
     emit('refresh')
   } catch (e) {

@@ -320,6 +320,40 @@
       </div>
 
       <div v-else-if="selectedRuntimeCategory === 'proxy'" class="space-y-4">
+        <div class="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div class="mb-4">
+            <div class="text-sm font-medium text-white">浏览器显示方式</div>
+            <div class="mt-1 text-xs leading-5 text-slate-400">
+              控制 Playwright 自动化浏览器是否弹出窗口。隐藏和内嵌模式都不会弹出独立窗口。
+            </div>
+          </div>
+          <select
+            v-model="runtimeForm.PLAYWRIGHT_BROWSER_MODE"
+            class="input-dark"
+            @change="syncBrowserModeCompatibility"
+          >
+            <option value="hidden">隐藏</option>
+            <option value="embedded">内嵌</option>
+            <option value="visible">可见窗口</option>
+          </select>
+        </div>
+
+        <div v-if="fieldByKey('BROWSER_PARALLEL_WORKERS')" class="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div class="mb-4">
+            <div class="text-sm font-medium text-white">并行窗口数</div>
+            <div class="mt-1 text-xs leading-5 text-slate-400">
+              账号补满、轮转和直注批量任务最多可同时启动 3 个独立浏览器。
+            </div>
+          </div>
+          <input
+            v-model.number="runtimeForm.BROWSER_PARALLEL_WORKERS"
+            type="number"
+            min="1"
+            max="3"
+            class="input-dark"
+          />
+        </div>
+
         <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
           <button
             @click="proxyExpanded = !proxyExpanded"
@@ -328,7 +362,7 @@
             <div>
               <div class="text-sm font-medium text-white">高级代理设置</div>
               <div class="mt-1 text-xs leading-5 text-slate-400">
-                低频配置，默认折叠。只有浏览器流量需要单独代理时才建议填写。
+                低频配置，默认折叠。只有浏览器流量需要单独代理时才填写。
               </div>
             </div>
             <span class="text-xs text-slate-400">{{ proxyExpanded ? '收起' : '展开' }}</span>
@@ -352,7 +386,7 @@
 
         <div class="flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 lg:flex-row lg:items-center lg:justify-between">
           <p class="text-xs leading-6 text-slate-400">
-            推荐只在确实需要代理 Playwright 浏览器流量时启用，并配合绕过列表避免本地回调误走代理。
+            保存后会影响下一次启动的自动化浏览器。正在运行的浏览器任务会继续使用启动时的配置。
           </p>
           <button
             @click="saveRuntimeConfig"
@@ -493,7 +527,7 @@ const emit = defineEmits(['refresh', 'admin-progress'])
 const runtimeCategoryKeys = {
   cloudmail: ['MAIL_PROVIDER', 'MO_EMAIL_BASE_URL', 'MO_EMAIL_API_KEY', 'MO_EMAIL_DOMAIN', 'MO_EMAIL_NAME_PREFIX', 'MO_EMAIL_START_INDEX', 'MO_EMAIL_EXPIRY_TIME', 'CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN', 'CF_TEMP_EMAIL_BASE_URL', 'CF_TEMP_EMAIL_ADMIN_PASSWORD', 'CF_TEMP_EMAIL_DOMAIN'],
   sync: ['SYNC_TARGET_CPA', 'SYNC_TARGET_SUB2API', 'CPA_URL', 'CPA_KEY', 'SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP'],
-  proxy: ['PLAYWRIGHT_HEADLESS', 'PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS'],
+  proxy: ['PLAYWRIGHT_BROWSER_MODE', 'PLAYWRIGHT_HEADLESS', 'BROWSER_PARALLEL_WORKERS', 'PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS'],
   security: ['API_KEY'],
 }
 
@@ -517,8 +551,8 @@ const runtimeCategoryMeta = {
     icon: '🛰️',
     badge: 'Proxy / Advanced',
     title: '代理 / 高级',
-    description: '用于配置 Playwright 无头模式和浏览器流量代理。属于低频项，默认折叠，避免把主配置界面堆得过满。',
-    note: '浏览器默认无头启动；只有在代理 ChatGPT / Auth 页面访问时才建议配置代理和 bypass。',
+    description: '用于配置浏览器显示方式和 Playwright 流量代理。浏览器可设为隐藏、可见窗口或内嵌。',
+    note: '隐藏模式默认不弹窗；内嵌模式先按不弹窗运行，后续可接页面内预览。',
   },
   security: {
     icon: '🔐',
@@ -575,7 +609,7 @@ function fieldsByKeys(keys) {
 }
 
 const securityFields = computed(() => fieldsByKeys(runtimeCategoryKeys.security))
-const proxyFields = computed(() => fieldsByKeys(runtimeCategoryKeys.proxy))
+const proxyFields = computed(() => fieldsByKeys(['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS']))
 const syncToggleFields = computed(() => fieldsByKeys(['SYNC_TARGET_CPA', 'SYNC_TARGET_SUB2API']))
 const selectedMailProvider = computed(() => {
   const value = String(runtimeForm.MAIL_PROVIDER || 'mo_email').toLowerCase()
@@ -649,19 +683,25 @@ const currentRuntimeStatus = computed(() => {
 
   if (selectedRuntimeCategory.value === 'proxy') {
     const proxyConfigured = fieldsByKeys(['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS']).some(field => field.configured)
+    const browserMode = normalizedBrowserMode.value
     if (proxyConfigured) {
       return {
         label: '已设置',
         class: 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200',
       }
     }
-    return String(runtimeForm.PLAYWRIGHT_HEADLESS || 'true').toLowerCase() === 'false'
+    return browserMode === 'visible'
       ? {
           label: '可见窗口',
           class: 'border-amber-400/20 bg-amber-500/10 text-amber-200',
         }
+      : browserMode === 'embedded'
+        ? {
+            label: '内嵌',
+            class: 'border-cyan-400/20 bg-cyan-500/10 text-cyan-200',
+          }
       : {
-          label: '默认无头',
+          label: '隐藏',
           class: 'border-white/10 bg-white/5 text-slate-400',
         }
   }
@@ -734,12 +774,30 @@ function isToggleField(key) {
   return key === 'SYNC_TARGET_CPA' || key === 'SYNC_TARGET_SUB2API' || key === 'PLAYWRIGHT_HEADLESS'
 }
 
+const normalizedBrowserMode = computed(() => {
+  const mode = String(runtimeForm.PLAYWRIGHT_BROWSER_MODE || '').toLowerCase()
+  if (['hidden', 'visible', 'embedded'].includes(mode)) {
+    return mode
+  }
+  return String(runtimeForm.PLAYWRIGHT_HEADLESS || 'true').toLowerCase() === 'false' ? 'visible' : 'hidden'
+})
+
+function syncBrowserModeCompatibility() {
+  const mode = normalizedBrowserMode.value
+  runtimeForm.PLAYWRIGHT_BROWSER_MODE = mode
+  runtimeForm.PLAYWRIGHT_HEADLESS = mode === 'visible' ? 'false' : 'true'
+}
+
 function isRuntimeRequired(field) {
   return Boolean(field?.runtime_required) || runtimeRequiredKeys.has(field?.key)
 }
 
 function normalizeRuntimeFieldValue(field) {
   const value = field?.value ?? field?.default ?? ''
+  if (field?.key === 'PLAYWRIGHT_BROWSER_MODE') {
+    const mode = String(value).toLowerCase()
+    return ['hidden', 'visible', 'embedded'].includes(mode) ? mode : 'hidden'
+  }
   if (isToggleField(field?.key)) {
     return String(value).toLowerCase() === 'true' ? 'true' : 'false'
   }
@@ -760,6 +818,7 @@ async function loadRuntimeConfig() {
     for (const field of runtimeFields.value) {
       runtimeForm[field.key] = normalizeRuntimeFieldValue(field)
     }
+    syncBrowserModeCompatibility()
     if (selectedMailProvider.value === 'mo_email') {
       await loadMoEmailDomains()
     }
@@ -788,8 +847,10 @@ async function saveRuntimeConfig() {
   runtimeSaved.value = false
   try {
     const payload = {}
+    syncBrowserModeCompatibility()
     for (const field of runtimeFields.value) {
-      payload[field.key] = runtimeForm[field.key] ?? ''
+      const raw = runtimeForm[field.key] ?? ''
+      payload[field.key] = typeof raw === 'string' ? raw : String(raw)
     }
     const result = await api.saveRuntimeConfig(payload)
     if (result.api_key) {

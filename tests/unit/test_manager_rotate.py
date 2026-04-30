@@ -142,3 +142,36 @@ def test_cmd_rotate_stops_creating_when_refreshed_team_count_hits_target(monkeyp
         ("create", None),
         ("sync_to_cpa", None),
     ]
+
+
+def test_cmd_rotate_uses_parallel_creator_for_new_accounts(monkeypatch):
+    chatgpt = _FakeChatGPT()
+    count_values = iter([3, 5, 5])
+    events = []
+
+    monkeypatch.setattr(manager, "sync_account_states", lambda: events.append(("sync_account_states", None)))
+    monkeypatch.setattr(manager, "cmd_check", lambda: events.append(("cmd_check", None)))
+    monkeypatch.setattr(manager, "ChatGPTTeamAPI", lambda: chatgpt)
+    monkeypatch.setattr(manager, "CloudMailClient", lambda: _FakeMailClient())
+    monkeypatch.setattr(manager, "load_accounts", lambda: [])
+    monkeypatch.setattr(manager, "get_team_member_count", lambda _chatgpt: next(count_values))
+    monkeypatch.setattr(manager, "get_standby_accounts", lambda: [])
+
+    def fake_parallel(total, *, parallel_workers=None, stop_after_success=None):
+        events.append(("parallel", total, parallel_workers))
+        return {
+            "attempted": 2,
+            "succeeded": 2,
+            "failed": 0,
+            "emails": ["a@example.com", "b@example.com"],
+            "worker_reports": [],
+            "parallel_workers": 2,
+        }
+
+    monkeypatch.setattr(manager, "_create_new_accounts_parallel", fake_parallel)
+    monkeypatch.setattr(manager, "sync_to_cpa", lambda: events.append(("sync_to_cpa", None)))
+
+    manager.cmd_rotate(target_seats=5, parallel_workers=2)
+
+    assert ("parallel", 2, 2) in events
+    assert events[-1] == ("sync_to_cpa", None)

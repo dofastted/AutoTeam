@@ -47,7 +47,7 @@ def get_flow_run(run_id: str) -> dict | None:
         return None
 
 
-def create_flow_run(run_id: str, *, target: int, batch_size: int, join_mode: str) -> dict:
+def create_flow_run(run_id: str, *, target: int, batch_size: int, join_mode: str, parallel_workers: int = 1) -> dict:
     with _FLOW_RUNS_LOCK:
         runs = [run for run in load_flow_runs() if run.get("run_id") != run_id]
         run = {
@@ -55,6 +55,7 @@ def create_flow_run(run_id: str, *, target: int, batch_size: int, join_mode: str
             "target": int(target),
             "batch_size": int(batch_size),
             "join_mode": join_mode,
+            "parallel_workers": int(parallel_workers or 1),
             "status": "running",
             "created_at": _now(),
             "started_at": _now(),
@@ -158,6 +159,7 @@ def upsert_flow_account(run_id: str, email: str, **fields) -> dict | None:
                 account = {
                     "email": (email or "").strip().lower(),
                     "batch_index": fields.pop("batch_index", None),
+                    "worker_index": fields.pop("worker_index", None),
                     "status": "pending",
                     "stage": "",
                     "error_level": "",

@@ -150,6 +150,33 @@ def test_run_cpa_batch_pauses_when_completed_success_rate_is_at_risk(tmp_path, m
     assert run["fatal_error"].startswith("成功率保护暂停")
 
 
+def test_run_cpa_batch_pauses_after_two_consecutive_register_failures(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    failures = {"count": 0}
+
+    monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
+    monkeypatch.setattr(cpa_batch, "update_account", lambda *args, **kwargs: None)
+
+    def fake_create_direct(_mail_client, **_kwargs):
+        failures["count"] += 1
+        raise cpa_batch.AccountFlowError(
+            f"bad{failures['count']}@example.com",
+            "连续 3 次直注注册失败",
+        )
+
+    monkeypatch.setattr(cpa_batch, "_create_direct_account", fake_create_direct)
+
+    result = cpa_batch.run_cpa_batch("run-register-guard", target=100, batch_size=20, join_mode="direct")
+    run = flow_runs.get_flow_run("run-register-guard")
+
+    assert result["status"] == "paused"
+    assert result["attempted"] == 2
+    assert result["failed"] == 2
+    assert failures["count"] == 2
+    assert run["status"] == "paused"
+    assert run["fatal_error"].startswith("连续 2 个账号注册失败")
+
+
 def test_run_cpa_batch_resume_continues_existing_run(tmp_path, monkeypatch):
     _use_tmp_flow_file(tmp_path, monkeypatch)
     flow_runs.create_flow_run("run-resume", target=2, batch_size=1, join_mode="direct")
@@ -184,6 +211,45 @@ def test_run_cpa_batch_resume_continues_existing_run(tmp_path, monkeypatch):
     assert result["attempted"] == 2
     assert result["succeeded"] == 2
     assert run["success_count"] == 2
+
+
+def test_run_cpa_batch_resume_legacy_run_without_parallel_workers(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    flow_runs.create_flow_run("run-resume-legacy", target=2, batch_size=1, join_mode="direct")
+    run = flow_runs.get_flow_run("run-resume-legacy")
+    run.pop("parallel_workers", None)
+    flow_runs.save_flow_runs([run])
+    flow_runs.update_flow_run(
+        "run-resume-legacy",
+        status="paused",
+        success_count=1,
+        failed_count=0,
+        attempted_count=1,
+        finished_at=1000,
+        pause_requested=True,
+    )
+
+    monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
+    monkeypatch.setattr(cpa_batch, "update_account", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cpa_batch, "_create_direct_account", lambda _mail, **_kwargs: "legacy@example.com")
+    monkeypatch.setattr(
+        cpa_batch,
+        "_verify_and_upload_cpa",
+        lambda email, _cache, **_kwargs: {
+            "email": email,
+            "plan_type": "team",
+            "auth_file": f"/tmp/codex-{email}-team.json",
+            "auth_name": f"codex-{email}-team.json",
+        },
+    )
+
+    result = cpa_batch.run_cpa_batch("run-resume-legacy", resume=True)
+    updated = flow_runs.get_flow_run("run-resume-legacy")
+
+    assert result["status"] == "completed"
+    assert result["attempted"] == 2
+    assert result["succeeded"] == 2
+    assert updated["success_count"] == 2
 
 
 def test_flow_runs_keep_recent_records_and_account_events(tmp_path, monkeypatch):
@@ -235,6 +301,48 @@ def test_run_cpa_batch_stops_when_pause_is_requested(tmp_path, monkeypatch):
     assert result["status"] == "paused"
     assert seen == ["a1@example.com"]
     assert run["status"] == "paused"
+
+
+def test_cpa_upload_success_syncs_sub2api_when_enabled(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    synced = []
+
+    monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
+    monkeypatch.setattr(cpa_batch, "update_account", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cpa_batch, "_create_direct_account", lambda _mail, **_kwargs: "sync@example.com")
+    monkeypatch.setattr(cpa_batch, "is_sync_target_enabled", lambda target: target == cpa_batch.SYNC_TARGET_SUB2API)
+    monkeypatch.setattr(
+        "autoteam.sub2api_sync.sync_account_to_sub2api",
+        lambda email: (
+            synced.append(email)
+            or {
+                "created": 0,
+                "updated": 1,
+                "deleted": 0,
+                "remote_duplicates_deleted": 0,
+                "existing_email_matches": 0,
+                "warnings": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        cpa_batch,
+        "_verify_and_upload_cpa",
+        lambda email, _cache, **_kwargs: {
+            "email": email,
+            "plan_type": "team",
+            "auth_file": f"/tmp/codex-{email}-team.json",
+            "auth_name": f"codex-{email}-team.json",
+        },
+    )
+
+    result = cpa_batch.run_cpa_batch("run-sub2api-after-cpa", target=1, batch_size=1, join_mode="direct")
+    run = flow_runs.get_flow_run("run-sub2api-after-cpa")
+
+    assert result["status"] == "completed"
+    assert synced == ["sync@example.com"]
+    assert any(event["stage"] == "sub2api_sync" for event in run["accounts"][0]["events"])
+    assert run["accounts"][0]["sub2api_synced"] is True
 
 
 def test_direct_account_records_email_before_register_failure(tmp_path, monkeypatch):

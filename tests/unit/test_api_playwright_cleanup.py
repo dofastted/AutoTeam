@@ -93,10 +93,38 @@ def test_get_team_members_stops_chatgpt_when_start_fails(monkeypatch):
     monkeypatch.setattr("autoteam.chatgpt_api.ChatGPTTeamAPI", FakeChatGPTTeamAPI)
 
     with pytest.raises(api.HTTPException) as exc:
-        api.get_team_members()
+        api.get_team_members(allow_browser=True)
 
     assert exc.value.status_code == 502
     assert "http proxy failed" in str(exc.value.detail)
     assert len(instances) == 1
     assert instances[0].stopped is True
     assert api._playwright_lock.locked() is False
+
+
+def test_get_team_members_returns_local_snapshot_without_cached_token(monkeypatch):
+    def fail_if_browser_runs(*_args, **_kwargs):
+        raise AssertionError("browser path should not run")
+
+    monkeypatch.setattr(api, "_playwright_lock", threading.Lock())
+    monkeypatch.setattr(api._pw_executor, "run", fail_if_browser_runs)
+    monkeypatch.setattr("autoteam.admin_state.get_admin_session_token", lambda: "session")
+    monkeypatch.setattr("autoteam.admin_state.get_chatgpt_account_id", lambda: "acc-1")
+    monkeypatch.setattr("autoteam.admin_state.get_chatgpt_access_token", lambda: "")
+    monkeypatch.setattr("autoteam.team_cache.load_team_members_cache", lambda: {})
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {"email": "one@example.com", "status": "active"},
+            {"email": "two@example.com", "status": "standby"},
+        ],
+    )
+
+    result = api.get_team_members(refresh=True)
+
+    assert result["cached"] is True
+    assert result["local_snapshot"] is True
+    assert result["total"] == 2
+    assert result["members"][0]["email"] == "one@example.com"
+    assert result["members"][0]["status"] == "active"
+    assert "access token" in result["refresh_error"]

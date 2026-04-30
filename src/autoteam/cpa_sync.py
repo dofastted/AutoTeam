@@ -552,7 +552,7 @@ def sync_to_cpa():
     # active 账号的认证文件
     active_files = {}
     for acc in accounts:
-        if acc["status"] == STATUS_ACTIVE and acc.get("auth_file"):
+        if acc["status"] == STATUS_ACTIVE and not acc.get("sync_disabled") and acc.get("auth_file"):
             path = Path(acc["auth_file"])
             if path.exists():
                 active_files[path.name] = path

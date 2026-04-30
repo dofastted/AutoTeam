@@ -350,7 +350,9 @@ def _resolve_group_binding(token: str, group_spec: str | None = None) -> tuple[l
     return resolved_ids, resolved_names
 
 
-def _resolve_group_binding_for_sync(token: str, group_spec: str | None = None) -> tuple[list[int], list[str], list[str]]:
+def _resolve_group_binding_for_sync(
+    token: str, group_spec: str | None = None
+) -> tuple[list[int], list[str], list[str]]:
     try:
         if group_spec is None:
             group_ids, group_names = _resolve_group_binding(token)
@@ -676,15 +678,20 @@ def verify_sub2api_connection() -> bool:
         return False
 
 
-def sync_to_sub2api():
+def _load_pool_targets(target_emails: set[str] | None = None) -> tuple[dict[str, dict], set[str]]:
     from autoteam.accounts import STATUS_ACTIVE, load_accounts
 
     accounts = load_accounts()
     local_emails = {str(acc.get("email") or "").lower() for acc in accounts if acc.get("email")}
     active_targets = {}
+    target_emails = {str(email or "").strip().lower() for email in target_emails or set()}
+    target_emails.discard("")
 
     for acc in accounts:
-        if acc.get("status") != STATUS_ACTIVE or not acc.get("auth_file"):
+        if acc.get("status") != STATUS_ACTIVE or acc.get("sync_disabled") or not acc.get("auth_file"):
+            continue
+        account_email = str(acc.get("email") or "").strip().lower()
+        if target_emails and account_email not in target_emails:
             continue
         auth_path = Path(acc["auth_file"])
         if not auth_path.exists():
@@ -706,6 +713,12 @@ def sync_to_sub2api():
             "auth_data": auth_data,
             "quota_info": acc.get("last_quota"),
         }
+
+    return active_targets, local_emails
+
+
+def _sync_pool_targets(active_targets: dict[str, dict], local_emails: set[str], *, delete_missing: bool) -> dict:
+    from autoteam.accounts import update_account
 
     token = _login()
     group_ids, group_names, warnings = _resolve_group_binding_for_sync(token)
@@ -754,6 +767,7 @@ def sync_to_sub2api():
                 group_ids=_merge_group_ids(existing, group_ids),
             )
             logger.info("[Sub2API] 更新: %s", email)
+            update_account(email, sub2api_synced_at=time.time())
             updated += 1
             continue
 
@@ -766,13 +780,15 @@ def sync_to_sub2api():
             group_ids=group_ids,
         )
         logger.info("[Sub2API] 创建: %s", email)
+        update_account(email, sub2api_synced_at=time.time())
         created += 1
 
-    for email, account in existing_by_email.items():
-        if email in local_emails and email not in active_targets:
-            _delete_account(token, account, label="删除非 active 账号")
-            logger.info("[Sub2API] 删除非 active 账号: %s", email)
-            deleted += 1
+    if delete_missing:
+        for email, account in existing_by_email.items():
+            if email in local_emails and email not in active_targets:
+                _delete_account(token, account, label="删除非 active 账号")
+                logger.info("[Sub2API] 删除非 active 账号: %s", email)
+                deleted += 1
 
     final_accounts = _list_openai_oauth_accounts(token)
     final_managed = [item for item in final_accounts if _is_managed_account(item, kind=_KIND_POOL)]
@@ -793,6 +809,35 @@ def sync_to_sub2api():
         "existing_email_matches": unmanaged_matches,
         "warnings": warnings,
     }
+
+
+def sync_to_sub2api():
+    active_targets, local_emails = _load_pool_targets()
+    return _sync_pool_targets(active_targets, local_emails, delete_missing=True)
+
+
+def sync_account_to_sub2api(email: str):
+    target_email = str(email or "").strip().lower()
+    if not target_email:
+        raise ValueError("邮箱不能为空")
+
+    active_targets, local_emails = _load_pool_targets({target_email})
+    if target_email not in active_targets:
+        warning = f"{target_email} 不是可同步的 active auth 账号"
+        logger.warning("[Sub2API] %s", warning)
+        return {
+            "created": 0,
+            "updated": 0,
+            "deleted": 0,
+            "remote_duplicates_deleted": 0,
+            "existing_email_matches": 0,
+            "warnings": [warning],
+            "skipped": 1,
+        }
+
+    result = _sync_pool_targets(active_targets, local_emails, delete_missing=False)
+    result["email"] = target_email
+    return result
 
 
 def sync_main_codex_to_sub2api(filepath):

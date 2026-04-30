@@ -30,12 +30,52 @@ async function request(method, path, body = null) {
     throw err
   }
   if (!resp.ok) {
-    const msg = data?.message || data?.detail?.message || data?.detail || `HTTP ${resp.status}`
+    const msg = formatApiErrorMessage(data, resp.status)
     const err = new Error(msg)
     err.status = resp.status
     throw err
   }
   return data
+}
+
+function formatValidationItem(item) {
+  if (!item) return ''
+  if (typeof item === 'string') return item
+  if (typeof item !== 'object') return String(item)
+  const msg = item.msg || item.message || ''
+  const loc = Array.isArray(item.loc) ? item.loc.join('.') : item.loc
+  if (msg && loc) return `${loc}: ${msg}`
+  if (msg) return msg
+  return JSON.stringify(item)
+}
+
+function formatApiErrorMessage(data, status) {
+  if (!data) return `HTTP ${status}`
+  if (typeof data === 'string') return data
+  if (typeof data !== 'object') return String(data)
+
+  if (typeof data.message === 'string' && data.message.trim()) {
+    return data.message
+  }
+
+  const detail = data.detail
+  if (typeof detail === 'string' && detail.trim()) {
+    return detail
+  }
+  if (Array.isArray(detail)) {
+    const parts = detail.map(formatValidationItem).filter(Boolean)
+    if (parts.length) {
+      return parts.join('；')
+    }
+  }
+  if (detail && typeof detail === 'object') {
+    const objectMessage = formatValidationItem(detail)
+    if (objectMessage) {
+      return objectMessage
+    }
+  }
+
+  return `HTTP ${status}`
 }
 
 export const api = {
@@ -48,7 +88,7 @@ export const api = {
   saveRuntimeConfigSource: (payload) => request('PUT', '/config/source', payload),
   getMoEmailDomains: () => request('GET', '/mail/mo-email/domains'),
 
-  getStatus: () => request('GET', '/status'),
+  getStatus: ({ realtimeQuota = false } = {}) => request('GET', `/status?realtime_quota=${realtimeQuota ? 'true' : 'false'}`),
   getAdminStatus: () => request('GET', '/admin/status'),
   getMainCodexStatus: () => request('GET', '/main-codex/status'),
   getManualAccountStatus: () => request('GET', '/manual-account/status'),
@@ -59,6 +99,7 @@ export const api = {
   loginAccount: (email) => request('POST', '/accounts/login', { email }),
   getCodexAuth: (email) => request('GET', `/accounts/${encodeURIComponent(email)}/codex-auth`),
   kickAccount: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/kick`),
+  sellAccount: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/sell`),
   getCpaFiles: () => request('GET', '/cpa/files'),
   startAccountCpaAuth: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/cpa-auth`),
 
@@ -87,15 +128,22 @@ export const api = {
   postSyncMainCodex: () => request('POST', '/sync/main-codex'),
   postSyncSavedMainCodex: () => request('POST', '/sync/main-codex/saved'),
 
-  startRotate: (target = null) => request('POST', '/tasks/rotate', target == null ? {} : { target }),
+  startRotate: (target = null, parallelWorkers = null) => request('POST', '/tasks/rotate', {
+    ...(target == null ? {} : { target }),
+    ...(parallelWorkers == null ? {} : { parallel_workers: parallelWorkers }),
+  }),
   startCheck: () => request('POST', '/tasks/check'),
   startAdd: () => request('POST', '/tasks/add'),
-  startFill: (target = null) => request('POST', '/tasks/fill', target == null ? {} : { target }),
+  startFill: (target = null, parallelWorkers = null) => request('POST', '/tasks/fill', {
+    ...(target == null ? {} : { target }),
+    ...(parallelWorkers == null ? {} : { parallel_workers: parallelWorkers }),
+  }),
   startCleanup: (maxSeats = null) => request('POST', '/tasks/cleanup', { max_seats: maxSeats }),
-  startCpaBatch: (joinMode = 'direct', target = null, batchSize = null) => request('POST', '/tasks/cpa-batch', {
+  startCpaBatch: (joinMode = 'direct', target = null, batchSize = null, parallelWorkers = null) => request('POST', '/tasks/cpa-batch', {
     join_mode: joinMode,
     ...(target == null ? {} : { target }),
     ...(batchSize == null ? {} : { batch_size: batchSize }),
+    ...(parallelWorkers == null ? {} : { parallel_workers: parallelWorkers }),
   }),
   getCpaBatchRuns: () => request('GET', '/cpa-batch/runs'),
   getCpaBatchRun: (runId) => request('GET', `/cpa-batch/runs/${encodeURIComponent(runId)}`),
@@ -109,7 +157,7 @@ export const api = {
   getAutoCheckConfig: () => request('GET', '/config/auto-check'),
   setAutoCheckConfig: (cfg) => request('PUT', '/config/auto-check', cfg),
 
-  getTeamMembers: () => request('GET', '/team/members'),
+  getTeamMembers: ({ refresh = false, allowBrowser = false } = {}) => request('GET', `/team/members?refresh=${refresh ? 'true' : 'false'}&allow_browser=${allowBrowser ? 'true' : 'false'}`),
   removeTeamMember: (payload) => request('POST', '/team/members/remove', payload),
   getLogs: (limit = 100, since = 0) => request('GET', `/logs?limit=${limit}&since=${since}`),
 }

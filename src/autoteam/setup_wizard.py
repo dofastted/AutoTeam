@@ -48,12 +48,14 @@ REQUIRED_CONFIGS = [
     ("SUB2API_EMAIL", "Sub2API 管理员邮箱", "", True),
     ("SUB2API_PASSWORD", "Sub2API 管理员密码", "", True),
     ("SUB2API_GROUP", "Sub2API 分组（名称或 ID，可选）", "", True),
-    ("PLAYWRIGHT_HEADLESS", "Playwright 无头模式（true/false）", "true", True),
+    ("PLAYWRIGHT_BROWSER_MODE", "浏览器显示方式（hidden/visible/embedded）", "hidden", True),
+    ("PLAYWRIGHT_HEADLESS", "Playwright 无头模式（兼容旧配置 true/false）", "true", True),
     ("PLAYWRIGHT_PROXY_URL", "Playwright 浏览器代理 URL（可选，如 socks5://host:port）", "", True),
     ("PLAYWRIGHT_PROXY_BYPASS", "Playwright 代理绕过列表（可选，如 localhost,127.0.0.1）", "", True),
     ("API_KEY", "API 鉴权密钥（回车自动生成）", "", False),
     ("TEAM_TARGET_SEATS", "Team 总人数目标", "999", True),
     ("FILL_BATCH_SIZE", "补满成员单次最多新增数", "10", True),
+    ("BROWSER_PARALLEL_WORKERS", "浏览器并行窗口数（1-3）", "1", True),
 ]
 
 

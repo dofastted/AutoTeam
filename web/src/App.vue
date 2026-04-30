@@ -94,23 +94,50 @@
 
     <!-- 侧边栏 -->
     <Sidebar :active="currentPage" :loading="loading"
-      @navigate="currentPage = $event" @refresh="refresh" />
-
-    <div v-if="authRequired" class="fixed right-4 top-4 z-50 md:right-6">
-      <button
-        class="btn-danger min-h-11 gap-2 rounded-xl px-4 shadow-[0_18px_40px_-18px_rgba(244,63,94,0.9)]"
-        title="登出当前面板"
-        @click="doLogout"
-      >
-        <span aria-hidden="true" class="text-base">🚪</span>
-        <span>登出</span>
-      </button>
-    </div>
+      @navigate="navigateTo" @refresh="refresh({ forceStatus: currentPage === 'dashboard' })" />
 
     <!-- 主内容区 -->
     <div class="relative min-w-0 flex-1 overflow-y-auto pb-20 md:pb-8">
       <div class="mx-auto w-full max-w-[1500px] px-4 py-4 md:px-8 md:py-8">
-      <!-- 任务执行中提示 -->
+        <header class="mb-5 rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-3 backdrop-blur md:px-5">
+          <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div class="text-xs uppercase text-slate-500">AutoTeam</div>
+              <h1 class="mt-1 text-xl font-semibold text-white">{{ pageTitle }}</h1>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <button
+                class="btn-danger min-h-10 gap-2 rounded-xl px-4"
+                :disabled="stopAllLoading"
+                title="强制停止当前全部工作"
+                @click="forceStopAll"
+              >
+                <span aria-hidden="true" class="h-2.5 w-2.5 rounded-sm bg-current"></span>
+                <span>{{ stopAllLoading ? '停止中...' : '停止全部工作' }}</span>
+              </button>
+              <button
+                v-if="authRequired"
+                class="btn-secondary min-h-10 gap-2 rounded-xl px-4"
+                title="登出当前面板"
+                @click="doLogout"
+              >
+                <span aria-hidden="true" class="text-base">🚪</span>
+                <span>登出</span>
+              </button>
+            </div>
+          </div>
+          <div
+            v-if="stopAllNotice || stopAllError"
+            class="mt-3 rounded-xl border px-3 py-2 text-xs"
+            :class="stopAllError
+              ? 'border-rose-500/30 bg-rose-950/50 text-rose-100'
+              : 'border-emerald-500/30 bg-emerald-950/50 text-emerald-100'"
+          >
+            {{ stopAllError || stopAllNotice }}
+          </div>
+        </header>
+
+        <!-- 任务执行中提示 -->
         <div
           v-if="busyTask"
           class="mb-5 flex items-center gap-3 rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-200 backdrop-blur"
@@ -159,43 +186,23 @@
         <LogViewer v-else-if="currentPage === 'logs'" />
       </div>
     </div>
-
-    <div class="fixed bottom-4 left-4 z-50 flex max-w-[calc(100vw-2rem)] flex-col items-start gap-2">
-      <div
-        v-if="stopAllNotice || stopAllError"
-        class="max-w-xs rounded-xl border px-3 py-2 text-xs shadow-lg backdrop-blur"
-        :class="stopAllError
-          ? 'border-rose-500/30 bg-rose-950/80 text-rose-100'
-          : 'border-emerald-500/30 bg-emerald-950/80 text-emerald-100'"
-      >
-        {{ stopAllError || stopAllNotice }}
-      </div>
-      <button
-        class="btn-danger min-h-11 gap-2 rounded-xl px-4 shadow-[0_18px_40px_-18px_rgba(244,63,94,0.9)]"
-        :disabled="stopAllLoading"
-        title="强制停止当前全部工作"
-        @click="forceStopAll"
-      >
-        <span aria-hidden="true" class="h-2.5 w-2.5 rounded-sm bg-current"></span>
-        <span>{{ stopAllLoading ? '停止中...' : '停止全部工作' }}</span>
-      </button>
-    </div>
   </div>
 </template>
 
 <script setup>
-import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { computed, defineAsyncComponent, ref, onMounted, onUnmounted, watch } from 'vue'
 import { api, setApiKey, clearApiKey } from './api.js'
-import SetupPage from './components/SetupPage.vue'
 import Sidebar from './components/Sidebar.vue'
-import Dashboard from './components/Dashboard.vue'
-import ConfigPage from './components/ConfigPage.vue'
-import TeamMembers from './components/TeamMembers.vue'
-import PoolPage from './components/PoolPage.vue'
-import SyncPage from './components/SyncPage.vue'
-import TaskHistoryPage from './components/TaskHistoryPage.vue'
-import LogViewer from './components/LogViewer.vue'
-import OAuthPage from './components/OAuthPage.vue'
+
+const SetupPage = defineAsyncComponent(() => import('./components/SetupPage.vue'))
+const Dashboard = defineAsyncComponent(() => import('./components/Dashboard.vue'))
+const ConfigPage = defineAsyncComponent(() => import('./components/ConfigPage.vue'))
+const TeamMembers = defineAsyncComponent(() => import('./components/TeamMembers.vue'))
+const PoolPage = defineAsyncComponent(() => import('./components/PoolPage.vue'))
+const SyncPage = defineAsyncComponent(() => import('./components/SyncPage.vue'))
+const TaskHistoryPage = defineAsyncComponent(() => import('./components/TaskHistoryPage.vue'))
+const LogViewer = defineAsyncComponent(() => import('./components/LogViewer.vue'))
+const OAuthPage = defineAsyncComponent(() => import('./components/OAuthPage.vue'))
 
 const needSetup = ref(false)
 const authenticated = ref(false)
@@ -215,6 +222,19 @@ const runningTask = ref(null)
 const stopAllLoading = ref(false)
 const stopAllNotice = ref('')
 const stopAllError = ref('')
+
+const pageTitles = {
+  dashboard: '仪表盘',
+  config: '配置面板',
+  team: 'Team 成员',
+  pool: '账号池操作',
+  sync: '同步中心',
+  oauth: 'OAuth 登录',
+  tasks: '任务历史',
+  logs: '日志',
+}
+
+const pageTitle = computed(() => pageTitles[currentPage.value] || 'AutoTeam')
 const busyTask = computed(() => {
   if (adminStatus.value?.login_in_progress) {
     return { command: 'admin-login' }
@@ -226,6 +246,7 @@ const busyTask = computed(() => {
 })
 
 let pollTimer = null
+let refreshSeq = 0
 
 async function checkAuth() {
   try {
@@ -256,7 +277,7 @@ async function doLogin() {
       authError.value = 'API Key 无效'
     } else {
       inputKey.value = ''
-      refresh()
+      refresh({ forceStatus: true })
       startPolling(600000)
     }
   } catch (e) {
@@ -273,17 +294,33 @@ function doLogout() {
   stopPolling()
 }
 
-async function refresh() {
+function needsStatusRefresh({ forceStatus = false } = {}) {
+  return forceStatus || currentPage.value === 'dashboard'
+}
+
+async function refresh(options = {}) {
+  const seq = ++refreshSeq
   loading.value = true
   try {
-    const [s, t, admin, codex, manualAccount] = await Promise.all([
-      api.getStatus(),
+    const requests = [
       api.getTasks(),
       api.getAdminStatus(),
       api.getMainCodexStatus(),
       api.getManualAccountStatus(),
-    ])
-    status.value = s
+    ]
+    if (needsStatusRefresh(options)) {
+      requests.unshift(api.getStatus({ realtimeQuota: !!options.realtimeQuota }))
+    }
+
+    const results = await Promise.all(requests)
+    if (seq !== refreshSeq) return
+
+    let offset = 0
+    if (needsStatusRefresh(options)) {
+      status.value = results[0]
+      offset = 1
+    }
+    const [t, admin, codex, manualAccount] = results.slice(offset)
     tasks.value = t
     adminStatus.value = admin
     codexStatus.value = codex
@@ -296,18 +333,25 @@ async function refresh() {
     }
     console.error('刷新失败:', e)
   } finally {
-    loading.value = false
+    if (seq === refreshSeq) {
+      loading.value = false
+    }
   }
 }
 
 function onTaskStarted() {
   startPolling(10000)
-  refresh()
+  refresh({ forceStatus: currentPage.value === 'dashboard' })
 }
 
 function onAdminProgress() {
   startPolling(10000)
-  refresh()
+  refresh({ forceStatus: currentPage.value === 'dashboard' })
+}
+
+function navigateTo(page) {
+  if (currentPage.value === page) return
+  currentPage.value = page
 }
 
 async function forceStopAll() {
@@ -322,7 +366,7 @@ async function forceStopAll() {
     stopAllNotice.value = taskCount || flowCount
       ? `已请求停止 ${taskCount} 个任务、${flowCount} 个流程`
       : '当前没有需要停止的工作'
-    await refresh()
+    await refresh({ forceStatus: currentPage.value === 'dashboard' })
     startPolling(10000)
   } catch (e) {
     stopAllError.value = e.message || '停止失败'
@@ -361,7 +405,7 @@ function onSetupDone() {
   needSetup.value = false
   checkAuth().then(ok => {
     if (ok) {
-      refresh()
+      refresh({ forceStatus: true })
       startPolling(600000)
     }
   })
@@ -375,8 +419,14 @@ onMounted(async () => {
   }
   const ok = await checkAuth()
   if (ok) {
-    refresh()
+    refresh({ forceStatus: true })
     startPolling(600000)
+  }
+})
+
+watch(currentPage, () => {
+  if (authenticated.value) {
+    refresh({ forceStatus: currentPage.value === 'dashboard' })
   }
 })
 

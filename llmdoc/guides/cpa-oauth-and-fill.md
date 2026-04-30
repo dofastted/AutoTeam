@@ -58,8 +58,9 @@
 - session 凭证或认证文件解析出的 `plan_type` 是 `team`。
 - `check_codex_quota` 返回 `ok`。
 - `upload_to_cpa` 返回成功。
+- 若 Sub2API 已启用，CPA 上传成功后会尝试把该账号单独同步到 Sub2API；Sub2API 失败会写入警告事件，不回滚已完成的 CPA 上传。
 
-注册阶段会对当前邮箱账号最多尝试 3 次。CPA 认证、额度检查或上传阶段失败时，会对同一个已知邮箱继续重试，累计失败 3 次后才把该账号记录为 `failed`。若已完成账号的成功率接近跌破 95%，批量任务会写入 `pause_requested` 并暂停，避免继续消耗新邮箱。任务可通过 `/api/cpa-batch/runs/{run_id}/resume` 按原 run_id 继续执行。
+注册阶段会对当前邮箱账号最多尝试 3 次。CPA 认证、额度检查或上传阶段失败时，会对同一个已知邮箱继续重试，累计失败 3 次后才把该账号记录为 `failed`。若连续 2 个账号都在注册阶段失败，批量任务会暂停，避免继续消耗新邮箱。若已完成账号的成功率接近跌破 95%，批量任务也会写入 `pause_requested` 并暂停。任务可通过 `/api/cpa-batch/runs/{run_id}/resume` 按原 run_id 继续执行。
 
 暂停规则：
 
@@ -67,6 +68,69 @@
 - 当前浏览器阶段不强制中断；已提交的 CPA worker 会完成当前账号检查和上传。
 - 阶段结束后不再创建下一个账号，运行记录标记为 `paused`。
 - 服务启动时会把上次遗留的 `running` 批量记录标记为失败，并把仍在运行的账号记录写成严重错误。
+
+## 历史账号 CPA / Sub2API 补传
+
+历史账号补传和批量 CPA JSON 不是同一个任务。
+
+批量 CPA JSON 用来新做账号：创建邮箱、注册、保存 session 凭证、检查额度、上传 CPA。
+
+历史账号补传只处理本地已有 `auth_file` 的账号：
+
+- 不打开浏览器。
+- 不新建邮箱。
+- 不注册新账号。
+- 不删除 CPA 或 Sub2API 远端账号。
+- 按邮箱和文件名匹配远端。
+- 远端缺失时增量上传。
+
+补传范围建议：
+
+- `active` 账号必须包含。
+- 可复用 `standby` 账号也应包含，因为它们已有 auth 文件，恢复时可以直接使用。
+- `pending` 账号不应补传。
+- 没有 `auth_file` 或本地文件不存在的账号只记录错误，不进入上传。
+
+补传完成后：
+
+- CPA 上传成功可写 `cpa_uploaded_at`。
+- Sub2API 创建或更新成功可写 `sub2api_synced_at`。
+- 写入账号字段时必须避免和正在运行的批量注册任务同时覆盖 `accounts.json`。
+
+若前台页面只需要“开始补传”，后端应立即返回任务 ID，后续由任务历史或账号池页面显示进度。
+
+## 重试开关建议
+
+自动重试应分类型配置，不要只给一个简单布尔值。
+
+推荐默认：
+
+- `SYNC_AUTO_RETRY=transient`
+- `SYNC_RETRY_MAX_ATTEMPTS=3`
+- `SYNC_RETRY_BACKOFF_SECONDS=5,30,120`
+- `SYNC_FAILURE_POLICY=pause`
+- `SYNC_PAUSE_ON_SUCCESS_RATE_BELOW=95`
+
+含义：
+
+- `off`: 不自动重试，失败后暂停。
+- `transient`: 只重试网络错误、HTTP 429、HTTP 5xx、远端短暂不可用。
+- `always`: 所有错误都按次数重试，不建议默认启用。
+
+不应自动重试的错误：
+
+- 本地 `auth_file` 缺失。
+- auth JSON 无法解析。
+- 缺少 CPA / Sub2API 配置。
+- OAuth token 明确无效。
+- OpenAI 注册页稳定返回 `https://chatgpt.com/api/auth/error`。
+
+可以自动重试的错误：
+
+- 请求超时。
+- HTTP 429。
+- HTTP 502 / 503 / 504。
+- CPA / Sub2API 短暂连接失败。
 
 ## 补满成员
 
@@ -106,4 +170,5 @@
 - 不要把 CPA 凭证检查做成直接删除远端文件。
 - 不要让补满成员默认一次性冲到 `TEAM_TARGET_SEATS`。
 - 批量 CPA JSON 是“新做账号”，不要复用已有 CPA 文件来抵扣 100 个目标。
+- 历史账号补传应走增量上传任务，不要复用会删除非 active CPA 文件的同步入口。
 - 若新增同步目标，先改 `src/autoteam/sync_targets.py`，再改 API 配置校验和前端配置页。

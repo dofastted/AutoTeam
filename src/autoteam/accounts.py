@@ -18,6 +18,7 @@ STATUS_ACTIVE = "active"  # 在 team 中，额度可用
 STATUS_EXHAUSTED = "exhausted"  # 在 team 中，额度用完
 STATUS_STANDBY = "standby"  # 已移出 team，等待额度恢复
 STATUS_PENDING = "pending"  # 已邀请，等待注册完成
+STATUS_SOLD = "sold"  # 已售出，保留 Team 席位但停止同步和轮转
 
 
 def _normalized_email(value):
@@ -104,6 +105,17 @@ def update_account(email, **kwargs):
             acc.update(kwargs)
             save_accounts(accounts)
         return acc
+
+
+def mark_account_sold(email, *, remote_cleanup=None):
+    """标记账号已售出，保留本地记录和 Team 席位。"""
+    return update_account(
+        email,
+        status=STATUS_SOLD,
+        sync_disabled=True,
+        sold_at=time.time(),
+        sale_remote_cleanup=remote_cleanup or {},
+    )
 
 
 def get_active_accounts():

@@ -25,6 +25,29 @@ def test_add_and_update_account_persists_data(tmp_path, monkeypatch):
     assert accounts.load_accounts()[0]["auth_file"] == "auth.json"
 
 
+def test_mark_account_sold_keeps_record_and_disables_sync(tmp_path, monkeypatch):
+    accounts_file = tmp_path / "accounts.json"
+    monkeypatch.setattr(accounts, "ACCOUNTS_FILE", accounts_file)
+
+    accounts.save_accounts(
+        [
+            {
+                "email": "sold@example.com",
+                "status": accounts.STATUS_ACTIVE,
+                "auth_file": "auth.json",
+            }
+        ]
+    )
+
+    updated = accounts.mark_account_sold("sold@example.com", remote_cleanup={"cpa": {"count": 1}})
+
+    assert updated["status"] == accounts.STATUS_SOLD
+    assert updated["sync_disabled"] is True
+    assert updated["sold_at"] > 0
+    assert updated["sale_remote_cleanup"] == {"cpa": {"count": 1}}
+    assert accounts.load_accounts()[0]["auth_file"] == "auth.json"
+
+
 def test_get_active_accounts_excludes_main_account(tmp_path, monkeypatch):
     accounts_file = tmp_path / "accounts.json"
     monkeypatch.setattr(accounts, "ACCOUNTS_FILE", accounts_file)

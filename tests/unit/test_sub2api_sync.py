@@ -234,8 +234,12 @@ def test_sync_to_sub2api_updates_existing_same_email_oauth_account(tmp_path, mon
     created = []
     updated = []
     deleted = []
+    local_updates = []
     monkeypatch.setattr(sub2api_sync, "_create_account", lambda *args, **kwargs: created.append(kwargs))
     monkeypatch.setattr(sub2api_sync, "_delete_account", lambda *args, **kwargs: deleted.append(args[1]))
+    monkeypatch.setattr(
+        "autoteam.accounts.update_account", lambda email, **kwargs: local_updates.append((email, kwargs))
+    )
 
     def fake_update(_token, account, **kwargs):
         updated.append({"account": account, **kwargs})
@@ -258,3 +262,115 @@ def test_sync_to_sub2api_updates_existing_same_email_oauth_account(tmp_path, mon
     assert updated[0]["extra"]["autoteam_email"] == "user@example.com"
     assert updated[0]["extra"]["privacy_mode"] == "training_off"
     assert updated[0]["group_ids"] == [3]
+    assert len(local_updates) == 1
+    assert local_updates[0][0] == "user@example.com"
+    assert isinstance(local_updates[0][1]["sub2api_synced_at"], float)
+
+
+def test_sync_to_sub2api_skips_sold_accounts(tmp_path, monkeypatch):
+    auth_file = tmp_path / "codex-sold@example.com-team.json"
+    auth_file.write_text(json.dumps({"access_token": "new", "email": "sold@example.com"}), encoding="utf-8")
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "sold@example.com",
+                "status": "sold",
+                "sync_disabled": True,
+                "auth_file": str(auth_file),
+            }
+        ],
+    )
+    monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
+    monkeypatch.setattr(sub2api_sync, "_resolve_group_binding", lambda token: ([], []))
+    monkeypatch.setattr(sub2api_sync, "_list_openai_oauth_accounts", lambda token: [])
+    created = []
+    monkeypatch.setattr(sub2api_sync, "_create_account", lambda *args, **kwargs: created.append(kwargs))
+
+    result = sub2api_sync.sync_to_sub2api()
+
+    assert created == []
+    assert result["created"] == 0
+    assert result["updated"] == 0
+
+
+def test_sync_account_to_sub2api_does_not_delete_other_managed_accounts(tmp_path, monkeypatch):
+    auth_file = tmp_path / "codex-user@example.com-team.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "access_token": "new-access",
+                "id_token": _jwt({"email": "user@example.com"}),
+                "expired": 2_000_000_000,
+                "email": "user@example.com",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "user@example.com",
+                "status": "active",
+                "auth_file": str(auth_file),
+            },
+            {
+                "email": "old@example.com",
+                "status": "standby",
+                "auth_file": str(auth_file),
+            },
+        ],
+    )
+    monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
+    monkeypatch.setattr(sub2api_sync, "_resolve_group_binding", lambda token: ([], []))
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_list_openai_oauth_accounts",
+        lambda token: [
+            {
+                "id": 42,
+                "name": "Existing User",
+                "credentials": {"email": "user@example.com", "access_token": "old-access"},
+                "extra": {},
+                "group_ids": [],
+            },
+            {
+                "id": 43,
+                "name": "old@example.com",
+                "credentials": {"email": "old@example.com"},
+                "extra": {
+                    "autoteam_source": "autoteam",
+                    "autoteam_kind": "pool",
+                    "autoteam_email": "old@example.com",
+                },
+                "group_ids": [],
+            },
+        ],
+    )
+    created = []
+    updated = []
+    deleted = []
+    local_updates = []
+    monkeypatch.setattr(sub2api_sync, "_create_account", lambda *args, **kwargs: created.append(kwargs))
+    monkeypatch.setattr(sub2api_sync, "_delete_account", lambda *args, **kwargs: deleted.append(args[1]))
+    monkeypatch.setattr(
+        "autoteam.accounts.update_account", lambda email, **kwargs: local_updates.append((email, kwargs))
+    )
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_update_account",
+        lambda _token, account, **kwargs: updated.append({"account": account, **kwargs}) or {"id": account["id"]},
+    )
+
+    result = sub2api_sync.sync_account_to_sub2api("user@example.com")
+
+    assert result["created"] == 0
+    assert result["updated"] == 1
+    assert result["deleted"] == 0
+    assert result["email"] == "user@example.com"
+    assert created == []
+    assert deleted == []
+    assert updated[0]["account"]["id"] == 42
+    assert len(local_updates) == 1
+    assert local_updates[0][0] == "user@example.com"

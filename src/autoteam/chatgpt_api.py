@@ -1084,6 +1084,9 @@ class ChatGPTTeamAPI:
             session_token=session_token,
             account_id=self.account_id,
             workspace_name=self.workspace_name,
+            access_token=self.access_token or "",
+            access_token_updated_at=time.time() if self.access_token else None,
+            oai_device_id=self.oai_device_id or "",
         )
         if self.login_password:
             payload["password"] = self.login_password
@@ -1166,6 +1169,9 @@ class ChatGPTTeamAPI:
             session_token=session_token,
             account_id=self.account_id,
             workspace_name=self.workspace_name,
+            access_token=self.access_token or "",
+            access_token_updated_at=time.time() if self.access_token else None,
+            oai_device_id=self.oai_device_id or "",
         )
         logger.info("[ChatGPT] 管理员 session_token 已保存")
 
@@ -1201,6 +1207,14 @@ class ChatGPTTeamAPI:
         self._wait_for_cloudflare()
         self._inject_session(session_token)
         self._fetch_access_token()
+        if self.access_token:
+            update_admin_state(
+                account_id=self.account_id,
+                workspace_name=self.workspace_name,
+                access_token=self.access_token,
+                access_token_updated_at=time.time(),
+                oai_device_id=self.oai_device_id or "",
+            )
         self._auto_detect_workspace()
 
     def _auto_detect_workspace(self):

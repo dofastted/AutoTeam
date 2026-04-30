@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+import threading
 import time
 from urllib.parse import quote
 
@@ -26,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 15
 _PAGE_LIMIT = 100
+_CREATE_EMAIL_LOCK = threading.Lock()
+_RESERVED_EMAIL_NAMES: set[str] = set()
 
 _VERIFICATION_CODE_PATTERNS = (
     r"(?:temporary\s+(?:openai|chatgpt)\s+login\s+code(?:\s+is)?|verification\s+code(?:\s+is)?|login\s+code(?:\s+is)?|code(?:\s+is)?|验证码(?:为|是)?)\D{0,24}(\d{6})",
@@ -228,21 +231,27 @@ class MoEmailClient:
             match = pattern.match(str(email or "").strip())
             if match:
                 max_index = max(max_index, int(match.group(1)))
+        for reserved in _RESERVED_EMAIL_NAMES:
+            match = pattern.match(reserved)
+            if match:
+                max_index = max(max_index, int(match.group(1)))
 
         return f"{base}-{max_index + 1}"
 
     def create_temp_email(self, prefix=None):
-        name = str(prefix or "").strip() or self._next_prefix()
-        payload = self._request(
-            "POST",
-            "/api/emails/generate",
-            label="创建邮箱",
-            json={
-                "name": name,
-                "expiryTime": self.expiry_time,
-                "domain": self.domain,
-            },
-        )
+        with _CREATE_EMAIL_LOCK:
+            name = str(prefix or "").strip() or self._next_prefix()
+            _RESERVED_EMAIL_NAMES.add(f"{name}@{self.domain}".lower())
+            payload = self._request(
+                "POST",
+                "/api/emails/generate",
+                label="创建邮箱",
+                json={
+                    "name": name,
+                    "expiryTime": self.expiry_time,
+                    "domain": self.domain,
+                },
+            )
 
         account_payload = self._unwrap_item(payload, "email")
         if not account_payload:

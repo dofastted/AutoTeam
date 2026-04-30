@@ -1,6 +1,6 @@
 import pytest
 
-from autoteam.browser_runtime import BrowserLeaseError, acquire_browser_lease
+from autoteam.browser_runtime import BrowserLeaseError, acquire_browser_lease, browser_parallel_limit
 
 
 class FakeBrowser:
@@ -58,3 +58,24 @@ def test_browser_lease_releases_after_exception():
 
     with acquire_browser_lease("next", sync_playwright_factory=lambda: FakeSyncPlaywright(FakePlaywright())):
         pass
+
+
+def test_browser_parallel_limit_allows_configured_slots():
+    leases = []
+    with browser_parallel_limit(3):
+        for index in range(3):
+            lease = acquire_browser_lease(
+                f"worker-{index + 1}",
+                sync_playwright_factory=lambda: FakeSyncPlaywright(FakePlaywright()),
+            )
+            leases.append(lease)
+            lease.__enter__()
+
+        with pytest.raises(BrowserLeaseError):
+            with acquire_browser_lease(
+                "worker-4", sync_playwright_factory=lambda: FakeSyncPlaywright(FakePlaywright())
+            ):
+                pass
+
+    for lease in reversed(leases):
+        lease.__exit__(None, None, None)

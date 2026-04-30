@@ -8,6 +8,7 @@
       mode="pool"
       :running-task="runningTask"
       :admin-status="adminStatus"
+      :parallel-workers="parallelWorkers"
       @task-started="$emit('task-started')"
       @refresh="$emit('refresh')"
     />
@@ -21,6 +22,15 @@
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-3">
+          <select
+            v-model.number="parallelWorkers"
+            :disabled="batchDisabled"
+            class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500 disabled:opacity-50"
+          >
+            <option :value="1">1 个窗口</option>
+            <option :value="2">2 个窗口</option>
+            <option :value="3">3 个窗口</option>
+          </select>
           <select
             v-model="joinMode"
             :disabled="batchDisabled"
@@ -116,6 +126,39 @@
         <div class="h-full bg-cyan-500 transition-all" :style="{ width: runProgressWidth }"></div>
       </div>
 
+      <div v-if="activeRun && workerStats.length" class="mt-4 rounded-lg border border-gray-800 bg-gray-950/40 overflow-hidden">
+        <div class="px-3 py-2 bg-gray-950/60 border-b border-gray-800 flex items-center justify-between">
+          <div class="text-sm font-medium text-white">窗口实时状态</div>
+          <div class="text-xs text-gray-500">按窗口统计成功率与当前状态</div>
+        </div>
+        <div class="p-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          <div
+            v-for="worker in workerStats"
+            :key="worker.workerIndex"
+            class="rounded-lg border border-gray-800 bg-gray-900/70 px-3 py-3"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <div class="text-sm font-medium text-white">窗口 {{ worker.workerIndex }}</div>
+              <span
+                class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium border"
+                :class="workerStatusClass(worker.status)"
+              >
+                {{ workerStatusLabel(worker.status) }}
+              </span>
+            </div>
+            <div class="mt-2 text-xs text-gray-400">
+              成功 {{ worker.success }} / {{ worker.attempted }} · 失败 {{ worker.failed }}
+            </div>
+            <div class="mt-1 text-sm text-cyan-300">
+              成功率 {{ formatPercent(worker.successRate) }}%
+            </div>
+            <div class="mt-1 text-xs text-gray-500">
+              当前阶段：{{ stageLabel(worker.stage) }}
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="mt-5 grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
         <div class="rounded-lg border border-gray-800 overflow-hidden">
           <div class="px-3 py-2 bg-gray-950/50 border-b border-gray-800 text-sm font-medium text-white">运行记录</div>
@@ -152,6 +195,7 @@
                 <tr class="text-gray-400 text-left border-b border-gray-800">
                   <th class="px-3 py-3 font-medium">邮箱</th>
                   <th class="px-3 py-3 font-medium">组</th>
+                  <th class="px-3 py-3 font-medium">窗口</th>
                   <th class="px-3 py-3 font-medium">阶段</th>
                   <th class="px-3 py-3 font-medium">状态</th>
                   <th class="px-3 py-3 font-medium">等级</th>
@@ -161,7 +205,7 @@
               </thead>
               <tbody>
                 <tr v-if="visibleAccounts.length === 0">
-                  <td colspan="7" class="px-3 py-8 text-center text-gray-500">暂无账号记录</td>
+                  <td colspan="8" class="px-3 py-8 text-center text-gray-500">暂无账号记录</td>
                 </tr>
                 <tr
                   v-for="acc in visibleAccounts"
@@ -170,6 +214,7 @@
                 >
                   <td class="px-3 py-3 font-mono text-xs text-gray-200">{{ acc.email }}</td>
                   <td class="px-3 py-3 text-gray-400">{{ acc.batch_index || '-' }}</td>
+                  <td class="px-3 py-3 text-gray-400">{{ acc.worker_index || '-' }}</td>
                   <td class="px-3 py-3 text-gray-300">{{ stageLabel(acc.stage) }}</td>
                   <td class="px-3 py-3">
                     <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium border" :class="accountStatusClass(acc.status)">
@@ -213,6 +258,7 @@ const props = defineProps({
 const emit = defineEmits(['task-started', 'refresh'])
 
 const joinMode = ref('direct')
+const parallelWorkers = ref(1)
 const runs = ref([])
 const selectedRunId = ref('')
 const loadingRuns = ref(false)
@@ -234,6 +280,7 @@ const activeRun = computed(() => {
   const preferred = runningRunId || selectedRunId.value
   return runs.value.find(run => run.run_id === preferred) || runs.value[0] || null
 })
+const hasRunningRun = computed(() => runs.value.some(run => run.status === 'running'))
 const canPause = computed(() => activeRun.value?.status === 'running')
 const canResume = computed(() => {
   const run = activeRun.value
@@ -257,6 +304,57 @@ const runProgressWidth = computed(() => {
   const pct = Math.min(100, Math.round(((run.success_count || 0) / target) * 100))
   return `${pct}%`
 })
+const workerStats = computed(() => {
+  const run = activeRun.value
+  if (!run) return []
+
+  const accounts = (run.accounts || []).filter(acc => acc.status !== 'replaced')
+  const workerAccounts = accounts.filter(acc => toWorkerIndex(acc.worker_index) > 0)
+  const knownIndexes = workerAccounts.map(acc => toWorkerIndex(acc.worker_index))
+
+  let workerCount = Number(run.parallel_workers || 0)
+  if (!Number.isFinite(workerCount) || workerCount <= 0) {
+    workerCount = knownIndexes.length ? Math.max(...knownIndexes) : 1
+  }
+  workerCount = Math.max(1, Math.floor(workerCount))
+  if (knownIndexes.length) {
+    workerCount = Math.max(workerCount, Math.max(...knownIndexes))
+  }
+
+  const stats = []
+  for (let workerIndex = 1; workerIndex <= workerCount; workerIndex += 1) {
+    const items = workerAccounts.filter(acc => toWorkerIndex(acc.worker_index) === workerIndex)
+    const attempted = items.length
+    const success = items.filter(acc => acc.status === 'success').length
+    const failed = items.filter(acc => acc.status === 'failed').length
+    const running = items.filter(acc => acc.status === 'running').length
+    const pending = items.filter(acc => acc.status === 'pending').length
+    const latest = items
+      .slice()
+      .sort((a, b) => (b.started_at || 0) - (a.started_at || 0))[0]
+
+    stats.push({
+      workerIndex,
+      attempted,
+      success,
+      failed,
+      running,
+      pending,
+      stage: latest?.stage || '',
+      successRate: attempted > 0 ? (success * 100) / attempted : 0,
+      status: resolveWorkerStatus({
+        runStatus: run.status || '',
+        attempted,
+        success,
+        failed,
+        running,
+        pending,
+      }),
+    })
+  }
+
+  return stats
+})
 const runCards = computed(() => {
   const run = activeRun.value || {}
   const target = run.target || 100
@@ -273,8 +371,15 @@ watch(
   () => props.runningTask,
   () => {
     loadRuns()
+  },
+)
+
+watch(
+  [() => props.runningTask, hasRunningRun],
+  () => {
     manageTimer()
   },
+  { immediate: true },
 )
 
 onMounted(() => {
@@ -291,8 +396,8 @@ function manageTimer() {
     window.clearInterval(refreshTimer)
     refreshTimer = null
   }
-  if (props.runningTask?.command === 'cpa-batch') {
-    refreshTimer = window.setInterval(loadRuns, 5000)
+  if (props.runningTask?.command === 'cpa-batch' || hasRunningRun.value) {
+    refreshTimer = window.setInterval(loadRuns, 3000)
   }
 }
 
@@ -325,7 +430,7 @@ async function startBatch() {
   if (batchDisabled.value || submitting.value) return
   submitting.value = true
   try {
-    const result = await api.startCpaBatch(joinMode.value)
+    const result = await api.startCpaBatch(joinMode.value, null, null, parallelWorkers.value)
     selectedRunId.value = result.params?.run_id || ''
     setMessage(`批量任务已提交: ${result.task_id}`)
     emit('task-started')
@@ -453,14 +558,72 @@ function errorLevelClass(value) {
   }[value] || 'bg-gray-500/10 text-gray-300 border-gray-500/20'
 }
 
+function toWorkerIndex(value) {
+  const num = Number(value)
+  if (!Number.isFinite(num) || num <= 0) return 0
+  return Math.floor(num)
+}
+
+function resolveWorkerStatus({ runStatus, attempted, success, failed, running, pending }) {
+  if (running > 0) return 'running'
+  if (pending > 0) return 'pending'
+  if (attempted === 0) {
+    return runStatus === 'running' ? 'waiting' : 'idle'
+  }
+  if (runStatus === 'paused') return 'paused'
+  if (runStatus === 'failed') return 'failed'
+  if (runStatus === 'partial') return 'partial'
+  if (runStatus === 'completed') {
+    return failed > 0 ? 'partial' : 'completed'
+  }
+  if (success > 0 && failed > 0) return 'partial'
+  if (failed > 0 && success === 0) return 'failed'
+  if (success > 0) return 'completed'
+  return 'idle'
+}
+
+function workerStatusLabel(value) {
+  return {
+    running: '运行中',
+    pending: '等待中',
+    waiting: '待分配',
+    paused: '已暂停',
+    completed: '已完成',
+    failed: '失败',
+    partial: '部分成功',
+    idle: '空闲',
+  }[value] || value || '-'
+}
+
+function workerStatusClass(value) {
+  return {
+    running: 'bg-yellow-500/10 text-yellow-300 border-yellow-500/20',
+    pending: 'bg-gray-500/10 text-gray-300 border-gray-500/20',
+    waiting: 'bg-cyan-500/10 text-cyan-300 border-cyan-500/20',
+    paused: 'bg-amber-500/10 text-amber-300 border-amber-500/20',
+    completed: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20',
+    failed: 'bg-red-500/10 text-red-300 border-red-500/20',
+    partial: 'bg-orange-500/10 text-orange-300 border-orange-500/20',
+    idle: 'bg-gray-500/10 text-gray-300 border-gray-500/20',
+  }[value] || 'bg-gray-500/10 text-gray-300 border-gray-500/20'
+}
+
+function formatPercent(value) {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return '0.0'
+  return num.toFixed(1)
+}
+
 function stageLabel(value) {
   return {
     create_email: '创建邮箱',
     email_created: '邮箱已保存',
     register: '注册',
     register_retry: '注册重试',
+    cpa_retry: 'CPA 重试',
     invite_sent: '已邀请',
     team_joined: '已入席',
+    cpa_queued: '等待 CPA',
     cpa_auth: 'CPA 认证',
     oauth: 'OAuth',
     quota_check: '额度检查',

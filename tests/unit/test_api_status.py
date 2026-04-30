@@ -67,8 +67,88 @@ def test_get_status_normalizes_main_account_status_from_saved_auth(tmp_path, mon
         "standby": 0,
         "exhausted": 0,
         "pending": 0,
+        "sold": 0,
         "total": 1,
     }
+
+
+def test_get_status_can_skip_live_quota_checks(tmp_path, monkeypatch):
+    auth_file = tmp_path / "codex-user.json"
+    auth_file.write_text(json.dumps({"access_token": "token-user"}), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "user@example.com",
+                "status": "active",
+                "auth_file": str(auth_file),
+                "last_quota": {
+                    "primary_pct": 30,
+                    "primary_resets_at": 1710000000,
+                    "weekly_pct": 5,
+                    "weekly_resets_at": 1710600000,
+                },
+            }
+        ],
+    )
+
+    def fail_check_quota(_access_token):
+        raise AssertionError("live quota check should not run")
+
+    monkeypatch.setattr("autoteam.codex_auth.check_codex_quota", fail_check_quota)
+
+    result = api.get_status(realtime_quota=False)
+
+    assert result["quota_cache"] == {}
+    assert result["accounts"][0]["last_quota"]["primary_pct"] == 30
+    assert result["summary"]["active"] == 1
+
+
+def test_post_sell_account_marks_sold_and_deletes_configured_targets(tmp_path, monkeypatch):
+    auth_file = tmp_path / "codex-sold@example.com-team.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    archive_file = tmp_path / "archive" / auth_file.name
+    accounts_data = [
+        {
+            "email": "sold@example.com",
+            "status": "active",
+            "auth_file": str(auth_file),
+        }
+    ]
+    cleanup_calls = []
+
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: list(accounts_data))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr("autoteam.auth_archive.archive_account_auth_file", lambda _email, _auth: str(archive_file))
+    monkeypatch.setattr(
+        "autoteam.sync_targets.delete_account_from_configured_targets",
+        lambda email, **kwargs: cleanup_calls.append((email, kwargs)) or {"cpa": {"count": 1}},
+    )
+
+    def fake_update(email, **kwargs):
+        accounts_data[0].update(kwargs)
+        return accounts_data[0]
+
+    monkeypatch.setattr("autoteam.accounts.update_account", fake_update)
+    monkeypatch.setattr(
+        "autoteam.accounts.mark_account_sold",
+        lambda email, remote_cleanup=None: fake_update(
+            email,
+            status="sold",
+            sync_disabled=True,
+            sold_at=123,
+            sale_remote_cleanup=remote_cleanup or {},
+        ),
+    )
+
+    result = api.post_sell_account("sold@example.com")
+
+    assert cleanup_calls == [("sold@example.com", {"auth_names": [auth_file.name]})]
+    assert result["status"] == "sold"
+    assert result["cpa_archive_file"] == str(archive_file)
+    assert accounts_data[0]["status"] == "sold"
+    assert accounts_data[0]["sync_disabled"] is True
 
 
 def test_sanitize_account_keeps_exportable_main_account_active_without_live_quota(tmp_path, monkeypatch):
@@ -163,6 +243,7 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
                 "CLOUDMAIL_DOMAIN=@example.com",
                 "CPA_URL=http://127.0.0.1:8317",
                 "CPA_KEY=key-1",
+                "PLAYWRIGHT_BROWSER_MODE=visible",
                 "PLAYWRIGHT_HEADLESS=false",
                 "PLAYWRIGHT_PROXY_URL=socks5://127.0.0.1:1080",
                 "PLAYWRIGHT_PROXY_BYPASS=localhost,127.0.0.1",
@@ -182,6 +263,7 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
         "CLOUDMAIL_DOMAIN",
         "CPA_URL",
         "CPA_KEY",
+        "PLAYWRIGHT_BROWSER_MODE",
         "PLAYWRIGHT_HEADLESS",
         "PLAYWRIGHT_PROXY_URL",
         "PLAYWRIGHT_PROXY_BYPASS",
@@ -197,6 +279,8 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
     assert fields["CLOUDMAIL_EMAIL"]["runtime_required"] is True
     assert fields["CPA_KEY"]["value"] == "key-1"
     assert fields["CPA_KEY"]["runtime_required"] is True
+    assert fields["PLAYWRIGHT_BROWSER_MODE"]["value"] == "visible"
+    assert fields["PLAYWRIGHT_BROWSER_MODE"]["runtime_required"] is False
     assert fields["PLAYWRIGHT_HEADLESS"]["value"] == "false"
     assert fields["PLAYWRIGHT_HEADLESS"]["runtime_required"] is False
     assert fields["PLAYWRIGHT_PROXY_URL"]["value"] == "socks5://127.0.0.1:1080"
@@ -327,6 +411,7 @@ def test_put_runtime_config_allows_partial_runtime_fields_when_api_key_exists(mo
             CLOUDMAIL_DOMAIN="",
             CPA_URL="",
             CPA_KEY="",
+            PLAYWRIGHT_BROWSER_MODE="embedded",
             PLAYWRIGHT_PROXY_URL="",
             PLAYWRIGHT_PROXY_BYPASS="",
             API_KEY="old-key",
@@ -335,6 +420,8 @@ def test_put_runtime_config_allows_partial_runtime_fields_when_api_key_exists(mo
 
     assert result["message"] == "配置保存成功"
     assert written["API_KEY"] == "old-key"
+    assert written["PLAYWRIGHT_BROWSER_MODE"] == "embedded"
+    assert written["PLAYWRIGHT_HEADLESS"] == "true"
     assert "CPA_URL" not in written
 
 
@@ -619,6 +706,7 @@ def test_put_runtime_config_source_applies_env_and_updates_api_key(tmp_path, mon
         "CLOUDMAIL_DOMAIN",
         "CPA_URL",
         "CPA_KEY",
+        "PLAYWRIGHT_BROWSER_MODE",
         "PLAYWRIGHT_PROXY_URL",
         "PLAYWRIGHT_PROXY_BYPASS",
         "API_KEY",

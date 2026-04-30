@@ -81,9 +81,16 @@ AUTO_CHECK_MIN_LOW = _get_int_env("AUTO_CHECK_MIN_LOW", 2)  # 至少几个账号
 MAX_TEAM_SEATS = 999
 TEAM_TARGET_SEATS = min(MAX_TEAM_SEATS, max(1, _get_int_env("TEAM_TARGET_SEATS", MAX_TEAM_SEATS)))  # Team 总人数目标
 FILL_BATCH_SIZE = min(MAX_TEAM_SEATS, max(1, _get_int_env("FILL_BATCH_SIZE", 10)))  # 补满成员单次最多新增账号数
+BROWSER_PARALLEL_WORKERS = min(3, max(1, _get_int_env("BROWSER_PARALLEL_WORKERS", 1)))  # 浏览器并行窗口数
 
 # Playwright 代理配置
-PLAYWRIGHT_HEADLESS = _get_bool_env("PLAYWRIGHT_HEADLESS", True)
+_PLAYWRIGHT_BROWSER_MODES = {"hidden", "visible", "embedded"}
+_raw_browser_mode = os.environ.get("PLAYWRIGHT_BROWSER_MODE", "").strip().lower()
+if _raw_browser_mode in _PLAYWRIGHT_BROWSER_MODES:
+    PLAYWRIGHT_BROWSER_MODE = _raw_browser_mode
+else:
+    PLAYWRIGHT_BROWSER_MODE = "hidden" if _get_bool_env("PLAYWRIGHT_HEADLESS", True) else "visible"
+PLAYWRIGHT_HEADLESS = PLAYWRIGHT_BROWSER_MODE != "visible"
 PLAYWRIGHT_PROXY_URL = os.environ.get("PLAYWRIGHT_PROXY_URL", "").strip()
 PLAYWRIGHT_PROXY_SERVER = os.environ.get("PLAYWRIGHT_PROXY_SERVER", "").strip()
 PLAYWRIGHT_PROXY_USERNAME = os.environ.get("PLAYWRIGHT_PROXY_USERNAME", "").strip()

@@ -200,12 +200,7 @@ def build_chatgpt_session_auth_bundle(page, *, email="", account_id=""):
     auth_claims = claims.get("https://api.openai.com/auth", {}) if isinstance(claims, dict) else {}
     user_data = session_data.get("user") if isinstance(session_data.get("user"), dict) else {}
 
-    resolved_email = (
-        email
-        or claims.get("email", "")
-        or user_data.get("email", "")
-        or session_data.get("email", "")
-    )
+    resolved_email = email or claims.get("email", "") or user_data.get("email", "") or session_data.get("email", "")
     resolved_account_id = (
         account_id
         or auth_claims.get("chatgpt_account_id", "")

@@ -33,6 +33,7 @@
 
 - `llmdoc/memory/doc-gaps.md`: 仍需补强的文档项。
 - `llmdoc/memory/decisions/`: 稳定决策记录。
+  - `llmdoc/memory/decisions/2026-04-30-async-incremental-sync.md`: CPA / Sub2API 异步增量同步策略。
 - `llmdoc/memory/reflections/`: 任务后的过程记录。
 
 临时调查材料放在 `.llmdoc-tmp/investigations/`，不作为稳定文档读取。

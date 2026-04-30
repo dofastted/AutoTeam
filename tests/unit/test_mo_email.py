@@ -59,6 +59,30 @@ def test_create_temp_email_uses_next_index_from_remote_and_local(monkeypatch):
     }
 
 
+def test_create_temp_email_reserves_names_when_remote_list_lags(monkeypatch):
+    client = mo_email.MoEmailClient()
+    created = []
+    mo_email._RESERVED_EMAIL_NAMES.clear()
+
+    monkeypatch.setattr(client, "domain", "gymbro.cloud")
+    monkeypatch.setattr(client, "name_prefix", "abc")
+    monkeypatch.setattr(client, "start_index", 1)
+    monkeypatch.setattr(client, "list_accounts", lambda size=1000: [])
+    monkeypatch.setattr(accounts, "load_accounts", lambda: [])
+
+    def fake_request(method, path, **kwargs):
+        name = kwargs["json"]["name"]
+        created.append(name)
+        return {"email": {"id": name, "address": f"{name}@gymbro.cloud"}}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    assert client.create_temp_email()[1] == "abc-1@gymbro.cloud"
+    assert client.create_temp_email()[1] == "abc-2@gymbro.cloud"
+    assert created == ["abc-1", "abc-2"]
+    mo_email._RESERVED_EMAIL_NAMES.clear()
+
+
 def test_search_emails_by_recipient_normalizes_messages(monkeypatch):
     client = mo_email.MoEmailClient()
     monkeypatch.setattr(client, "_resolve_account_id_for_email", lambda email: "mailbox-1")

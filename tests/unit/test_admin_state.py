@@ -42,6 +42,8 @@ def test_update_admin_state_normalizes_and_summary_uses_saved_values(tmp_path, m
         "account_id": "123e4567-e89b-12d3-a456-426614174000",
         "workspace_name": "Team A",
         "session_present": True,
+        "access_token_present": False,
+        "access_token_updated_at": None,
         "password_saved": True,
         "updated_at": saved["updated_at"],
     }

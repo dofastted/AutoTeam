@@ -22,7 +22,9 @@ import getpass
 import json
 import logging
 import os
+import queue
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -31,6 +33,7 @@ from autoteam.accounts import (
     STATUS_ACTIVE,
     STATUS_EXHAUSTED,
     STATUS_PENDING,
+    STATUS_SOLD,
     STATUS_STANDBY,
     add_account,
     find_account,
@@ -40,7 +43,8 @@ from autoteam.accounts import (
     update_account,
 )
 from autoteam.admin_state import get_admin_email, get_admin_state_summary, get_chatgpt_account_id
-from autoteam.browser_runtime import acquire_browser_lease
+from autoteam.auth_archive import archive_account_auth_file
+from autoteam.browser_runtime import acquire_browser_lease, browser_parallel_limit
 from autoteam.chatgpt_api import ChatGPTTeamAPI
 from autoteam.codex_auth import (
     MainCodexSyncFlow,
@@ -83,6 +87,33 @@ REUSE_RESET_GRACE_SECONDS = int(os.environ.get("REUSE_RESET_GRACE_SECONDS", "300
 
 def _normalized_email(value: str | None) -> str:
     return (value or "").strip().lower()
+
+
+def _archive_saved_auth(email: str, auth_file: str) -> str:
+    if not Path(auth_file).exists():
+        logger.warning("[Codex] 认证文件不存在，跳过归档: %s", auth_file)
+        return ""
+    archive_path = archive_account_auth_file(email, auth_file)
+    if archive_path:
+        update_account(email, cpa_archive_file=archive_path)
+    return archive_path
+
+
+def _archive_update(archive_path: str) -> dict[str, str]:
+    return {"cpa_archive_file": archive_path} if archive_path else {}
+
+
+def _resolve_parallel_workers(value=None) -> int:
+    if value is None:
+        value = 1
+    return min(3, max(1, int(value or 1)))
+
+
+def _split_success_targets(total: int, workers: int) -> list[int]:
+    total = max(0, int(total or 0))
+    workers = min(max(1, int(workers or 1)), max(1, total or 1))
+    base, extra = divmod(total, workers)
+    return [base + (1 if index < extra else 0) for index in range(workers) if base + (1 if index < extra else 0) > 0]
 
 
 def _is_main_account_email(email: str | None) -> bool:
@@ -164,6 +195,8 @@ def sync_account_states(chatgpt_api=None):
 
     for acc in accounts:
         email = acc["email"].lower()
+        if acc.get("status") == STATUS_SOLD:
+            continue
         in_team = email in team_emails
 
         if in_team and acc["status"] in (STATUS_STANDBY, STATUS_PENDING):
@@ -270,6 +303,7 @@ def _print_status_table(accounts, quota_cache=None):
         STATUS_EXHAUSTED: ("bold red", "✗ used up"),
         STATUS_STANDBY: ("yellow", "○ standby"),
         STATUS_PENDING: ("dim", "… pending"),
+        STATUS_SOLD: ("cyan", "◆ sold"),
     }
 
     for idx, acc in enumerate(accounts, 1):
@@ -318,10 +352,12 @@ def _print_status_table(accounts, quota_cache=None):
     active = sum(1 for a in accounts if a["status"] == STATUS_ACTIVE)
     standby = sum(1 for a in accounts if a["status"] == STATUS_STANDBY)
     exhausted = sum(1 for a in accounts if a["status"] == STATUS_EXHAUSTED)
+    sold = sum(1 for a in accounts if a["status"] == STATUS_SOLD)
     console.print(
         f"  [green]● 活跃 {active}[/]  "
         f"[yellow]○ 待命 {standby}[/]  "
         f"[red]✗ 用完 {exhausted}[/]  "
+        f"[cyan]◆ 已售 {sold}[/]  "
         f"[dim]总计 {len(accounts)}[/]",
     )
 
@@ -339,12 +375,22 @@ def cmd_status():
     # active 账号实时查询额度
     quota_cache = {}
     active_count = sum(
-        1 for a in accounts if a["status"] == STATUS_ACTIVE and a.get("auth_file") and Path(a["auth_file"]).exists()
+        1
+        for a in accounts
+        if a["status"] == STATUS_ACTIVE
+        and not a.get("sync_disabled")
+        and a.get("auth_file")
+        and Path(a["auth_file"]).exists()
     )
     if active_count:
         logger.info("[状态] 查询 %d 个 active 账号额度...", active_count)
     for acc in accounts:
-        if acc["status"] == STATUS_ACTIVE and acc.get("auth_file") and Path(acc["auth_file"]).exists():
+        if (
+            acc["status"] == STATUS_ACTIVE
+            and not acc.get("sync_disabled")
+            and acc.get("auth_file")
+            and Path(acc["auth_file"]).exists()
+        ):
             auth_data = json.loads(read_text(Path(acc["auth_file"])))
             access_token = auth_data.get("access_token")
             if access_token:
@@ -462,7 +508,11 @@ def cmd_check():
 
         accounts = load_accounts()
 
-    all_active = [a for a in accounts if a["status"] == STATUS_ACTIVE and not _is_main_account_email(a.get("email"))]
+    all_active = [
+        a
+        for a in accounts
+        if a["status"] == STATUS_ACTIVE and not a.get("sync_disabled") and not _is_main_account_email(a.get("email"))
+    ]
 
     # 区分：有认证文件的 vs 无认证文件的
     active_with_auth = []
@@ -612,7 +662,8 @@ def cmd_check():
             bundle = login_codex_via_browser(email, password, mail_client=mail_client)
             if bundle:
                 auth_file = save_auth_file(bundle)
-                update_account(email, auth_file=auth_file)
+                archive_path = _archive_saved_auth(email, auth_file)
+                update_account(email, auth_file=auth_file, **_archive_update(archive_path))
                 logger.info("[%s] token 已更新", email)
                 # 重新检查额度
                 status_str, info = _check_and_refresh(find_account(load_accounts(), email))
@@ -742,7 +793,14 @@ def _complete_registration(email, password, invite_link, mail_client):
     bundle = login_codex_via_browser(email, password, mail_client=mail_client)
     if bundle:
         auth_file = save_auth_file(bundle)
-        update_account(email, status=STATUS_ACTIVE, auth_file=auth_file, last_active_at=time.time())
+        archive_path = _archive_saved_auth(email, auth_file)
+        update_account(
+            email,
+            status=STATUS_ACTIVE,
+            auth_file=auth_file,
+            last_active_at=time.time(),
+            **_archive_update(archive_path),
+        )
         logger.info("[注册] 账号就绪: %s", email)
         return email
     else:
@@ -1558,7 +1616,14 @@ def create_account_direct(mail_client):
     bundle = login_codex_via_browser(email, password, mail_client=mail_client)
     if bundle:
         auth_file = save_auth_file(bundle)
-        update_account(email, status=STATUS_ACTIVE, auth_file=auth_file, last_active_at=time.time())
+        archive_path = _archive_saved_auth(email, auth_file)
+        update_account(
+            email,
+            status=STATUS_ACTIVE,
+            auth_file=auth_file,
+            last_active_at=time.time(),
+            **_archive_update(archive_path),
+        )
         logger.info("[直接注册] 账号就绪: %s", email)
         return email
     else:
@@ -1585,6 +1650,122 @@ def create_new_account(chatgpt_api, mail_client):
     if chatgpt_api and chatgpt_api.browser:
         chatgpt_api.stop()
     return create_account_direct(mail_client)
+
+
+def _create_new_accounts_parallel(total: int, *, parallel_workers=None, stop_after_success=None) -> dict:
+    total = max(0, int(total or 0))
+    workers = _resolve_parallel_workers(parallel_workers)
+    targets = _split_success_targets(total, workers)
+    if not targets:
+        return {"attempted": 0, "succeeded": 0, "failed": 0, "emails": [], "worker_reports": [], "parallel_workers": 0}
+
+    if len(targets) == 1:
+        mail_client = CloudMailClient()
+        mail_client.login()
+        attempted = 0
+        succeeded = 0
+        failed = 0
+        emails = []
+        for _index in range(targets[0]):
+            if stop_after_success and stop_after_success(succeeded):
+                break
+            attempted += 1
+            email = create_new_account(None, mail_client)
+            if email:
+                succeeded += 1
+                emails.append({"email": email, "worker_index": 1})
+            else:
+                failed += 1
+        return {
+            "attempted": attempted,
+            "succeeded": succeeded,
+            "failed": failed,
+            "emails": emails,
+            "worker_reports": [
+                {
+                    "worker_index": 1,
+                    "target": targets[0],
+                    "attempted": attempted,
+                    "succeeded": succeeded,
+                    "failed": failed,
+                }
+            ],
+            "parallel_workers": 1,
+        }
+
+    results: queue.Queue[dict] = queue.Queue()
+    stop_event = threading.Event()
+
+    def worker(worker_index: int, worker_target: int) -> None:
+        attempted = 0
+        succeeded = 0
+        failed = 0
+        emails = []
+        try:
+            mail_client = CloudMailClient()
+            mail_client.login()
+            max_attempts = max(worker_target, worker_target * 2)
+            while succeeded < worker_target and attempted < max_attempts and not stop_event.is_set():
+                attempted += 1
+                logger.info(
+                    "[并行创建] worker %d 创建第 %d 个，目标成功 %d",
+                    worker_index,
+                    attempted,
+                    worker_target,
+                )
+                try:
+                    email = create_new_account(None, mail_client)
+                except Exception as exc:
+                    failed += 1
+                    logger.warning("[并行创建] worker %d 创建失败: %s", worker_index, exc)
+                    continue
+                if email:
+                    succeeded += 1
+                    emails.append({"email": email, "worker_index": worker_index})
+                    if stop_after_success and stop_after_success(None):
+                        stop_event.set()
+                        break
+                else:
+                    failed += 1
+        except Exception as exc:
+            failed += 1
+            logger.warning("[并行创建] worker %d 异常: %s", worker_index, exc)
+        finally:
+            results.put(
+                {
+                    "worker_index": worker_index,
+                    "target": worker_target,
+                    "attempted": attempted,
+                    "succeeded": succeeded,
+                    "failed": failed,
+                    "emails": emails,
+                }
+            )
+
+    threads = [
+        threading.Thread(target=worker, args=(index + 1, target), daemon=True) for index, target in enumerate(targets)
+    ]
+    with browser_parallel_limit(len(targets)):
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    worker_reports = []
+    emails = []
+    while not results.empty():
+        report = results.get()
+        emails.extend(report.pop("emails", []))
+        worker_reports.append(report)
+    worker_reports.sort(key=lambda item: item["worker_index"])
+    return {
+        "attempted": sum(item["attempted"] for item in worker_reports),
+        "succeeded": sum(item["succeeded"] for item in worker_reports),
+        "failed": sum(item["failed"] for item in worker_reports),
+        "emails": emails,
+        "worker_reports": worker_reports,
+        "parallel_workers": len(targets),
+    }
 
 
 def reinvite_account(chatgpt_api, mail_client, acc):
@@ -1614,12 +1795,19 @@ def reinvite_account(chatgpt_api, mail_client, acc):
         return False
 
     auth_file = save_auth_file(bundle)
-    update_account(email, status=STATUS_ACTIVE, last_active_at=time.time(), auth_file=auth_file)
+    archive_path = _archive_saved_auth(email, auth_file)
+    update_account(
+        email,
+        status=STATUS_ACTIVE,
+        last_active_at=time.time(),
+        auth_file=auth_file,
+        **_archive_update(archive_path),
+    )
     logger.info("[轮转] 旧账号已恢复: %s", email)
     return True
 
 
-def cmd_rotate(target_seats=None):
+def cmd_rotate(target_seats=None, parallel_workers=None):
     """
     智能轮转 - 保持 Team 始终有 target_seats 个可用成员，尽量少创建新账号。
 
@@ -1868,16 +2056,26 @@ def cmd_rotate(target_seats=None):
         else:
             # 必须创建新号
             logger.info("[5/5] 创建 %d 个新账号...", remaining)
-            for i in range(remaining):
-                logger.info("[5/5] 创建第 %d/%d 个...", i + 1, remaining)
-                if not chatgpt or not chatgpt.browser:
-                    ensure_chatgpt()
-                if create_new_account(chatgpt, ensure_mail()):
-                    current_count += 1
+            resolved_parallel_workers = _resolve_parallel_workers(parallel_workers)
+            if resolved_parallel_workers <= 1:
+                for i in range(remaining):
+                    logger.info("[5/5] 创建第 %d/%d 个...", i + 1, remaining)
+                    if not chatgpt or not chatgpt.browser:
+                        ensure_chatgpt()
+                    if create_new_account(chatgpt, ensure_mail()):
+                        current_count += 1
+                    current_count = refresh_current_count(current_count, "[5/5]")
+                    if current_count >= TARGET:
+                        logger.info("[5/5] 当前成员数已达到目标，停止继续创建")
+                        break
+            else:
+                if chatgpt and chatgpt.browser:
+                    chatgpt.stop()
+                create_result = _create_new_accounts_parallel(remaining, parallel_workers=resolved_parallel_workers)
+                current_count += int(create_result.get("succeeded") or 0)
                 current_count = refresh_current_count(current_count, "[5/5]")
                 if current_count >= TARGET:
                     logger.info("[5/5] 当前成员数已达到目标，停止继续创建")
-                    break
 
         if not chatgpt or not chatgpt.browser:
             ensure_chatgpt()
@@ -2133,7 +2331,7 @@ def get_team_member_count(chatgpt_api):
     return len(members)
 
 
-def cmd_fill(target=None):
+def cmd_fill(target=None, parallel_workers=None):
     """检测 Team 成员数，不足 target 则自动添加新账号补满"""
     from autoteam.config import FILL_BATCH_SIZE, MAX_TEAM_SEATS, TEAM_TARGET_SEATS
 
@@ -2193,8 +2391,11 @@ def cmd_fill(target=None):
         batch_succeeded = 0
         batch_failed = 0
         batch_reports = []
+        worker_reports = []
+        resolved_parallel_workers = _resolve_parallel_workers(parallel_workers)
 
-        for i in range(need):
+        i = 0
+        while i < need:
             logger.info("[填充] 添加第 %d/%d 个账号...", i + 1, need)
             before_count = current
             attempted += 1
@@ -2219,35 +2420,85 @@ def cmd_fill(target=None):
                     break
                 logger.warning("[填充] 复用旧账号失败，尝试下一个旧账号: %s", email)
 
-            if not added:
-                # 创建新账号
-                logger.info("[填充] 创建新账号...")
+            if added:
                 if not chatgpt.browser:
                     chatgpt.start()
-                added = create_new_account(chatgpt, mail_client)
+                new_count = get_team_member_count(chatgpt)
+                counted_success = True
+                if new_count >= 0:
+                    logger.info("[填充] 当前成员数: %d/%d", new_count, target)
+                    counted_success = counted_success or new_count > before_count
+                    current = new_count
+                if counted_success:
+                    succeeded += 1
+                    batch_succeeded += 1
+                    i += 1
+                else:
+                    failed += 1
+                    batch_failed += 1
 
-            if not added:
-                logger.warning("[填充] 本轮补位失败，第 %d/%d 个空缺仍未填上", i + 1, need)
-
-            # 验证成员数
-            if not chatgpt.browser:
-                chatgpt.start()
-            new_count = get_team_member_count(chatgpt)
-            counted_success = bool(added)
-            if new_count >= 0:
-                logger.info("[填充] 当前成员数: %d/%d", new_count, target)
-                counted_success = counted_success or new_count > before_count
-                current = new_count
-            if counted_success:
-                succeeded += 1
-                batch_succeeded += 1
-            else:
-                failed += 1
-                batch_failed += 1
+            if not added and i < need:
+                # 创建新账号
+                if resolved_parallel_workers <= 1:
+                    logger.info("[填充] 创建新账号...")
+                    if not chatgpt.browser:
+                        chatgpt.start()
+                    added = create_new_account(chatgpt, mail_client)
+                    if not added:
+                        logger.warning("[填充] 本轮补位失败，第 %d/%d 个空缺仍未填上", i + 1, need)
+                    if not chatgpt.browser:
+                        chatgpt.start()
+                    new_count = get_team_member_count(chatgpt)
+                    counted_success = bool(added)
+                    if new_count >= 0:
+                        logger.info("[填充] 当前成员数: %d/%d", new_count, target)
+                        counted_success = counted_success or new_count > before_count
+                        current = new_count
+                    if counted_success:
+                        succeeded += 1
+                        batch_succeeded += 1
+                    else:
+                        failed += 1
+                        batch_failed += 1
+                    i += 1
+                else:
+                    remaining_new = need - i
+                    batch_capacity = max(1, configured_batch - batch_attempted + 1)
+                    create_target = min(remaining_new, batch_capacity)
+                    logger.info("[填充] 并行创建新账号: 目标成功 %d", create_target)
+                    if chatgpt and chatgpt.browser:
+                        chatgpt.stop()
+                    create_result = _create_new_accounts_parallel(
+                        create_target, parallel_workers=resolved_parallel_workers
+                    )
+                    new_attempted = int(create_result.get("attempted") or 0)
+                    new_succeeded = int(create_result.get("succeeded") or 0)
+                    new_failed = int(create_result.get("failed") or 0)
+                    attempted += max(0, new_attempted - 1)
+                    batch_attempted += max(0, new_attempted - 1)
+                    succeeded += new_succeeded
+                    batch_succeeded += new_succeeded
+                    failed += new_failed
+                    batch_failed += new_failed
+                    for report in create_result.get("worker_reports") or []:
+                        worker_reports.append({"batch": batch_index, **report})
+                    added = new_succeeded > 0
+                    i += new_succeeded
+                    if not chatgpt.browser:
+                        chatgpt.start()
+                    new_count = get_team_member_count(chatgpt)
+                    if new_count >= 0:
+                        logger.info("[填充] 当前成员数: %d/%d", new_count, target)
+                        current = new_count
+                    else:
+                        current += new_succeeded
+                    if not added:
+                        logger.warning("[填充] 本批新账号创建未成功，停止继续补位")
+                        break
 
             reached_target = current >= target
             reached_batch_end = batch_attempted >= configured_batch
-            reached_plan_end = i == need - 1
+            reached_plan_end = i >= need
 
             if reached_batch_end or reached_target or reached_plan_end:
                 success_rate = (batch_succeeded / batch_attempted * 100) if batch_attempted else 0.0
@@ -2298,6 +2549,8 @@ def cmd_fill(target=None):
             "failed": failed,
             "success_rate": round(total_rate, 2),
             "batches": batch_reports,
+            "parallel_workers": resolved_parallel_workers,
+            "worker_reports": worker_reports,
         }
 
     finally:

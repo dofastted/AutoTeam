@@ -30,7 +30,9 @@ cp .env.example .env
 | `SUB2API_PASSWORD` | Sub2API 管理员密码 | 启用 Sub2API 时必填 |
 | `SUB2API_GROUP` | Sub2API 分组名或分组 ID，多个用逗号分隔 | 启用 Sub2API 且希望自动加入分组时填写 |
 | `API_KEY` | Web 面板 / API 鉴权密钥 | 启动时必填（首次启动可自动生成） |
-| `PLAYWRIGHT_HEADLESS` | Playwright 是否无头启动（`true/false`） | 否（默认 `true`） |
+| `PLAYWRIGHT_BROWSER_MODE` | 浏览器显示方式，可选 `hidden`、`visible`、`embedded` | 否（默认 `hidden`） |
+| `PLAYWRIGHT_HEADLESS` | 旧版兼容项，`false` 等同 `PLAYWRIGHT_BROWSER_MODE=visible` | 否（默认 `true`） |
+| `BROWSER_PARALLEL_WORKERS` | 账号补满、轮转和直注批量任务的并行窗口数，范围 `1..3` | 否（默认 `1`） |
 | `PLAYWRIGHT_PROXY_URL` | Playwright 浏览器代理 URL，如 `socks5://host:port` 或 `http://user:pass@host:port` | 否 |
 | `PLAYWRIGHT_PROXY_BYPASS` | Playwright 代理绕过列表，如 `localhost,127.0.0.1` | 否 |
 | `AUTO_CHECK_THRESHOLD` | 额度低于此百分比触发轮转 | 否（默认 `10`） |
@@ -56,7 +58,7 @@ cp .env.example .env
 - `API_KEY` 单独放在 **安全 / 访问控制**
 - CPA / Sub2API 开关和连接信息放在 **远端同步**
 - `.env` 原文编辑保留在 **源文件编辑**
-- 浏览器无头和代理配置属于低频项，默认放在 **代理 / 高级**
+- 浏览器显示方式和代理配置属于低频项，默认放在 **代理 / 高级**
 
 ## Sub2API 分组
 
@@ -84,11 +86,26 @@ SUB2API_GROUP=12,Team Pool
 
 ## Playwright 浏览器运行
 
-AutoTeam 的浏览器流量（ChatGPT 登录、邀请接受、Codex OAuth 等）默认无头启动，并在同一进程内限制为一个 Chromium 流程。若需要观察窗口，可以临时设置：
+AutoTeam 的浏览器流量（ChatGPT 登录、邀请接受、Codex OAuth 等）默认不弹出窗口。账号补满、轮转和直注批量任务可通过 `BROWSER_PARALLEL_WORKERS` 开 1 到 3 个独立 Chromium；其他浏览器流程仍按单任务运行。推荐使用新配置：
+
+```dotenv
+PLAYWRIGHT_BROWSER_MODE=hidden
+BROWSER_PARALLEL_WORKERS=1
+```
+
+可选值：
+
+- `hidden`: 无头运行，不弹出窗口。
+- `visible`: 显示独立浏览器窗口，适合临时观察页面。
+- `embedded`: 当前按无头运行，预留给后续页面内嵌预览。
+
+旧配置仍兼容：
 
 ```dotenv
 PLAYWRIGHT_HEADLESS=false
 ```
+
+当同时存在 `PLAYWRIGHT_BROWSER_MODE` 和 `PLAYWRIGHT_HEADLESS` 时，优先使用 `PLAYWRIGHT_BROWSER_MODE`。
 
 推荐优先使用一个环境变量：
 
@@ -190,7 +207,7 @@ codex-{email}-{plan_type}-{hash}.json
 
 ## Team 补位批次
 
-`TEAM_TARGET_SEATS` 是 Team 总人数目标，默认 `999`。`FILL_BATCH_SIZE` 是「补满成员」一次最多新增的账号数，默认 `10`。
+`TEAM_TARGET_SEATS` 是 Team 总人数目标，默认 `999`。`FILL_BATCH_SIZE` 是「补满成员」一次最多新增的账号数，默认 `10`。`BROWSER_PARALLEL_WORKERS` 控制每批新号创建时同时开的独立浏览器数，最大为 `3`。
 
 Web 面板点击「补满成员」时，如果不手动传目标人数，后端只会执行一批：当前 Team 人数加上 `FILL_BATCH_SIZE`，且不超过 `TEAM_TARGET_SEATS`。如果通过 CLI 或 API 明确传入较大的目标，执行过程仍会按 `FILL_BATCH_SIZE` 分批记录日志，并在每批结束后上传 CPA 认证文件。
 

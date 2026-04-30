@@ -95,12 +95,14 @@ class SetupConfig(BaseModel):
     SUB2API_EMAIL: str = ""
     SUB2API_PASSWORD: str = ""
     SUB2API_GROUP: str = ""
+    PLAYWRIGHT_BROWSER_MODE: str = "hidden"
     PLAYWRIGHT_HEADLESS: str = "true"
     PLAYWRIGHT_PROXY_URL: str = ""
     PLAYWRIGHT_PROXY_BYPASS: str = ""
     API_KEY: str = ""
     TEAM_TARGET_SEATS: str = "999"
     FILL_BATCH_SIZE: str = "10"
+    BROWSER_PARALLEL_WORKERS: str = "1"
 
 
 class SourceConfig(BaseModel):
@@ -108,6 +110,7 @@ class SourceConfig(BaseModel):
 
 
 _RUNTIME_CONFIG_CLEARABLE_FIELDS = {
+    "PLAYWRIGHT_BROWSER_MODE",
     "PLAYWRIGHT_HEADLESS",
     "PLAYWRIGHT_PROXY_URL",
     "PLAYWRIGHT_PROXY_BYPASS",
@@ -163,6 +166,8 @@ _ALL_RUNTIME_ENV_KEYS = [
     "AUTO_CHECK_MIN_LOW",
     "TEAM_TARGET_SEATS",
     "FILL_BATCH_SIZE",
+    "BROWSER_PARALLEL_WORKERS",
+    "PLAYWRIGHT_BROWSER_MODE",
     "PLAYWRIGHT_HEADLESS",
     "PLAYWRIGHT_PROXY_URL",
     "PLAYWRIGHT_PROXY_SERVER",
@@ -326,6 +331,17 @@ def _collect_config_fields(*, include_values: bool = False, configs=None):
         elif key == "SYNC_TARGET_SUB2API":
             raw_value = "true" if target_states.get("sub2api") else "false"
             configured = True
+        elif key == "PLAYWRIGHT_BROWSER_MODE":
+            raw_value = _normalize_playwright_browser_mode(raw_value, merged_env.get("PLAYWRIGHT_HEADLESS", ""))
+            configured = True
+        elif key == "PLAYWRIGHT_HEADLESS":
+            raw_value = (
+                "false"
+                if _normalize_playwright_browser_mode(merged_env.get("PLAYWRIGHT_BROWSER_MODE", ""), raw_value)
+                == "visible"
+                else "true"
+            )
+            configured = True
         elif key == "MAIL_PROVIDER":
             raw_value = mail_provider
             configured = True
@@ -481,7 +497,23 @@ def _sync_runtime_globals():
         pass
 
 
+def _normalize_playwright_browser_mode(value: str | None, headless: str | None = None) -> str:
+    mode = (value or "").strip().lower()
+    if mode in {"hidden", "visible", "embedded"}:
+        return mode
+    if (headless or "").strip().lower() in {"0", "false", "no", "n", "off"}:
+        return "visible"
+    return "hidden"
+
+
+def _apply_playwright_browser_mode(values: dict[str, str]):
+    mode = _normalize_playwright_browser_mode(values.get("PLAYWRIGHT_BROWSER_MODE"), values.get("PLAYWRIGHT_HEADLESS"))
+    values["PLAYWRIGHT_BROWSER_MODE"] = mode
+    values["PLAYWRIGHT_HEADLESS"] = "false" if mode == "visible" else "true"
+
+
 def _apply_runtime_env_file_values(values: dict[str, str]):
+    _apply_playwright_browser_mode(values)
     for key in _ALL_RUNTIME_ENV_KEYS:
         if key in values:
             value = values[key]
@@ -570,6 +602,7 @@ def _save_runtime_config(data: dict[str, str]):
     existing = {key: os.environ.get(key, "") for key in env_keys}
     merged = {key: data.get(key, existing.get(key, "")) for key in env_keys}
     merged["MAIL_PROVIDER"] = normalize_mail_provider(merged.get("MAIL_PROVIDER") or existing.get("MAIL_PROVIDER"))
+    _apply_playwright_browser_mode(merged)
 
     if not merged.get("API_KEY"):
         merged["API_KEY"] = _secrets.token_urlsafe(24)
@@ -668,6 +701,7 @@ def put_runtime_config_source(config: SourceConfig):
         _write_runtime_source_text(config.content)
 
         loaded_values = _load_env_values_from_source(config.content, env_keys)
+        _apply_playwright_browser_mode(loaded_values)
         missing = _validate_runtime_required_values(loaded_values)
         if missing:
             _restore_runtime_source_text(previous_exists, previous_content)
@@ -1040,16 +1074,31 @@ def _start_task(command: str, func, params: dict, *args, **kwargs) -> dict:
 
 class TaskParams(BaseModel):
     target: int | None = None
+    parallel_workers: int | None = None
 
 
 class CpaBatchParams(BaseModel):
     join_mode: str = "direct"
     target: int | None = None
     batch_size: int | None = None
+    parallel_workers: int | None = None
 
 
 class CleanupParams(BaseModel):
     max_seats: int | None = None
+
+
+def _resolve_parallel_workers_param(value: int | None) -> int:
+    from autoteam.config import BROWSER_PARALLEL_WORKERS
+
+    resolved = BROWSER_PARALLEL_WORKERS if value is None else value
+    try:
+        resolved = int(resolved)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="parallel_workers 必须是 1 到 3") from exc
+    if resolved < 1 or resolved > 3:
+        raise HTTPException(status_code=400, detail="parallel_workers 必须是 1 到 3")
+    return resolved
 
 
 class AdminEmailParams(BaseModel):
@@ -1081,6 +1130,10 @@ class TeamMemberRemoveParams(BaseModel):
     email: str
     user_id: str
     type: str
+
+
+class SellAccountParams(BaseModel):
+    note: str | None = None
 
 
 def _normalized_email(value: str | None) -> str:
@@ -1880,6 +1933,54 @@ def post_kick_account(email: str):
         _playwright_lock.release()
 
 
+@app.post("/api/accounts/{email}/sell")
+def post_sell_account(email: str, params: SellAccountParams = SellAccountParams()):
+    """标记账号已售出：保留 Team 席位，删除 CPA/Sub2API 远端记录，并停止后续同步。"""
+    from autoteam.accounts import STATUS_ACTIVE, find_account, load_accounts, mark_account_sold, update_account
+    from autoteam.auth_archive import archive_account_auth_file
+    from autoteam.sync_targets import delete_account_from_configured_targets
+
+    email = email.strip().lower()
+    if _is_main_account_email(email):
+        raise HTTPException(status_code=400, detail="主号不允许标记为已售")
+
+    accounts = load_accounts()
+    acc = find_account(accounts, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if acc.get("status") != STATUS_ACTIVE:
+        raise HTTPException(status_code=400, detail=f"账号状态为 {acc.get('status')}，不是 active")
+
+    auth_file = acc.get("auth_file") or ""
+    if not auth_file or not Path(auth_file).exists():
+        raise HTTPException(status_code=400, detail="账号缺少本地 CPA 认证文件，不能标记为合格已售账号")
+
+    auth_names = [Path(auth_file).name]
+    archive_path = acc.get("cpa_archive_file") or ""
+    if not archive_path or not Path(archive_path).exists():
+        archive_path = archive_account_auth_file(email, auth_file)
+        update_account(email, cpa_archive_file=archive_path)
+
+    try:
+        remote_cleanup = delete_account_from_configured_targets(email, auth_names=auth_names)
+    except Exception as exc:
+        logger.exception("[API] 已售账号远端删除失败: %s", email)
+        raise HTTPException(status_code=502, detail=f"远端删除失败: {exc}") from exc
+
+    updates = mark_account_sold(email, remote_cleanup=remote_cleanup)
+    if params.note:
+        updates = update_account(email, sale_note=params.note)
+
+    return {
+        "message": f"已标记为已售并停止同步: {email}",
+        "email": email,
+        "status": "sold",
+        "auth_file": auth_file,
+        "cpa_archive_file": (updates or {}).get("cpa_archive_file") or archive_path,
+        "remote_cleanup": remote_cleanup,
+    }
+
+
 class LoginAccountParams(BaseModel):
     email: str
 
@@ -1907,6 +2008,7 @@ def post_account_cpa_auth(email: str):
 
     def _run():
         from autoteam.accounts import STATUS_ACTIVE, STATUS_EXHAUSTED, update_account
+        from autoteam.auth_archive import archive_account_auth_file
         from autoteam.codex_auth import (
             check_codex_quota,
             login_codex_via_browser,
@@ -1935,7 +2037,8 @@ def post_account_cpa_auth(email: str):
 
             plan_type = bundle.get("plan_type") or "unknown"
             auth_path = save_auth_file(bundle)
-            update_account(email, auth_file=auth_path)
+            archive_path = archive_account_auth_file(email, auth_path)
+            update_account(email, auth_file=auth_path, cpa_archive_file=archive_path)
 
             if plan_type == "team":
                 update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
@@ -1959,11 +2062,14 @@ def post_account_cpa_auth(email: str):
 
         if not upload_to_cpa(auth_path):
             raise RuntimeError(f"上传 CPA 失败: {Path(auth_path).name}")
+        archive_path = archive_account_auth_file(email, auth_path)
+        update_account(email, cpa_uploaded_at=time.time(), cpa_archive_file=archive_path, qualified_at=time.time())
 
         return {
             "email": email,
             "plan": plan_type,
             "auth_file": auth_path,
+            "cpa_archive_file": archive_path,
             "cpa_uploaded": True,
         }
 
@@ -1983,11 +2089,14 @@ def post_account_login(params: LoginAccountParams):
     acc = find_account(accounts, email)
     if not acc:
         raise HTTPException(status_code=404, detail="账号不存在")
+    if acc.get("status") == "sold" or acc.get("sync_disabled"):
+        raise HTTPException(status_code=400, detail="账号已售出并停止同步，不能重新登录")
     _require_account_mail_configs(acc, "登录账号")
     _require_sync_target_configs("登录账号")
 
     def _run():
         from autoteam.accounts import STATUS_ACTIVE, update_account
+        from autoteam.auth_archive import archive_account_auth_file
         from autoteam.codex_auth import (
             check_codex_quota,
             login_codex_via_browser,
@@ -2002,7 +2111,8 @@ def post_account_login(params: LoginAccountParams):
         bundle = login_codex_via_browser(email, acc.get("password", ""), mail_client=mail_client)
         if bundle:
             auth_file = save_auth_file(bundle)
-            update_account(email, auth_file=auth_file)
+            archive_path = archive_account_auth_file(email, auth_file)
+            update_account(email, auth_file=auth_file, cpa_archive_file=archive_path)
             # 登录成功且是 team plan，自动标记为 active
             if bundle.get("plan_type") == "team":
                 update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
@@ -2026,7 +2136,12 @@ def post_account_login(params: LoginAccountParams):
             from autoteam.sync_targets import sync_to_configured_targets as sync_to_cpa
 
             sync_to_cpa()
-            return {"email": email, "plan": bundle.get("plan_type"), "auth_file": auth_file}
+            return {
+                "email": email,
+                "plan": bundle.get("plan_type"),
+                "auth_file": auth_file,
+                "cpa_archive_file": archive_path,
+            }
         raise RuntimeError(f"Codex 登录失败: {email}")
 
     task = _start_task(f"login:{email}", _run, {"email": email})
@@ -2034,35 +2149,43 @@ def post_account_login(params: LoginAccountParams):
 
 
 @app.get("/api/status")
-def get_status():
-    """获取所有账号状态 + active 账号实时额度"""
-    from autoteam.accounts import STATUS_ACTIVE, STATUS_EXHAUSTED, STATUS_PENDING, STATUS_STANDBY, load_accounts
+def get_status(realtime_quota: bool = True):
+    """获取所有账号状态，可选查询 active 账号实时额度。"""
+    from autoteam.accounts import (
+        STATUS_ACTIVE,
+        STATUS_EXHAUSTED,
+        STATUS_PENDING,
+        STATUS_SOLD,
+        STATUS_STANDBY,
+        load_accounts,
+    )
     from autoteam.codex_auth import check_codex_quota, quota_result_quota_info
 
     accounts = load_accounts()
     quota_cache = {}
 
-    for acc in accounts:
-        if acc["status"] != STATUS_ACTIVE and not _is_main_account_email(acc.get("email")):
-            continue
+    if realtime_quota:
+        for acc in accounts:
+            if acc["status"] != STATUS_ACTIVE and not _is_main_account_email(acc.get("email")):
+                continue
 
-        auth_file = _resolve_status_auth_file(acc)
-        if not auth_file:
-            continue
+            auth_file = _resolve_status_auth_file(acc)
+            if not auth_file:
+                continue
 
-        try:
-            auth_data = json.loads(read_text(Path(auth_file)))
-            access_token = auth_data.get("access_token")
-            if access_token:
-                status, info = check_codex_quota(access_token)
-                if status == "ok" and isinstance(info, dict):
-                    quota_cache[acc["email"]] = info
-                elif status == "exhausted":
-                    quota_info = quota_result_quota_info(info)
-                    if quota_info:
-                        quota_cache[acc["email"]] = quota_info
-        except Exception:
-            pass
+            try:
+                auth_data = json.loads(read_text(Path(auth_file)))
+                access_token = auth_data.get("access_token")
+                if access_token:
+                    status, info = check_codex_quota(access_token)
+                    if status == "ok" and isinstance(info, dict):
+                        quota_cache[acc["email"]] = info
+                    elif status == "exhausted":
+                        quota_info = quota_result_quota_info(info)
+                        if quota_info:
+                            quota_cache[acc["email"]] = quota_info
+            except Exception:
+                pass
 
     sanitized_accounts = [_sanitize_account(a, quota_cache.get(a.get("email"))) for a in accounts]
 
@@ -2071,6 +2194,7 @@ def get_status():
         "standby": sum(1 for a in sanitized_accounts if a["status"] == STATUS_STANDBY),
         "exhausted": sum(1 for a in sanitized_accounts if a["status"] == STATUS_EXHAUSTED),
         "pending": sum(1 for a in sanitized_accounts if a["status"] == STATUS_PENDING),
+        "sold": sum(1 for a in sanitized_accounts if a["status"] == STATUS_SOLD),
         "total": len(sanitized_accounts),
     }
 
@@ -2145,59 +2269,176 @@ def post_sync_accounts():
 
 
 @app.get("/api/team/members")
-def get_team_members():
-    """获取 Team 全部成员（包括手动添加的外部成员）"""
-    from autoteam.admin_state import get_admin_session_token, get_chatgpt_account_id
+def get_team_members(refresh: bool = False, allow_browser: bool = False):
+    """获取 Team 全部成员。
 
-    if not get_admin_session_token() or not get_chatgpt_account_id():
+    默认只返回本地缓存或本地账号快照，避免进入页面时被浏览器远端请求拖慢。
+    refresh=true 时优先使用已缓存的 ChatGPT access token 直连远端；只有显式
+    allow_browser=true 才会回退到 Playwright。
+    """
+    from autoteam.admin_state import (
+        get_admin_session_token,
+        get_chatgpt_access_token,
+        get_chatgpt_account_id,
+        get_chatgpt_oai_device_id,
+    )
+    from autoteam.team_cache import load_team_members_cache, save_team_members_cache
+
+    account_id = get_chatgpt_account_id()
+    if not get_admin_session_token() or not account_id:
         raise HTTPException(status_code=400, detail="请先完成管理员登录")
 
+    cached = load_team_members_cache()
+    if cached and not refresh:
+        return {**cached, "cached": True}
+
+    def _local_snapshot(refresh_error: str = ""):
+        from autoteam.accounts import load_accounts
+
+        members = []
+        for account in load_accounts():
+            email = (account.get("email") or "").lower()
+            if not email:
+                continue
+            members.append(
+                {
+                    "email": email,
+                    "role": "member",
+                    "user_id": "",
+                    "is_local": True,
+                    "type": "member",
+                    "status": account.get("status", ""),
+                }
+            )
+        payload = {
+            "members": members,
+            "total": len(members),
+            "invites": 0,
+            "cached": True,
+            "local_snapshot": True,
+            "cache_updated_at": time.time(),
+        }
+        if refresh_error:
+            payload["refresh_error"] = refresh_error
+        return payload
+
+    def _format_team_payload(members, invites):
+        from autoteam.accounts import load_accounts
+
+        local_emails = {a["email"].lower() for a in load_accounts()}
+        result = []
+        for m in members:
+            email = (m.get("email") or "").lower()
+            result.append(
+                {
+                    "email": m.get("email", ""),
+                    "role": m.get("role", ""),
+                    "user_id": m.get("user_id") or m.get("id", ""),
+                    "is_local": email in local_emails,
+                    "type": "member",
+                }
+            )
+        for inv in invites:
+            email = (inv.get("email_address") or inv.get("email") or "").lower()
+            result.append(
+                {
+                    "email": email,
+                    "role": inv.get("role", ""),
+                    "user_id": inv.get("id", ""),
+                    "is_local": email in local_emails,
+                    "type": "invite",
+                }
+            )
+        return {
+            "members": result,
+            "total": len(members),
+            "invites": len(invites),
+            "cached": False,
+            "cache_updated_at": time.time(),
+        }
+
+    def _fetch_with_cached_token():
+        access_token = get_chatgpt_access_token()
+        if not access_token:
+            return None
+
+        import requests
+
+        headers = {
+            "authorization": f"Bearer {access_token}",
+            "chatgpt-account-id": account_id,
+            "oai-language": "en-US",
+        }
+        device_id = get_chatgpt_oai_device_id()
+        if device_id:
+            headers["oai-device-id"] = device_id
+
+        users_resp = requests.get(
+            f"https://chatgpt.com/backend-api/accounts/{account_id}/users",
+            headers=headers,
+            timeout=20,
+        )
+        users_resp.raise_for_status()
+        users_data = users_resp.json()
+        members = users_data.get("items", users_data.get("users", users_data.get("members", [])))
+
+        invites_resp = requests.get(
+            f"https://chatgpt.com/backend-api/accounts/{account_id}/invites",
+            headers=headers,
+            timeout=20,
+        )
+        invites_resp.raise_for_status()
+        invites_data = invites_resp.json()
+        invites = (
+            invites_data
+            if isinstance(invites_data, list)
+            else invites_data.get("invites", invites_data.get("account_invites", []))
+        )
+        return _format_team_payload(members, invites)
+
+    try:
+        token_result = _fetch_with_cached_token()
+        if token_result is not None:
+            return save_team_members_cache(token_result)
+    except Exception as exc:
+        logger.warning("[API] 使用缓存 access token 获取 Team 成员失败: %s", exc)
+        if cached:
+            return {**cached, "cached": True, "refresh_error": str(exc)}
+        if not allow_browser:
+            return _local_snapshot(str(exc))
+
+    if not allow_browser:
+        message = "尚未缓存 ChatGPT access token，请重新完成管理员登录后再点击验证刷新"
+        if cached:
+            return {**cached, "cached": True, "refresh_error": message}
+        return _local_snapshot(message if refresh else "")
+
     if not _playwright_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再查询"))
+        detail = _current_busy_detail("有任务正在执行，请等待完成后再查询")
+        if cached:
+            return {**cached, "cached": True, "refresh_error": detail}
+        raise HTTPException(status_code=409, detail=detail)
 
     try:
 
         def _fetch_team_members():
             from autoteam.account_ops import fetch_team_state
-            from autoteam.accounts import load_accounts
 
             def _collect(chatgpt):
                 members, invites = fetch_team_state(chatgpt)
-                local_emails = {a["email"].lower() for a in load_accounts()}
-
-                result = []
-                for m in members:
-                    email = (m.get("email") or "").lower()
-                    result.append(
-                        {
-                            "email": m.get("email", ""),
-                            "role": m.get("role", ""),
-                            "user_id": m.get("user_id") or m.get("id", ""),
-                            "is_local": email in local_emails,
-                            "type": "member",
-                        }
-                    )
-                for inv in invites:
-                    email = (inv.get("email_address") or inv.get("email") or "").lower()
-                    result.append(
-                        {
-                            "email": email,
-                            "role": inv.get("role", ""),
-                            "user_id": inv.get("id", ""),
-                            "is_local": email in local_emails,
-                            "type": "invite",
-                        }
-                    )
-                return {"members": result, "total": len(members), "invites": len(invites)}
+                return _format_team_payload(members, invites)
 
             return _run_with_chatgpt_session(_collect)
 
         try:
-            return _pw_executor.run(_fetch_team_members)
+            result = _pw_executor.run(_fetch_team_members)
+            return save_team_members_cache(result)
         except HTTPException:
             raise
         except Exception as exc:
             logger.exception("[API] 获取 Team 成员失败")
+            if cached:
+                return {**cached, "cached": True, "refresh_error": str(exc)}
             raise HTTPException(status_code=502, detail=str(exc))
     finally:
         _playwright_lock.release()
@@ -2428,7 +2669,14 @@ def post_rotate(params: TaskParams = TaskParams()):
     from autoteam.manager import cmd_rotate
 
     target = min(MAX_TEAM_SEATS, max(1, params.target or TEAM_TARGET_SEATS))
-    task = _start_task("rotate", cmd_rotate, {"target": target}, target)
+    parallel_workers = _resolve_parallel_workers_param(params.parallel_workers)
+    task = _start_task(
+        "rotate",
+        cmd_rotate,
+        {"target": target, "parallel_workers": parallel_workers},
+        target,
+        parallel_workers=parallel_workers,
+    )
     return task
 
 
@@ -2452,9 +2700,11 @@ def post_fill(params: TaskParams = TaskParams()):
     from autoteam.manager import cmd_fill
 
     task_params = {"target": min(MAX_TEAM_SEATS, max(1, params.target or TEAM_TARGET_SEATS))}
+    parallel_workers = _resolve_parallel_workers_param(params.parallel_workers)
+    task_params["parallel_workers"] = parallel_workers
     if params.target is None:
         task_params["max_add"] = FILL_BATCH_SIZE
-    task = _start_task("fill", cmd_fill, task_params, params.target)
+    task = _start_task("fill", cmd_fill, task_params, params.target, parallel_workers=parallel_workers)
     return task
 
 
@@ -2472,7 +2722,14 @@ def post_cpa_batch(params: CpaBatchParams = CpaBatchParams()):
 
     import uuid
 
-    from autoteam.cpa_batch import DEFAULT_BATCH_SIZE, DEFAULT_TARGET, JOIN_MODE_DIRECT, VALID_JOIN_MODES, run_cpa_batch
+    from autoteam.cpa_batch import (
+        DEFAULT_BATCH_SIZE,
+        DEFAULT_TARGET,
+        JOIN_MODE_DIRECT,
+        JOIN_MODE_INVITE,
+        VALID_JOIN_MODES,
+        run_cpa_batch,
+    )
 
     join_mode = (params.join_mode or JOIN_MODE_DIRECT).strip().lower()
     if join_mode not in VALID_JOIN_MODES:
@@ -2480,15 +2737,25 @@ def post_cpa_batch(params: CpaBatchParams = CpaBatchParams()):
 
     target = min(DEFAULT_TARGET, max(1, params.target or DEFAULT_TARGET))
     batch_size = min(DEFAULT_BATCH_SIZE, max(1, params.batch_size or DEFAULT_BATCH_SIZE))
+    parallel_workers = _resolve_parallel_workers_param(params.parallel_workers)
+    if join_mode == JOIN_MODE_INVITE:
+        parallel_workers = 1
     run_id = uuid.uuid4().hex[:12]
     task = _start_task(
         "cpa-batch",
         run_cpa_batch,
-        {"run_id": run_id, "join_mode": join_mode, "target": target, "batch_size": batch_size},
+        {
+            "run_id": run_id,
+            "join_mode": join_mode,
+            "target": target,
+            "batch_size": batch_size,
+            "parallel_workers": parallel_workers,
+        },
         run_id,
         join_mode=join_mode,
         target=target,
         batch_size=batch_size,
+        parallel_workers=parallel_workers,
     )
     return task
 
@@ -2680,12 +2947,17 @@ def _auto_check_loop():
             target_seats = cfg.get("target_seats", _DEFAULT_TEAM_TARGET_SEATS)
             accounts = load_accounts()
             local_active_count = sum(
-                1 for a in accounts if a["status"] == STATUS_ACTIVE and not _is_main_account_email(a.get("email"))
+                1
+                for a in accounts
+                if a["status"] == STATUS_ACTIVE
+                and not a.get("sync_disabled")
+                and not _is_main_account_email(a.get("email"))
             )
             active = [
                 a
                 for a in accounts
                 if a["status"] == STATUS_ACTIVE
+                and not a.get("sync_disabled")
                 and not _is_main_account_email(a.get("email"))
                 and a.get("auth_file")
                 and Path(a["auth_file"]).exists()

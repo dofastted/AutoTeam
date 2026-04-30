@@ -161,6 +161,48 @@ def test_cmd_fill_syncs_cpa_after_each_configured_batch(monkeypatch):
     assert chatgpt.stopped == 1
 
 
+def test_cmd_fill_uses_parallel_creator_for_new_accounts(monkeypatch):
+    chatgpt = _FakeChatGPT()
+    count_values = iter([0, 3])
+    events = []
+
+    import autoteam.config as config
+
+    monkeypatch.setattr(config, "FILL_BATCH_SIZE", 10)
+    monkeypatch.setattr(config, "TEAM_TARGET_SEATS", 999)
+    monkeypatch.setattr(config, "MAX_TEAM_SEATS", 999)
+    monkeypatch.setattr(manager, "ChatGPTTeamAPI", lambda: chatgpt)
+    monkeypatch.setattr(manager, "CloudMailClient", lambda: _FakeMailClient())
+    monkeypatch.setattr(manager, "get_team_member_count", lambda _chatgpt: next(count_values))
+    monkeypatch.setattr(manager, "get_standby_accounts", lambda: [])
+
+    def fake_parallel(total, *, parallel_workers=None, stop_after_success=None):
+        events.append(("parallel", total, parallel_workers))
+        return {
+            "attempted": 3,
+            "succeeded": 3,
+            "failed": 0,
+            "emails": ["a@example.com", "b@example.com", "c@example.com"],
+            "worker_reports": [
+                {"worker_index": 1, "target": 1, "attempted": 1, "succeeded": 1, "failed": 0},
+                {"worker_index": 2, "target": 1, "attempted": 1, "succeeded": 1, "failed": 0},
+                {"worker_index": 3, "target": 1, "attempted": 1, "succeeded": 1, "failed": 0},
+            ],
+            "parallel_workers": 3,
+        }
+
+    monkeypatch.setattr(manager, "_create_new_accounts_parallel", fake_parallel)
+    monkeypatch.setattr(manager, "sync_to_cpa", lambda: events.append(("sync", None)) or {"uploaded": 3})
+    monkeypatch.setattr(manager, "cmd_status", lambda: events.append(("status", None)))
+
+    result = manager.cmd_fill(target=3, parallel_workers=3)
+
+    assert events[0] == ("parallel", 3, 3)
+    assert result["succeeded"] == 3
+    assert result["parallel_workers"] == 3
+    assert len(result["worker_reports"]) == 3
+
+
 def test_auto_reuse_skip_reason_detects_google_provider_and_gmail():
     assert manager._auto_reuse_skip_reason({"email": "bubblehuntr@gmail.com"}) == "Google 登录账号暂不支持自动复用"
     assert (
