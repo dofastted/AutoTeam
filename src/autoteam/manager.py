@@ -63,6 +63,7 @@ from autoteam.codex_auth import (
     quota_result_resets_at,
     refresh_access_token,
     save_auth_file,
+    select_oauth_rt_auth_file,
 )
 from autoteam.config import get_playwright_launch_options
 from autoteam.cpa_sync import sync_from_cpa
@@ -107,6 +108,11 @@ def _archive_saved_auth(email: str, auth_file: str) -> str:
 
 def _archive_update(archive_path: str) -> dict[str, str]:
     return {"cpa_archive_file": archive_path} if archive_path else {}
+
+
+def _account_oauth_rt_auth_file(acc: dict) -> str:
+    auth_file = select_oauth_rt_auth_file(acc)
+    return auth_file if auth_file and Path(auth_file).exists() else ""
 
 
 def _resolve_parallel_workers(value=None) -> int:
@@ -388,8 +394,7 @@ def cmd_status():
         for a in accounts
         if a["status"] == STATUS_ACTIVE
         and not a.get("sync_disabled")
-        and a.get("auth_file")
-        and Path(a["auth_file"]).exists()
+        and _account_oauth_rt_auth_file(a)
     )
     if active_count:
         logger.info("[状态] 查询 %d 个 active 账号额度...", active_count)
@@ -397,10 +402,9 @@ def cmd_status():
         if (
             acc["status"] == STATUS_ACTIVE
             and not acc.get("sync_disabled")
-            and acc.get("auth_file")
-            and Path(acc["auth_file"]).exists()
+            and _account_oauth_rt_auth_file(acc)
         ):
-            auth_data = json.loads(read_text(Path(acc["auth_file"])))
+            auth_data = json.loads(read_text(Path(_account_oauth_rt_auth_file(acc))))
             access_token = auth_data.get("access_token")
             if access_token:
                 status, info = check_codex_quota(access_token)
@@ -419,9 +423,9 @@ def _check_and_refresh(acc):
     info: exhausted 时为 exhausted_info，ok 时为 quota_info dict
     """
     email = acc["email"]
-    auth_file = acc.get("auth_file")
+    auth_file = _account_oauth_rt_auth_file(acc)
 
-    if not auth_file or not Path(auth_file).exists():
+    if not auth_file:
         return "no_auth", None
 
     auth_data = json.loads(read_text(Path(auth_file)))
@@ -529,7 +533,7 @@ def cmd_check():
     mail_domain = get_mail_domain()
     mail_domain_suffix = mail_domain.lstrip("@") if mail_domain else ""
     for a in all_active:
-        if a.get("auth_file") and Path(a["auth_file"]).exists():
+        if _account_oauth_rt_auth_file(a):
             active_with_auth.append(a)
         else:
             # 只管我们域名的账号
@@ -1964,7 +1968,7 @@ def cmd_rotate(target_seats=None, parallel_workers=None):
             if filled >= vacancies:
                 break
             email = acc["email"]
-            auth_file = acc.get("auth_file")
+            auth_file = _account_oauth_rt_auth_file(acc)
 
             skip_reason = _auto_reuse_skip_reason(acc)
             if skip_reason:
@@ -1974,7 +1978,7 @@ def cmd_rotate(target_seats=None, parallel_workers=None):
 
             # 验证额度是否真的恢复了
             quota_ok = False
-            if auth_file and Path(auth_file).exists():
+            if auth_file:
                 try:
                     auth_data = json.loads(read_text(Path(auth_file)))
                     access_token = auth_data.get("access_token")

@@ -412,10 +412,8 @@ def _is_cpa_uploadable_auth_path(path):
 
 
 def _account_auth_path_for_cpa(acc):
-    for key in ("rt_auth_file", "auth_file"):
-        auth_path = acc.get(key) or ""
-        if not auth_path:
-            continue
+    auth_path = select_oauth_rt_auth_file(acc)
+    if auth_path:
         path = Path(auth_path)
         if path.exists() and _is_cpa_uploadable_auth_path(path):
             return path

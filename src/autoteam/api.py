@@ -2389,7 +2389,7 @@ def get_status(realtime_quota: bool = True):
         VALID_USAGE_STATUSES,
         load_accounts,
     )
-    from autoteam.codex_auth import check_codex_quota, quota_result_quota_info
+    from autoteam.codex_auth import check_codex_quota, quota_result_quota_info, select_oauth_rt_auth_file
 
     accounts = load_accounts()
     quota_cache = {}
@@ -2399,7 +2399,12 @@ def get_status(realtime_quota: bool = True):
             if acc["status"] != STATUS_ACTIVE and not _is_main_account_email(acc.get("email")):
                 continue
 
-            auth_file = _resolve_status_auth_file(acc)
+            if _is_main_account_email(acc.get("email")):
+                from autoteam.codex_auth import get_saved_main_auth_file
+
+                auth_file = get_saved_main_auth_file()
+            else:
+                auth_file = select_oauth_rt_auth_file(acc)
             if not auth_file:
                 continue
 
@@ -3307,7 +3312,7 @@ def _auto_check_wait(interval_seconds, poll_seconds=0.2):
 def _auto_check_loop():
     """后台巡检线程：定期检查额度，多个账号低于阈值时自动轮转"""
     from autoteam.accounts import STATUS_ACTIVE, STATUS_UNAVAILABLE, load_accounts, update_account
-    from autoteam.codex_auth import check_codex_quota
+    from autoteam.codex_auth import check_codex_quota, select_oauth_rt_auth_file
 
     while not _auto_check_stop.is_set():
         try:
@@ -3349,14 +3354,16 @@ def _auto_check_loop():
                 if a["status"] == STATUS_ACTIVE
                 and not a.get("sync_disabled")
                 and not _is_main_account_email(a.get("email"))
-                and a.get("auth_file")
-                and Path(a["auth_file"]).exists()
+                and select_oauth_rt_auth_file(a)
             ]
 
             low_accounts = []
             for acc in active:
                 try:
-                    auth_data = json.loads(read_text(Path(acc["auth_file"])))
+                    auth_file = select_oauth_rt_auth_file(acc)
+                    if not auth_file:
+                        continue
+                    auth_data = json.loads(read_text(Path(auth_file)))
                     access_token = auth_data.get("access_token")
                     if not access_token:
                         continue

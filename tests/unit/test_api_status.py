@@ -1193,7 +1193,7 @@ def test_put_runtime_config_source_applies_env_and_updates_api_key(tmp_path, mon
 
 def test_auto_check_skips_rotate_when_pool_configs_are_missing(tmp_path, monkeypatch, caplog):
     auth_file = tmp_path / "active.json"
-    auth_file.write_text('{"access_token": "token-low"}', encoding="utf-8")
+    auth_file.write_text('{"access_token": "token-low", "refresh_token": "rt-low"}', encoding="utf-8")
 
     updates = []
     started = []
@@ -1216,7 +1216,7 @@ def test_auto_check_skips_rotate_when_pool_configs_are_missing(tmp_path, monkeyp
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(
         "autoteam.accounts.load_accounts",
-        lambda: [{"email": "low@example.com", "status": "active", "auth_file": str(auth_file)}],
+        lambda: [{"email": "low@example.com", "status": "active", "rt_auth_file": str(auth_file)}],
     )
     monkeypatch.setattr(
         "autoteam.codex_auth.check_codex_quota",
@@ -1247,11 +1247,66 @@ def test_auto_check_skips_rotate_when_pool_configs_are_missing(tmp_path, monkeyp
     assert "配置面板" in caplog.text
 
 
+def test_auto_check_ignores_session_only_auth_file(tmp_path, monkeypatch):
+    session_file = tmp_path / "session.json"
+    session_file.write_text(
+        json.dumps(
+            {
+                "access_token": "session-token",
+                "refresh_token": "",
+                "credential_source": "chatgpt_session",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    checked = []
+    started = []
+
+    _set_pool_runtime_config(monkeypatch)
+    monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 1, "target_seats": 1})
+    monkeypatch.setattr(api, "_auto_check_stop", threading.Event())
+    monkeypatch.setattr(api, "_auto_check_restart", threading.Event())
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "session@example.com",
+                "status": "active",
+                "auth_file": str(session_file),
+                "session_auth_file": str(session_file),
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "autoteam.codex_auth.check_codex_quota",
+        lambda token: checked.append(token) or ("ok", {"primary_pct": 100}),
+    )
+    monkeypatch.setattr(api, "_auto_check_team_member_count", lambda: 1)
+    monkeypatch.setattr("autoteam.accounts.update_account", lambda *args, **kwargs: None)
+    monkeypatch.setattr(api, "_start_task", lambda *args, **kwargs: started.append((args, kwargs)))
+
+    stop_event = api._auto_check_stop
+    wait_calls = {"count": 0}
+
+    def fake_wait(_seconds):
+        wait_calls["count"] += 1
+        return wait_calls["count"] > 1
+
+    monkeypatch.setattr(stop_event, "wait", fake_wait)
+
+    api._auto_check_loop()
+
+    assert checked == []
+    assert started == []
+
+
 def test_auto_check_persists_reuse_blocking_metadata_before_rotate(tmp_path, monkeypatch):
     low_auth = tmp_path / "low.json"
     exhausted_auth = tmp_path / "exhausted.json"
-    low_auth.write_text('{"access_token": "token-low"}', encoding="utf-8")
-    exhausted_auth.write_text('{"access_token": "token-exhausted"}', encoding="utf-8")
+    low_auth.write_text('{"access_token": "token-low", "refresh_token": "rt-low"}', encoding="utf-8")
+    exhausted_auth.write_text('{"access_token": "token-exhausted", "refresh_token": "rt-exhausted"}', encoding="utf-8")
 
     updates = []
 
@@ -1266,8 +1321,8 @@ def test_auto_check_persists_reuse_blocking_metadata_before_rotate(tmp_path, mon
     monkeypatch.setattr(
         "autoteam.accounts.load_accounts",
         lambda: [
-            {"email": "low@example.com", "status": "active", "auth_file": str(low_auth)},
-            {"email": "exhausted@example.com", "status": "active", "auth_file": str(exhausted_auth)},
+            {"email": "low@example.com", "status": "active", "rt_auth_file": str(low_auth)},
+            {"email": "exhausted@example.com", "status": "active", "rt_auth_file": str(exhausted_auth)},
         ],
     )
     monkeypatch.setattr(
@@ -1331,7 +1386,7 @@ def test_auto_check_persists_reuse_blocking_metadata_before_rotate(tmp_path, mon
 
 def test_auto_check_falls_back_when_ok_quota_has_no_reset_time(tmp_path, monkeypatch):
     auth_file = tmp_path / "low.json"
-    auth_file.write_text('{"access_token": "token-low"}', encoding="utf-8")
+    auth_file.write_text('{"access_token": "token-low", "refresh_token": "rt-low"}', encoding="utf-8")
 
     updates = []
 
@@ -1345,7 +1400,7 @@ def test_auto_check_falls_back_when_ok_quota_has_no_reset_time(tmp_path, monkeyp
     monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
     monkeypatch.setattr(
         "autoteam.accounts.load_accounts",
-        lambda: [{"email": "low@example.com", "status": "active", "auth_file": str(auth_file)}],
+        lambda: [{"email": "low@example.com", "status": "active", "rt_auth_file": str(auth_file)}],
     )
     monkeypatch.setattr(
         "autoteam.codex_auth.check_codex_quota",
@@ -1376,7 +1431,7 @@ def test_auto_check_falls_back_when_ok_quota_has_no_reset_time(tmp_path, monkeyp
 
 def test_auto_check_falls_back_when_exhausted_quota_has_no_reset_time(tmp_path, monkeypatch):
     auth_file = tmp_path / "exhausted.json"
-    auth_file.write_text('{"access_token": "token-exhausted"}', encoding="utf-8")
+    auth_file.write_text('{"access_token": "token-exhausted", "refresh_token": "rt-exhausted"}', encoding="utf-8")
 
     updates = []
 
@@ -1390,7 +1445,7 @@ def test_auto_check_falls_back_when_exhausted_quota_has_no_reset_time(tmp_path, 
     monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
     monkeypatch.setattr(
         "autoteam.accounts.load_accounts",
-        lambda: [{"email": "exhausted@example.com", "status": "active", "auth_file": str(auth_file)}],
+        lambda: [{"email": "exhausted@example.com", "status": "active", "rt_auth_file": str(auth_file)}],
     )
     monkeypatch.setattr(
         "autoteam.codex_auth.check_codex_quota",
@@ -1434,7 +1489,7 @@ def test_auto_check_falls_back_when_exhausted_quota_has_no_reset_time(tmp_path, 
 
 def test_auto_check_marks_account_unavailable_when_quota_reports_account_deactivated(tmp_path, monkeypatch):
     auth_file = tmp_path / "deactivated.json"
-    auth_file.write_text('{"access_token": "token-deactivated"}', encoding="utf-8")
+    auth_file.write_text('{"access_token": "token-deactivated", "refresh_token": "rt-deactivated"}', encoding="utf-8")
 
     updates = []
     started = []
@@ -1449,7 +1504,7 @@ def test_auto_check_marks_account_unavailable_when_quota_reports_account_deactiv
     monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
     monkeypatch.setattr(
         "autoteam.accounts.load_accounts",
-        lambda: [{"email": "dead@example.com", "status": "active", "auth_file": str(auth_file)}],
+        lambda: [{"email": "dead@example.com", "status": "active", "rt_auth_file": str(auth_file)}],
     )
     monkeypatch.setattr(
         "autoteam.codex_auth.check_codex_quota",
@@ -1484,7 +1539,10 @@ def test_auto_check_triggers_rotate_when_active_count_is_below_target(tmp_path, 
     auth_files = []
     for idx in range(3):
         auth_file = tmp_path / f"active-{idx}.json"
-        auth_file.write_text(json.dumps({"access_token": f"token-{idx}"}), encoding="utf-8")
+        auth_file.write_text(
+            json.dumps({"access_token": f"token-{idx}", "refresh_token": f"rt-{idx}"}),
+            encoding="utf-8",
+        )
         auth_files.append(auth_file)
 
     started = []
@@ -1506,7 +1564,7 @@ def test_auto_check_triggers_rotate_when_active_count_is_below_target(tmp_path, 
     monkeypatch.setattr(
         "autoteam.accounts.load_accounts",
         lambda: [
-            {"email": f"active-{idx}@example.com", "status": "active", "auth_file": str(auth_files[idx])}
+            {"email": f"active-{idx}@example.com", "status": "active", "rt_auth_file": str(auth_files[idx])}
             for idx in range(3)
         ],
     )
@@ -1542,7 +1600,10 @@ def test_auto_check_skips_shortage_rotate_when_team_is_already_full(tmp_path, mo
     auth_files = []
     for idx in range(3):
         auth_file = tmp_path / f"active-{idx}.json"
-        auth_file.write_text(json.dumps({"access_token": f"token-{idx}"}), encoding="utf-8")
+        auth_file.write_text(
+            json.dumps({"access_token": f"token-{idx}", "refresh_token": f"rt-{idx}"}),
+            encoding="utf-8",
+        )
         auth_files.append(auth_file)
 
     started = []
@@ -1557,7 +1618,7 @@ def test_auto_check_skips_shortage_rotate_when_team_is_already_full(tmp_path, mo
     monkeypatch.setattr(
         "autoteam.accounts.load_accounts",
         lambda: [
-            {"email": f"active-{idx}@example.com", "status": "active", "auth_file": str(auth_files[idx])}
+            {"email": f"active-{idx}@example.com", "status": "active", "rt_auth_file": str(auth_files[idx])}
             for idx in range(3)
         ],
     )
@@ -1589,7 +1650,10 @@ def test_auto_check_logs_threshold_message_when_team_is_full_but_low_accounts_ar
     auth_files = []
     for idx in range(3):
         auth_file = tmp_path / f"active-{idx}.json"
-        auth_file.write_text(json.dumps({"access_token": f"token-{idx}"}), encoding="utf-8")
+        auth_file.write_text(
+            json.dumps({"access_token": f"token-{idx}", "refresh_token": f"rt-{idx}"}),
+            encoding="utf-8",
+        )
         auth_files.append(auth_file)
 
     monkeypatch.setattr(api, "_auto_check_config", {"interval": 0, "threshold": 10, "min_low": 2, "target_seats": 5})
@@ -1599,7 +1663,7 @@ def test_auto_check_logs_threshold_message_when_team_is_full_but_low_accounts_ar
     monkeypatch.setattr(
         "autoteam.accounts.load_accounts",
         lambda: [
-            {"email": f"active-{idx}@example.com", "status": "active", "auth_file": str(auth_files[idx])}
+            {"email": f"active-{idx}@example.com", "status": "active", "rt_auth_file": str(auth_files[idx])}
             for idx in range(3)
         ],
     )
@@ -1634,7 +1698,10 @@ def test_auto_check_triggers_cleanup_when_team_count_exceeds_target(tmp_path, mo
     auth_files = []
     for idx in range(4):
         auth_file = tmp_path / f"active-{idx}.json"
-        auth_file.write_text(json.dumps({"access_token": f"token-{idx}"}), encoding="utf-8")
+        auth_file.write_text(
+            json.dumps({"access_token": f"token-{idx}", "refresh_token": f"rt-{idx}"}),
+            encoding="utf-8",
+        )
         auth_files.append(auth_file)
 
     started = []
@@ -1655,7 +1722,7 @@ def test_auto_check_triggers_cleanup_when_team_count_exceeds_target(tmp_path, mo
     monkeypatch.setattr(
         "autoteam.accounts.load_accounts",
         lambda: [
-            {"email": f"active-{idx}@example.com", "status": "active", "auth_file": str(auth_files[idx])}
+            {"email": f"active-{idx}@example.com", "status": "active", "rt_auth_file": str(auth_files[idx])}
             for idx in range(4)
         ],
     )
