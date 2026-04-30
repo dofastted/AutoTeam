@@ -114,3 +114,28 @@ def test_select_oauth_rt_auth_file_prefers_valid_rt_over_legacy_auth_file(tmp_pa
     }
 
     assert codex_auth.select_oauth_rt_auth_file(account) == rt_file
+
+
+def test_get_existing_session_auth_file_prefers_session_auth_file():
+    account = {
+        "session_auth_file": "/tmp/session-current.json",
+        "auth_file": "/tmp/codex-user@example.com-team-old-session.json",
+    }
+
+    assert codex_auth.get_existing_session_auth_file(account) == "/tmp/session-current.json"
+
+
+def test_get_existing_session_auth_file_reads_legacy_session_auth_file():
+    account = {
+        "auth_file": "/tmp/codex-user@example.com-team-old-session.json",
+    }
+
+    assert codex_auth.get_existing_session_auth_file(account) == account["auth_file"]
+
+
+def test_get_existing_session_auth_file_ignores_non_session_auth_file():
+    account = {
+        "auth_file": "/tmp/codex-user@example.com-team-old-oauth.json",
+    }
+
+    assert codex_auth.get_existing_session_auth_file(account) == ""

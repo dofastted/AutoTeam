@@ -184,6 +184,19 @@ def select_oauth_rt_auth_file(account: dict) -> str:
     return ""
 
 
+def get_existing_session_auth_file(account: dict | None) -> str:
+    """返回账号已有的 ChatGPT session 备份文件路径。"""
+    account = account or {}
+    session_auth_file = str(account.get("session_auth_file") or "").strip()
+    if session_auth_file:
+        return session_auth_file
+
+    legacy_auth_file = str(account.get("auth_file") or "").strip()
+    if legacy_auth_file.endswith("-session.json"):
+        return legacy_auth_file
+    return ""
+
+
 def _extract_session_token_from_cookies(cookies):
     session_parts = {}
     session_token = ""

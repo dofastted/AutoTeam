@@ -285,7 +285,11 @@ def test_post_account_login_only_requires_local_mail_and_keeps_old_session(tmp_p
         "autoteam.codex_auth.check_codex_quota",
         lambda token, account_id=None: quota_calls.append((token, account_id)) or ("ok", {"primary_pct": 10}),
     )
-    monkeypatch.setattr("autoteam.codex_auth.save_auth_file", lambda _bundle: str(oauth_file))
+    save_sources = []
+    monkeypatch.setattr(
+        "autoteam.codex_auth.save_auth_file",
+        lambda _bundle, source=None: save_sources.append(source) or str(oauth_file),
+    )
 
     def fake_update(email, **kwargs):
         updates.append((email, kwargs))
@@ -303,6 +307,7 @@ def test_post_account_login_only_requires_local_mail_and_keeps_old_session(tmp_p
     assert accounts_data[0]["rt_auth_file"] == str(oauth_file)
     assert accounts_data[0]["session_auth_file"] == str(session_file)
     assert accounts_data[0]["status"] == "active"
+    assert save_sources == ["oauth"]
     assert any("rt_auth_file" in item[1] for item in updates)
 
 
@@ -434,7 +439,11 @@ def test_post_account_login_force_allows_sync_disabled(tmp_path, monkeypatch):
             "access_token": "token-1",
         },
     )
-    monkeypatch.setattr("autoteam.codex_auth.save_auth_file", lambda _bundle: str(oauth_file))
+    save_sources = []
+    monkeypatch.setattr(
+        "autoteam.codex_auth.save_auth_file",
+        lambda _bundle, source=None: save_sources.append(source) or str(oauth_file),
+    )
 
     def fake_update(email, **kwargs):
         accounts_data[0].update(kwargs)
@@ -455,6 +464,7 @@ def test_post_account_login_force_allows_sync_disabled(tmp_path, monkeypatch):
     result = api.post_account_login(api.LoginAccountParams(email="dead@example.com", force=True))
 
     assert result["result"]["auth_file"] == str(oauth_file)
+    assert save_sources == ["oauth"]
 
 
 def test_post_account_usage_status_allows_normal_inventory_only(monkeypatch):

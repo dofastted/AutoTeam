@@ -55,6 +55,7 @@ from autoteam.codex_auth import (
     _is_google_redirect,
     build_chatgpt_session_auth_bundle,
     check_codex_quota,
+    get_existing_session_auth_file,
     get_quota_exhausted_info,
     get_saved_main_auth_file,
     login_codex_via_browser,
@@ -689,11 +690,7 @@ def cmd_check():
                     "auth_file": auth_file,
                     "rt_auth_file": auth_file,
                 }
-                previous_session_auth_file = acc.get("session_auth_file") or ""
-                if not previous_session_auth_file:
-                    current_auth_file = acc.get("auth_file") or ""
-                    if current_auth_file and current_auth_file.endswith("-session.json"):
-                        previous_session_auth_file = current_auth_file
+                previous_session_auth_file = get_existing_session_auth_file(acc)
                 if previous_session_auth_file:
                     update_fields["session_auth_file"] = previous_session_auth_file
                 update_account(email, **update_fields, **_archive_update(archive_path))
@@ -1788,11 +1785,7 @@ def reinvite_account(chatgpt_api, mail_client, acc):
         "auth_file": auth_file,
         "rt_auth_file": auth_file,
     }
-    previous_session_auth_file = acc.get("session_auth_file") or ""
-    if not previous_session_auth_file:
-        current_auth_file = acc.get("auth_file") or ""
-        if current_auth_file and current_auth_file.endswith("-session.json"):
-            previous_session_auth_file = current_auth_file
+    previous_session_auth_file = get_existing_session_auth_file(acc)
     if previous_session_auth_file:
         update_fields["session_auth_file"] = previous_session_auth_file
     update_account(

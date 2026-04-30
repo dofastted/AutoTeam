@@ -2167,6 +2167,7 @@ def post_account_cpa_auth(email: str):
         import autoteam.codex_auth as codex_auth
         from autoteam.codex_auth import (
             check_codex_quota,
+            get_existing_session_auth_file,
             login_codex_via_browser,
             quota_result_quota_info,
             quota_result_resets_at,
@@ -2188,11 +2189,7 @@ def post_account_cpa_auth(email: str):
             logger.info("[CPA认证] 本地缺少认证文件，开始 Codex 登录: %s", email)
             mail_client = get_mail_client_for_account(latest)
             mail_client.login()
-            previous_session_auth_file = latest.get("session_auth_file") or ""
-            if not previous_session_auth_file:
-                current_auth_file = latest.get("auth_file") or ""
-                if current_auth_file and current_auth_file.endswith("-session.json"):
-                    previous_session_auth_file = current_auth_file
+            previous_session_auth_file = get_existing_session_auth_file(latest)
             bundle = login_codex_via_browser(
                 email,
                 latest.get("password", ""),
@@ -2294,6 +2291,7 @@ def post_account_login(params: LoginAccountParams):
         import autoteam.codex_auth as codex_auth
         from autoteam.codex_auth import (
             check_codex_quota,
+            get_existing_session_auth_file,
             login_codex_via_browser,
             quota_result_quota_info,
             quota_result_resets_at,
@@ -2303,11 +2301,7 @@ def post_account_login(params: LoginAccountParams):
 
         mail_client = get_mail_client_for_account(acc)
         mail_client.login()
-        previous_session_auth_file = acc.get("session_auth_file") or ""
-        if not previous_session_auth_file:
-            current_auth_file = acc.get("auth_file") or ""
-            if current_auth_file and current_auth_file.endswith("-session.json"):
-                previous_session_auth_file = current_auth_file
+        previous_session_auth_file = get_existing_session_auth_file(acc)
         bundle = login_codex_via_browser(
             email,
             acc.get("password", ""),
@@ -2315,7 +2309,7 @@ def post_account_login(params: LoginAccountParams):
             mail_account_id=get_account_mail_account_id(acc),
         )
         if bundle:
-            auth_file = save_auth_file(bundle)
+            auth_file = save_auth_file(bundle, source="oauth")
             archive_path = archive_account_auth_file(email, auth_file)
             update_fields = {
                 "auth_file": auth_file,

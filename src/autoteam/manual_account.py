@@ -22,6 +22,7 @@ from autoteam.codex_auth import (
     _exchange_auth_code,
     _generate_pkce,
     check_codex_quota,
+    get_existing_session_auth_file,
     quota_result_quota_info,
     quota_result_resets_at,
     save_auth_file,
@@ -237,11 +238,7 @@ class ManualAccountFlow:
             add_account(email, "")
             account = find_account(load_accounts(), email)
 
-        previous_session_auth_file = (account or {}).get("session_auth_file") or ""
-        if not previous_session_auth_file:
-            current_auth_file = (account or {}).get("auth_file") or ""
-            if current_auth_file and current_auth_file.endswith("-session.json"):
-                previous_session_auth_file = current_auth_file
+        previous_session_auth_file = get_existing_session_auth_file(account)
 
         update_fields = {
             "status": account_status,
