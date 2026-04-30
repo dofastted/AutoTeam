@@ -3030,10 +3030,12 @@ def resume_cpa_batch_run(run_id: str):
             "join_mode": run.get("join_mode") or "direct",
             "target": run.get("target") or 100,
             "batch_size": run.get("batch_size") or 20,
+            "parallel_workers": run.get("parallel_workers") or 1,
             "resume": True,
         },
         run_id,
         resume=True,
+        parallel_workers=run.get("parallel_workers") or 1,
     )
     return task
 

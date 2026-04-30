@@ -36,4 +36,8 @@ Documented OAuth RT-only upload route across README, docs, and llmdoc.
 Clarified session_auth_file is a ChatGPT Web session backup and cannot be uploaded to CPA/Sub2API.
 Documented pull-cpa as recovery/import, and separated /api/accounts/{email}/cpa-auth from ordinary sync.
 Evidence: rg -n ""auth_file|session_auth_file|rt_auth_file|pull-cpa|sync"" docs llmdoc README.md -> reviewed remaining hits as expected names or explicit new rules."
-A9,Run full verification and prepare commit,Run backend unit tests frontend build and inspect staged files before Windows Git commit,tests/unit passes; npm build passes; no sensitive runtime data staged; only task files are staged; commit message describes local CPA auth upload route,PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit && npm --prefix web run build && git status --short,pytest; npm; Windows Git,TODO,TODO,TODO,all changed task files,A1; A2; A3; A4; A5; A6; A7; A8,Use git add with explicit files only
+A9,Run full verification and prepare commit,Run backend unit tests frontend build and inspect staged files before Windows Git commit,tests/unit passes; npm build passes; no sensitive runtime data staged; only task files are staged; commit message describes local CPA auth upload route,PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit && npm --prefix web run build && git status --short,pytest; npm; Windows Git,DONE,TODO,TODO,all changed task files,A1; A2; A3; A4; A5; A6; A7; A8,"Use git add with explicit files only
+Full unit suite and frontend build passed.
+Added regression coverage that resumed CPA batch runs reuse saved parallel_workers.
+Evidence: uv run pytest -q tests/unit -> 234 passed, 4 warnings.
+Evidence: npm --prefix web run build -> success."

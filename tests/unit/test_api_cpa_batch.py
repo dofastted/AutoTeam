@@ -215,7 +215,26 @@ def test_resume_cpa_batch_run_starts_resume_task(tmp_path, monkeypatch):
     assert captured["params"]["run_id"] == "run-resume"
     assert captured["params"]["resume"] is True
     assert captured["args"] == ("run-resume",)
-    assert captured["kwargs"] == {"resume": True}
+    assert captured["kwargs"] == {"resume": True, "parallel_workers": 1}
+
+
+def test_resume_cpa_batch_run_reuses_parallel_workers(tmp_path, monkeypatch):
+    monkeypatch.setattr(flow_runs, "FLOW_RUNS_FILE", tmp_path / "flow_runs.json")
+    flow_runs.create_flow_run("run-resume", target=100, batch_size=20, join_mode="direct", parallel_workers=3)
+    flow_runs.update_flow_run("run-resume", status="paused", success_count=20, attempted_count=23)
+    captured = {}
+
+    def fake_start_task(command, func, params, *args, **kwargs):
+        captured["params"] = params
+        captured["kwargs"] = kwargs
+        return {"task_id": "task-resume", "command": command, "params": params}
+
+    monkeypatch.setattr(api, "_start_task", fake_start_task)
+
+    api.resume_cpa_batch_run("run-resume")
+
+    assert captured["params"]["parallel_workers"] == 3
+    assert captured["kwargs"]["parallel_workers"] == 3
 
 
 def test_create_direct_account_fails_current_email_after_browser_error(tmp_path, monkeypatch):
