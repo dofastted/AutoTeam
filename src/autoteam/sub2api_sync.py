@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from autoteam import outbound_proxy
-from autoteam.codex_auth import CODEX_CLIENT_ID
+from autoteam.codex_auth import CODEX_CLIENT_ID, select_oauth_rt_auth_file
 from autoteam.config import SUB2API_EMAIL, SUB2API_GROUP, SUB2API_PASSWORD, SUB2API_URL
 from autoteam.textio import read_text
 
@@ -692,25 +692,16 @@ def _load_pool_targets(target_emails: set[str] | None = None) -> tuple[dict[str,
         account_email = str(acc.get("email") or "").strip().lower()
         if target_emails and account_email not in target_emails:
             continue
-        auth_path = None
-        auth_data = None
-        for key in ("rt_auth_file", "auth_file"):
-            candidate = Path(str(acc.get(key) or "").strip())
-            if not candidate.exists():
-                continue
-            try:
-                candidate_data = _load_auth_data(candidate)
-            except Exception as exc:
-                logger.warning("[Sub2API] 读取 auth 文件失败，跳过 %s: %s", candidate, exc)
-                continue
-            if candidate_data.get("credential_source") == "chatgpt_session":
-                continue
-            if not candidate_data.get("access_token"):
-                continue
-            auth_path = candidate
-            auth_data = candidate_data
-            break
-        if auth_path is None or auth_data is None:
+        selected_auth_path = select_oauth_rt_auth_file(acc)
+        if not selected_auth_path:
+            reason = "session_file_not_uploadable" if acc.get("session_auth_file") else "missing_oauth_rt_file"
+            logger.warning("[Sub2API] 跳过 %s: %s", account_email, reason)
+            continue
+        auth_path = Path(selected_auth_path)
+        try:
+            auth_data = _load_auth_data(auth_path)
+        except Exception as exc:
+            logger.warning("[Sub2API] 读取 auth 文件失败，跳过 %s: %s", auth_path, exc)
             continue
 
         email = (auth_data.get("email") or acc.get("email") or "").strip().lower()
@@ -824,7 +815,7 @@ def _sync_pool_targets(active_targets: dict[str, dict], local_emails: set[str], 
 
 def sync_to_sub2api():
     active_targets, local_emails = _load_pool_targets()
-    return _sync_pool_targets(active_targets, local_emails, delete_missing=True)
+    return _sync_pool_targets(active_targets, local_emails, delete_missing=False)
 
 
 def sync_account_to_sub2api(email: str):
@@ -834,7 +825,7 @@ def sync_account_to_sub2api(email: str):
 
     active_targets, local_emails = _load_pool_targets({target_email})
     if target_email not in active_targets:
-        warning = f"{target_email} 不是可同步的 active auth 账号"
+        warning = f"{target_email} 缺少可同步的 OAuth RT 认证文件"
         logger.warning("[Sub2API] %s", warning)
         return {
             "created": 0,

@@ -199,6 +199,7 @@ def test_sync_to_sub2api_updates_existing_same_email_oauth_account(tmp_path, mon
         json.dumps(
             {
                 "access_token": "new-access",
+                "refresh_token": "new-rt",
                 "id_token": _jwt({"email": "user@example.com"}),
                 "expired": 2_000_000_000,
                 "email": "user@example.com",
@@ -258,6 +259,7 @@ def test_sync_to_sub2api_updates_existing_same_email_oauth_account(tmp_path, mon
     assert updated[0]["account"]["id"] == 42
     assert updated[0]["name"] == "user@example.com"
     assert updated[0]["credentials"]["access_token"] == "new-access"
+    assert updated[0]["credentials"]["refresh_token"] == "new-rt"
     assert updated[0]["credentials"]["model_mapping"]["gpt-5.5"] == "gpt-5.5"
     assert updated[0]["extra"]["autoteam_email"] == "user@example.com"
     assert updated[0]["extra"]["privacy_mode"] == "training_off"
@@ -351,6 +353,7 @@ def test_sync_account_to_sub2api_does_not_delete_other_managed_accounts(tmp_path
         json.dumps(
             {
                 "access_token": "new-access",
+                "refresh_token": "new-rt",
                 "id_token": _jwt({"email": "user@example.com"}),
                 "expired": 2_000_000_000,
                 "email": "user@example.com",
@@ -425,3 +428,86 @@ def test_sync_account_to_sub2api_does_not_delete_other_managed_accounts(tmp_path
     assert updated[0]["account"]["id"] == 42
     assert len(local_updates) == 1
     assert local_updates[0][0] == "user@example.com"
+
+
+def test_sync_to_sub2api_skips_active_account_without_rt_and_does_not_delete_remote(tmp_path, monkeypatch):
+    session_file = tmp_path / "codex-session@example.com-team-acc-session.json"
+    session_file.write_text(
+        json.dumps(
+            {
+                "access_token": "session-access",
+                "email": "session@example.com",
+                "credential_source": "chatgpt_session",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "session@example.com",
+                "status": "active",
+                "auth_file": str(session_file),
+                "session_auth_file": str(session_file),
+            }
+        ],
+    )
+    monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
+    monkeypatch.setattr(sub2api_sync, "_resolve_group_binding", lambda token: ([], []))
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_list_openai_oauth_accounts",
+        lambda token: [
+            {
+                "id": 43,
+                "name": "session@example.com",
+                "credentials": {"email": "session@example.com"},
+                "extra": {
+                    "autoteam_source": "autoteam",
+                    "autoteam_kind": "pool",
+                    "autoteam_email": "session@example.com",
+                },
+                "group_ids": [],
+            }
+        ],
+    )
+    deleted = []
+    monkeypatch.setattr(sub2api_sync, "_delete_account", lambda *args, **kwargs: deleted.append(args[1]))
+
+    result = sub2api_sync.sync_to_sub2api()
+
+    assert result["created"] == 0
+    assert result["updated"] == 0
+    assert result["deleted"] == 0
+    assert deleted == []
+
+
+def test_sync_account_to_sub2api_reports_missing_rt(tmp_path, monkeypatch):
+    session_file = tmp_path / "codex-user@example.com-team-acc-session.json"
+    session_file.write_text(
+        json.dumps(
+            {
+                "access_token": "session-access",
+                "email": "user@example.com",
+                "credential_source": "chatgpt_session",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "user@example.com",
+                "status": "active",
+                "auth_file": str(session_file),
+                "session_auth_file": str(session_file),
+            }
+        ],
+    )
+
+    result = sub2api_sync.sync_account_to_sub2api("user@example.com")
+
+    assert result["skipped"] == 1
+    assert result["warnings"] == ["user@example.com 缺少可同步的 OAuth RT 认证文件"]
