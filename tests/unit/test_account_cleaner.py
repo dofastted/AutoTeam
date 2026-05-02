@@ -193,3 +193,218 @@ def test_format_scan_report_csv_and_write_scan_reports_round_trip(tmp_path):
 
     assert json.loads(json_path.read_text(encoding="utf-8")) == report
     assert csv_path.read_text(encoding="utf-8") == csv_text
+
+
+def test_pick_primary_account_prefers_usage_status_then_rt_then_cpa_success():
+    group = [
+        {
+            "id": "acc-rt",
+            "email": "pick@example.com",
+            "usage_status": "normal",
+            "rt_auth_file": "auths/rt.json",
+            "created_at": "2026-05-03T10:00:00+00:00",
+        },
+        {
+            "id": "acc-inventory",
+            "email": "pick@example.com",
+            "usage_status": "inventory",
+            "created_at": "2026-05-03T11:00:00+00:00",
+        },
+        {
+            "id": "acc-cpa",
+            "email": "pick@example.com",
+            "usage_status": "normal",
+            "cpa_status": "success",
+            "created_at": "2026-05-03T09:00:00+00:00",
+        },
+    ]
+
+    primary = account_cleaner.pick_primary_account(group)
+
+    assert primary["id"] == "acc-inventory"
+
+
+def test_pick_primary_account_uses_cpa_success_then_created_at_then_id():
+    group = [
+        {
+            "id": "acc-b",
+            "email": "pick2@example.com",
+            "usage_status": "normal",
+            "created_at": "2026-05-03T10:00:00+00:00",
+        },
+        {
+            "id": "acc-a",
+            "email": "pick2@example.com",
+            "usage_status": "normal",
+            "cpa_status": "success",
+            "created_at": "2026-05-03T12:00:00+00:00",
+        },
+        {
+            "id": "acc-c",
+            "email": "pick2@example.com",
+            "usage_status": "normal",
+            "cpa_status": "success",
+            "created_at": "2026-05-03T13:00:00+00:00",
+        },
+    ]
+
+    primary = account_cleaner.pick_primary_account(group)
+
+    assert primary["id"] == "acc-a"
+
+
+def test_merge_account_pair_fills_missing_plain_fields_without_overwriting_primary():
+    primary = {
+        "id": "primary-1",
+        "email": "merge@example.com",
+        "password": "",
+        "mo_email": "",
+        "notes": "keep-primary",
+        "created_at": "2026-05-03T10:00:00+00:00",
+    }
+    alias = {
+        "id": "alias-1",
+        "email": "merge@example.com",
+        "password": "pw-from-alias",
+        "mo_email": "alias@mail.example.com",
+        "notes": "alias-notes",
+        "updated_at": "2026-05-03T11:00:00+00:00",
+    }
+
+    fields_filled = account_cleaner.merge_account_pair(primary, alias)
+
+    assert fields_filled == ["password", "mo_email"]
+    assert primary["password"] == "pw-from-alias"
+    assert primary["mo_email"] == "alias@mail.example.com"
+    assert primary["notes"] == "keep-primary"
+    assert primary["id"] == "primary-1"
+    assert primary["created_at"] == "2026-05-03T10:00:00+00:00"
+    assert "updated_at" not in primary
+
+
+def test_dedupe_accounts_dry_run_returns_merges_without_mutating_input():
+    accounts_fixture = [
+        {
+            "id": "inv-primary",
+            "email": " DUP@example.com ",
+            "usage_status": "inventory",
+            "password": "",
+            "created_at": "2026-05-03T10:00:00+00:00",
+        },
+        {
+            "id": "inv-alias",
+            "email": "dup@example.com",
+            "usage_status": "normal",
+            "password": "pw-dup",
+            "rt_auth_file": "auths/dup-oauth.json",
+            "notes": "alias-note",
+            "created_at": "2026-05-03T11:00:00+00:00",
+        },
+        {
+            "id": "cpa-primary",
+            "email": "cpa@example.com",
+            "usage_status": "normal",
+            "cpa_status": "success",
+            "created_at": "2026-05-03T09:00:00+00:00",
+        },
+        {
+            "id": "cpa-alias",
+            "email": " CPA@example.com ",
+            "usage_status": "normal",
+            "password": "pw-cpa",
+            "session_auth_file": "auths/cpa-session.json",
+            "created_at": "2026-05-03T10:30:00+00:00",
+        },
+    ]
+    original_accounts = deepcopy(accounts_fixture)
+
+    result = account_cleaner.dedupe_accounts(accounts_fixture, in_place=False)
+
+    assert result["changed"] is True
+    assert len(result["duplicate_groups"]) == 2
+    assert len(result["merges"]) == 2
+    assert len(result["result_accounts"]) == 2
+    assert accounts_fixture == original_accounts
+
+    merge_by_primary = {item["primary_id"]: item for item in result["merges"]}
+    assert merge_by_primary["inv-primary"]["alias_ids"] == ["inv-alias"]
+    assert set(merge_by_primary["inv-primary"]["fields_filled"]) == {"password", "rt_auth_file", "notes"}
+    assert merge_by_primary["cpa-primary"]["alias_ids"] == ["cpa-alias"]
+    assert set(merge_by_primary["cpa-primary"]["fields_filled"]) == {"password", "session_auth_file"}
+
+    result_by_id = {item["id"]: item for item in result["result_accounts"]}
+    assert result_by_id["inv-primary"]["password"] == "pw-dup"
+    assert result_by_id["inv-primary"]["merged_from"] == ["inv-alias"]
+    assert result_by_id["cpa-primary"]["password"] == "pw-cpa"
+    assert result_by_id["cpa-primary"]["merged_from"] == ["cpa-alias"]
+
+
+def test_dedupe_accounts_in_place_removes_aliases_and_appends_merged_from():
+    accounts_fixture = [
+        {
+            "id": "primary-1",
+            "email": "multi@example.com",
+            "usage_status": "inventory",
+            "merged_from": ["old-alias"],
+            "created_at": "2026-05-03T09:00:00+00:00",
+        },
+        {
+            "id": "alias-1",
+            "email": "MULTI@example.com",
+            "usage_status": "normal",
+            "password": "pw-1",
+            "created_at": "2026-05-03T10:00:00+00:00",
+        },
+        {
+            "id": "alias-2",
+            "email": " multi@example.com ",
+            "usage_status": "normal",
+            "proxy": "http://127.0.0.1:10808",
+            "merged_from": ["legacy-2"],
+            "created_at": "2026-05-03T11:00:00+00:00",
+        },
+    ]
+
+    result = account_cleaner.dedupe_accounts(accounts_fixture, in_place=True)
+
+    assert result["changed"] is True
+    assert len(accounts_fixture) == 1
+    assert result["result_accounts"] is accounts_fixture
+    primary = accounts_fixture[0]
+    assert primary["id"] == "primary-1"
+    assert primary["password"] == "pw-1"
+    assert primary["proxy"] == "http://127.0.0.1:10808"
+    assert primary["merged_from"] == ["old-alias", "alias-1", "alias-2", "legacy-2"]
+    assert result["merges"] == [
+        {
+            "primary_id": "primary-1",
+            "primary_email": "multi@example.com",
+            "alias_ids": ["alias-1", "alias-2"],
+            "fields_filled": ["password", "proxy"],
+        }
+    ]
+
+
+def test_dedupe_accounts_returns_unchanged_result_when_no_duplicates():
+    accounts_fixture = [
+        {
+            "id": "acc-1",
+            "email": "one@example.com",
+            "usage_status": "normal",
+        },
+        {
+            "id": "acc-2",
+            "email": "two@example.com",
+            "usage_status": "normal",
+        },
+    ]
+    original_accounts = deepcopy(accounts_fixture)
+
+    result = account_cleaner.dedupe_accounts(accounts_fixture, in_place=False)
+
+    assert result["changed"] is False
+    assert result["merges"] == []
+    assert result["duplicate_groups"] == []
+    assert len(result["result_accounts"]) == len(accounts_fixture)
+    assert result["result_accounts"] == accounts_fixture
+    assert accounts_fixture == original_accounts
