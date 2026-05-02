@@ -79,6 +79,17 @@ def _build_auth_url(code_challenge, state):
     return f"{CODEX_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
 
+def exchange_authorization_code(auth_code, code_verifier, *, fallback_email=None):
+    """
+    OAuth authorization code token 交换的唯一公开入口。
+
+    其他模块必须调用本函数获取 Codex OAuth bundle，禁止自行拼接
+    `/oauth/token` 请求或直接调用 `_exchange_auth_code`。这样可以让 token
+    交换的 HTTP 细节、错误处理和代理回退都集中在 `codex_auth.py` 内维护。
+    """
+    return _exchange_auth_code(auth_code, code_verifier, fallback_email=fallback_email)
+
+
 def _exchange_auth_code(auth_code, code_verifier, fallback_email=None):
     logger.info("[Codex] 获取到 auth code，交换 token...")
 
@@ -877,7 +888,7 @@ def login_codex_via_existing_context(
             logger.warning("[Codex] 未获取到 auth code，当前 URL: %s，页面: %s", page.url, failure_text)
             return None
 
-        return _exchange_auth_code(auth_code, code_verifier, fallback_email=email)
+        return exchange_authorization_code(auth_code, code_verifier, fallback_email=email)
     finally:
         try:
             page.close()
@@ -1426,7 +1437,7 @@ def login_codex_via_browser(email, password, mail_client=None, mail_account_id=N
         logger.error("[Codex] OAuth 登录失败: 未获取到 authorization code")
         return None
 
-    return _exchange_auth_code(auth_code, code_verifier, fallback_email=email)
+    return exchange_authorization_code(auth_code, code_verifier, fallback_email=email)
 
 
 def login_codex_via_session():
@@ -1780,7 +1791,7 @@ class SessionCodexAuthFlow:
         if not self.auth_code:
             raise RuntimeError("未获取到 Codex authorization code")
 
-        bundle = _exchange_auth_code(self.auth_code, self.code_verifier, fallback_email=self.email)
+        bundle = exchange_authorization_code(self.auth_code, self.code_verifier, fallback_email=self.email)
         if not bundle:
             raise RuntimeError("Codex token 交换失败")
 

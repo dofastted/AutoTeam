@@ -22,8 +22,7 @@ from autoteam.codex_auth import (
     CODEX_AUTH_URL,
     CODEX_CLIENT_ID,
     CODEX_REDIRECT_URI,
-    CODEX_TOKEN_URL,
-    _parse_jwt_payload,
+    exchange_authorization_code,
 )
 from autoteam.exceptions import PhoneVerificationRequiredError, is_openai_add_phone_url
 
@@ -576,43 +575,13 @@ def exchange_callback_for_bundle(
     client_id: str = CODEX_CLIENT_ID,
     redirect_uri: str = CODEX_REDIRECT_URI,
 ) -> dict[str, Any]:
+    del client_id, redirect_uri
     code = parse_callback_code(callback_url, expected_state)
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json",
-        "Origin": "https://auth.openai.com",
-        "Referer": "https://auth.openai.com/sign-in-with-chatgpt/codex/consent",
-        "User-Agent": USER_AGENT,
-    }
-    resp = session.post(
-        CODEX_TOKEN_URL,
-        headers=headers,
-        data={
-            "grant_type": "authorization_code",
-            "client_id": client_id,
-            "code": code,
-            "redirect_uri": redirect_uri,
-            "code_verifier": code_verifier,
-        },
-        timeout=30,
-    )
-    if resp.status_code != 200:
-        raise ProtocolOauthTokenExchangeError(f"Codex token 交换失败: {resp.status_code} {(resp.text or '')[:220]}")
-
-    token_data = _response_json(resp)
-    id_token = token_data.get("id_token", "")
-    claims = _parse_jwt_payload(id_token) if id_token else {}
-    auth_claims = claims.get("https://api.openai.com/auth", {}) if isinstance(claims, dict) else {}
-    bundle = {
-        "access_token": token_data.get("access_token", ""),
-        "refresh_token": token_data.get("refresh_token", ""),
-        "id_token": id_token,
-        "account_id": auth_claims.get("chatgpt_account_id", ""),
-        "email": claims.get("email", fallback_email or ""),
-        "plan_type": str(auth_claims.get("chatgpt_plan_type", "unknown") or "unknown").strip().lower(),
-        "expired": time.time() + int(token_data.get("expires_in", 3600) or 3600),
-        "cookie_header": build_cookie_header(session),
-    }
+    bundle = exchange_authorization_code(code, code_verifier, fallback_email=fallback_email)
+    if not bundle:
+        raise ProtocolOauthTokenExchangeError("Codex token 交换失败")
+    bundle["plan_type"] = str(bundle.get("plan_type") or "unknown").strip().lower()
+    bundle["cookie_header"] = build_cookie_header(session)
     if not bundle["refresh_token"]:
         raise ProtocolOauthTokenExchangeError("Codex token 交换成功但未返回 refresh_token")
     return bundle

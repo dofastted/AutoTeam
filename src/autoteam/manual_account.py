@@ -19,9 +19,9 @@ from autoteam.accounts import (
 from autoteam.codex_auth import (
     CODEX_CALLBACK_PORT,
     _build_auth_url,
-    _exchange_auth_code,
     _generate_pkce,
     check_codex_quota,
+    exchange_authorization_code,
     get_existing_session_auth_file,
     quota_result_quota_info,
     quota_result_resets_at,
@@ -200,7 +200,7 @@ class ManualAccountFlow:
             if payload.get("error"):
                 raise RuntimeError(f"OAuth 返回错误: {payload['error']}")
 
-            bundle = _exchange_auth_code(payload["code"], self.code_verifier)
+            bundle = exchange_authorization_code(payload["code"], self.code_verifier)
             if not bundle:
                 raise RuntimeError("OAuth code 交换 token 失败")
 

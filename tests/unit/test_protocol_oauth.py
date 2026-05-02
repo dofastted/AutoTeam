@@ -90,26 +90,23 @@ class _TokenSession:
         return self.response
 
 
-def test_exchange_callback_for_bundle_builds_oauth_bundle_and_cookie_header():
-    id_token = _jwt(
-        {
+def test_exchange_callback_for_bundle_builds_oauth_bundle_and_cookie_header(monkeypatch):
+    session = _TokenSession(_Response())
+    calls = []
+
+    def fake_exchange(auth_code, code_verifier, *, fallback_email=None):
+        calls.append((auth_code, code_verifier, fallback_email))
+        return {
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+            "id_token": "id-1",
+            "account_id": "acc-1",
             "email": "user@example.com",
-            "https://api.openai.com/auth": {
-                "chatgpt_account_id": "acc-1",
-                "chatgpt_plan_type": "team",
-            },
+            "plan_type": "team",
+            "expired": 2000000000,
         }
-    )
-    session = _TokenSession(
-        _Response(
-            data={
-                "access_token": "at-1",
-                "refresh_token": "rt-1",
-                "id_token": id_token,
-                "expires_in": 3600,
-            }
-        )
-    )
+
+    monkeypatch.setattr(protocol_oauth, "exchange_authorization_code", fake_exchange)
 
     bundle = protocol_oauth.exchange_callback_for_bundle(
         session,
@@ -125,8 +122,8 @@ def test_exchange_callback_for_bundle_builds_oauth_bundle_and_cookie_header():
     assert bundle["account_id"] == "acc-1"
     assert bundle["plan_type"] == "team"
     assert "__Secure-next-auth.session-token=sess-1" in bundle["cookie_header"]
-    assert session.posts[0][0].endswith("/oauth/token")
-    assert session.posts[0][1]["data"]["code_verifier"] == "verifier-1"
+    assert calls == [("code-1", "verifier-1", "fallback@example.com")]
+    assert session.posts == []
 
 
 def test_run_protocol_oauth_with_browser_context_captures_callback_and_exchanges(monkeypatch):
