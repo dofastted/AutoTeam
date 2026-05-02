@@ -8,6 +8,8 @@ from autoteam.account_credentials import (
     CREDENTIAL_TYPE_SESSION,
     identify_credential_file,
     is_uploadable_oauth_rt,
+    migrate_account_credentials,
+    migrate_accounts_credentials,
 )
 
 
@@ -98,3 +100,112 @@ def test_is_uploadable_oauth_rt_requires_refresh_token(tmp_path):
 
     assert is_uploadable_oauth_rt(oauth_file) is True
     assert is_uploadable_oauth_rt(session_file) is False
+
+
+def test_migrate_account_credentials_promotes_legacy_oauth_auth_file(tmp_path):
+    auth_file = _write_json(
+        tmp_path / "codex-user-team-xx-oauth.json",
+        {"tokens": {"refresh_token": "rt"}},
+    )
+    account = {"email": "user@example.com", "auth_file": str(auth_file)}
+
+    result = migrate_account_credentials(account)
+
+    assert result["changed"] is True
+    assert any(action["type"] == "rt_auth_file_set" for action in result["actions"])
+    assert account["rt_auth_file"] == str(auth_file)
+    assert account["credentials"]["oauth_rt"]["file"] == str(auth_file)
+    assert account["credentials"]["oauth_rt"]["present"] is True
+
+
+def test_migrate_account_credentials_promotes_legacy_session_auth_file(tmp_path):
+    auth_file = _write_json(
+        tmp_path / "codex-user-team-xx-session.json",
+        {"credential_source": "chatgpt_session"},
+    )
+    account = {"email": "user@example.com", "auth_file": str(auth_file)}
+
+    result = migrate_account_credentials(account)
+
+    assert result["changed"] is True
+    assert any(action["type"] == "session_auth_file_set" for action in result["actions"])
+    assert account["session_auth_file"] == str(auth_file)
+    assert "rt_auth_file" not in account
+    assert account["credentials"]["session"]["file"] == str(auth_file)
+    assert account["credentials"]["session"]["present"] is True
+
+
+def test_migrate_account_credentials_keeps_existing_valid_rt_auth_file(tmp_path):
+    rt_auth_file = _write_json(
+        tmp_path / "codex-user-team-xx-oauth.json",
+        {"tokens": {"refresh_token": "rt"}},
+    )
+    account = {
+        "email": "user@example.com",
+        "auth_file": str(tmp_path / "legacy.json"),
+        "rt_auth_file": str(rt_auth_file),
+    }
+
+    result = migrate_account_credentials(account)
+
+    assert result["changed"] is False
+    assert account["rt_auth_file"] == str(rt_auth_file)
+    assert any(action["type"] == "existing_oauth_rt_kept" for action in result["actions"])
+
+
+def test_migrate_account_credentials_skips_main_auth_file(tmp_path):
+    auth_file = tmp_path / "codex-main-foo.json"
+    auth_file.write_text("not-json", encoding="utf-8")
+    account = {"email": "main@example.com", "auth_file": str(auth_file)}
+
+    result = migrate_account_credentials(account)
+
+    assert result["changed"] is False
+    assert any(action["type"] == "skipped_main" for action in result["actions"])
+    assert "rt_auth_file" not in account
+
+
+def test_migrate_account_credentials_reports_missing_legacy_auth_file(tmp_path):
+    missing_file = tmp_path / "missing-oauth.json"
+    account = {"email": "user@example.com", "auth_file": str(missing_file)}
+
+    result = migrate_account_credentials(account)
+
+    assert result["changed"] is False
+    assert any(action["type"] == "missing" for action in result["actions"])
+
+
+def test_migrate_account_credentials_reports_invalid_json(tmp_path):
+    auth_file = tmp_path / "broken.json"
+    auth_file.write_text("{oops", encoding="utf-8")
+    account = {"email": "user@example.com", "auth_file": str(auth_file)}
+
+    result = migrate_account_credentials(account)
+
+    assert result["changed"] is False
+    assert any(action["type"] == "invalid_json" for action in result["actions"])
+    assert result["errors"]
+
+
+def test_migrate_accounts_credentials_summarizes_changed_count(tmp_path):
+    oauth_file = _write_json(
+        tmp_path / "codex-user-team-xx-oauth.json",
+        {"tokens": {"refresh_token": "rt"}},
+    )
+    session_file = _write_json(
+        tmp_path / "codex-user-team-yy-session.json",
+        {"credential_source": "chatgpt_session"},
+    )
+    missing_file = tmp_path / "missing.json"
+    accounts = [
+        {"email": "oauth@example.com", "auth_file": str(oauth_file)},
+        {"email": "session@example.com", "auth_file": str(session_file)},
+        {"email": "missing@example.com", "auth_file": str(missing_file)},
+    ]
+
+    result = migrate_accounts_credentials(accounts)
+
+    assert result["total"] == 3
+    assert result["changed"] == 2
+    assert result["unchanged"] == 1
+    assert len(result["actions"]) == 3
