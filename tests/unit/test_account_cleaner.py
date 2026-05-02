@@ -2,6 +2,7 @@ import re
 import json
 from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
 
 from autoteam import account_cleaner
 
@@ -408,3 +409,132 @@ def test_dedupe_accounts_returns_unchanged_result_when_no_duplicates():
     assert len(result["result_accounts"]) == len(accounts_fixture)
     assert result["result_accounts"] == accounts_fixture
     assert accounts_fixture == original_accounts
+
+
+def test_reclassify_accounts_runs_migration_dedupe_and_classify(tmp_path):
+    oauth_file = tmp_path / "codex-inventory@example.com-team-01-oauth.json"
+    oauth_file.write_text(json.dumps({"refresh_token": "rt-1"}), encoding="utf-8")
+    session_file = tmp_path / "codex-dup@example.com-team-01-session.json"
+    session_file.write_text(json.dumps({"credential_source": "chatgpt_session"}), encoding="utf-8")
+
+    accounts_fixture = [
+        {
+            "id": "acc-active",
+            "email": "active@example.com",
+            "status": "active",
+            "password": "pw-active",
+        },
+        {
+            "id": "acc-sold",
+            "email": "sold@example.com",
+            "status": "sold",
+            "password": "pw-sold",
+        },
+        {
+            "id": "acc-inventory",
+            "email": "inventory@example.com",
+            "status": "exhausted",
+            "password": "pw-inventory",
+            "cpa_status": "success",
+            "auth_file": str(oauth_file),
+        },
+        {
+            "id": "dup-primary",
+            "email": "dup@example.com",
+            "status": "pending",
+            "password": "",
+        },
+        {
+            "id": "dup-alias",
+            "email": " DUP@example.com ",
+            "status": "active",
+            "password": "pw-dup",
+            "auth_file": str(session_file),
+        },
+    ]
+
+    result = account_cleaner.reclassify_accounts(accounts_fixture, in_place=False)
+
+    assert result["changed"] is True
+    assert result["schema_changes"] >= 1
+    assert result["credential_changes"] >= 0
+    assert result["merge_count"] >= 1
+    assert any(key in result["category_counts"] for key in ("inventory", "sold", "registered"))
+    assert len(result["result_accounts"]) == 4
+
+    result_by_id = {account["id"]: account for account in result["result_accounts"]}
+    assert result_by_id["dup-primary"]["credentials"]["session"]["file"] == str(session_file)
+
+    for account in result["result_accounts"]:
+        assert account["schema_version"] == 2
+        assert account["registration_status"]
+        assert account["health_status"]
+        assert account["usage_status"]
+        assert account["team_status"]
+        assert account["category"]
+
+
+def test_cleanup_accounts_apply_false_reads_file_without_writing_backup(tmp_path):
+    accounts_file = tmp_path / "accounts.json"
+    original_data = [
+        {
+            "id": "acc-1",
+            "email": "dry-run@example.com",
+            "status": "active",
+            "password": "pw-1",
+        }
+    ]
+    original_text = f"{json.dumps(original_data, ensure_ascii=False, indent=2)}\n"
+    accounts_file.write_text(original_text, encoding="utf-8")
+
+    report = account_cleaner.cleanup_accounts(accounts_file=accounts_file, apply=False)
+
+    assert report["applied"] is False
+    assert report["backup_path"] is None
+    assert report["accounts_file"] == str(accounts_file)
+    assert report["reclassify"]["result_accounts"][0]["schema_version"] == 2
+    assert accounts_file.read_text(encoding="utf-8") == original_text
+    assert list(tmp_path.glob("*.bak-account-clean-*")) == []
+
+
+def test_cleanup_accounts_apply_true_creates_backup_and_rewrites_file(tmp_path):
+    oauth_file = tmp_path / "codex-apply@example.com-team-01-oauth.json"
+    oauth_file.write_text(json.dumps({"refresh_token": "rt-apply"}), encoding="utf-8")
+    accounts_file = tmp_path / "accounts.json"
+    original_data = [
+        {
+            "id": "acc-apply",
+            "email": "apply@example.com",
+            "status": "exhausted",
+            "password": "pw-apply",
+            "cpa_status": "success",
+            "auth_file": str(oauth_file),
+        }
+    ]
+    accounts_file.write_text(f"{json.dumps(original_data)}\n", encoding="utf-8")
+
+    report = account_cleaner.cleanup_accounts(accounts_file=accounts_file, apply=True)
+
+    assert report["applied"] is True
+    assert report["backup_path"] is not None
+    backup_path = tmp_path / Path(report["backup_path"]).name
+    assert re.fullmatch(r"accounts\.json\.bak-account-clean-\d{8}-\d{6}", backup_path.name)
+    assert backup_path.exists()
+    assert json.loads(backup_path.read_text(encoding="utf-8")) == original_data
+
+    written = json.loads(accounts_file.read_text(encoding="utf-8"))
+    assert isinstance(written, list)
+    assert written[0]["schema_version"] == 2
+    assert written[0]["category"] == "registered"
+    assert written[0]["credentials"]["oauth_rt"]["file"] == str(oauth_file)
+
+
+def test_reclassify_accounts_accepts_empty_list():
+    result = account_cleaner.reclassify_accounts([], in_place=False)
+
+    assert result["changed"] is False
+    assert result["schema_changes"] == 0
+    assert result["credential_changes"] == 0
+    assert result["merge_count"] == 0
+    assert result["category_counts"] == {}
+    assert result["result_accounts"] == []

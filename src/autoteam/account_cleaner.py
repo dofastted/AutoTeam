@@ -2,7 +2,7 @@
 
 AT-003 backup; AT-004 scan.
 AT-005 dedupe added.
-AT-008 reclassify will follow.
+AT-008 reclassify added.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from pathlib import Path
 from autoteam import accounts
 
 BACKUP_TAG = "account-clean"
+accounts_module = accounts
 
 
 def backup_accounts_file(
@@ -44,14 +45,16 @@ import json
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 
-from autoteam.account_classifier import derive_category
+from autoteam.account_classifier import classify_account, derive_category
 from autoteam.account_credentials import (
     CREDENTIAL_TYPE_MISSING,
     CREDENTIAL_TYPE_SESSION,
     identify_credential_file,
     is_uploadable_oauth_rt,
+    migrate_accounts_credentials,
 )
 from autoteam.account_models import REGISTRATION_REGISTERED, USAGE_INVENTORY, USAGE_SOLD
+from autoteam.account_store import migrate_accounts
 
 SCAN_ISSUE_KEYS = (
     "duplicate_emails",
@@ -498,6 +501,103 @@ def write_scan_reports(report: dict, *, json_path: Path, csv_path: Path) -> None
     csv_path.write_text(format_scan_report_csv(report), encoding="utf-8")
 
 
+def _load_accounts_json(accounts_file: Path) -> list[dict]:
+    if not accounts_file.exists():
+        return []
+
+    text = accounts_file.read_text(encoding="utf-8").strip()
+    if not text:
+        return []
+
+    data = json.loads(text)
+    if not isinstance(data, list):
+        raise ValueError("accounts.json root must be a list")
+    return data
+
+
+def _write_accounts_json(accounts_file: Path, accounts_list: list[dict]) -> None:
+    payload = json.dumps(accounts_list, ensure_ascii=False, indent=2, sort_keys=False)
+    accounts_file.write_text(f"{payload}\n", encoding="utf-8")
+
+
+def _count_changed_records(before: list[dict], after: list[dict]) -> int:
+    return sum(1 for original, current in zip(before, after, strict=False) if original != current)
+
+
+def reclassify_accounts(accounts: list[dict], *, in_place: bool = False) -> dict:
+    """迁移账号结构、凭证字段、重复邮箱，并重算分类。"""
+
+    target_accounts = accounts if in_place else deepcopy(accounts)
+    changed = False
+
+    before_schema = deepcopy(target_accounts)
+    migrate_accounts(target_accounts, in_place=True)
+    schema_changes = _count_changed_records(before_schema, target_accounts)
+    changed = changed or schema_changes > 0
+
+    credential_result = migrate_accounts_credentials(target_accounts, in_place=True)
+    credential_changes = int(credential_result["changed"])
+    changed = changed or credential_changes > 0
+
+    dedupe_result = dedupe_accounts(target_accounts, in_place=True)
+    merge_count = len(dedupe_result["merges"])
+    changed = changed or merge_count > 0
+
+    category_counts: dict[str, int] = {}
+    classify_changes = 0
+    for account in target_accounts:
+        before_classify = deepcopy(account)
+        classify_account(account, in_place=True)
+        if account != before_classify:
+            classify_changes += 1
+        category = _scan_normalize_text(account.get("category")) or "unknown"
+        category_counts[category] = category_counts.get(category, 0) + 1
+
+    changed = changed or classify_changes > 0
+
+    return {
+        "changed": changed,
+        "schema_changes": schema_changes,
+        "credential_changes": credential_changes,
+        "merge_count": merge_count,
+        "category_counts": category_counts,
+        "result_accounts": target_accounts,
+    }
+
+
+def cleanup_accounts(
+    *,
+    accounts: list[dict] | None = None,
+    accounts_file: Path | None = None,
+    apply: bool = False,
+) -> dict:
+    """执行迁移、去重、分类和最终扫描，可选写回账号文件。"""
+
+    target_file = accounts_file
+    if accounts is None:
+        target_file = target_file or accounts_module.ACCOUNTS_FILE
+        input_accounts = _load_accounts_json(target_file)
+    else:
+        input_accounts = accounts
+
+    reclassify_result = reclassify_accounts(input_accounts, in_place=False)
+    scan_result = scan_accounts(reclassify_result["result_accounts"])
+
+    backup_path: Path | None = None
+    if apply:
+        target_file = target_file or accounts_module.ACCOUNTS_FILE
+        backup_path = backup_accounts_file(accounts_file=target_file)
+        _write_accounts_json(target_file, reclassify_result["result_accounts"])
+
+    return {
+        "reclassify": reclassify_result,
+        "scan": scan_result,
+        "backup_path": str(backup_path) if backup_path else None,
+        "applied": apply,
+        "accounts_file": str(target_file) if target_file else None,
+    }
+
+
 __all__ = [
     "BACKUP_TAG",
     "SCAN_ISSUE_KEYS",
@@ -509,3 +609,4 @@ __all__ = [
     "scan_accounts",
     "write_scan_reports",
 ]
+__all__ += ["cleanup_accounts", "reclassify_accounts"]
