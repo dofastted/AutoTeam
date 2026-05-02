@@ -126,6 +126,24 @@ def _is_refresh_token_unauthorized(resp):
     return "refresh_token_reused" in text or "token_invalidated" in text or "token_revoked" in text
 
 
+def _atomic_write_text(path, content):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+    tmp_path.replace(path)
+
+
+def _write_local_cpa_auth_if_present(name, auth_data):
+    local_auth_path = AUTH_DIR / name
+    if not local_auth_path.exists():
+        return False
+    _atomic_write_text(local_auth_path, json.dumps(auth_data, indent=2))
+    ensure_auth_file_permissions(local_auth_path)
+    return True
+
+
 def cleanup_invalid_cpa_refresh_tokens():
     """直接刷新 CPA OAuth RT 文件，删除明确 401/复用失效的远端文件。"""
     files = list_cpa_files()
@@ -180,6 +198,10 @@ def cleanup_invalid_cpa_refresh_tokens():
                 if not upload_to_cpa(tmp_path):
                     failed.append({"name": name, "email": email, "error": "upload_refreshed_failed"})
                     continue
+            try:
+                _write_local_cpa_auth_if_present(name, auth_data)
+            except Exception as exc:
+                failed.append({"name": name, "email": email, "error": f"local_write_failed: {exc}"})
             refreshed += 1
             continue
         if _is_refresh_token_unauthorized(resp):

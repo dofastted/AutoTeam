@@ -67,6 +67,7 @@
 - 遇到 HTTP 401、`refresh_token_reused`、`token_invalidated` 或 `token_revoked` 时删除 CPA 文件。
 - 对本地同名账号写 `status=unavailable`、`sync_disabled=true`、`unavailable_reason=http_401`。
 - refresh 成功时会把新 access token 和新 refresh token 重新上传到 CPA，避免消耗有效 RT 后不保存。
+- 上传 CPA 成功后，如果 `auths/<name>` 在本地已存在（即本地账号在用同一个文件），会原子写回新 token（`tempfile + replace + ensure_auth_file_permissions`），避免下一轮本地 refresh 再次用已被 OpenAI 单次失效的旧 RT 触发 401。本地写回失败只记 `failed`，不阻断后续清理。
 
 本地失效目录标记 `mark_unusable_account_deactivated_from_dir`：
 

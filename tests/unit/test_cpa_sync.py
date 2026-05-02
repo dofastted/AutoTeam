@@ -297,6 +297,48 @@ def test_cleanup_invalid_cpa_refresh_tokens_reuploads_rotated_rt(monkeypatch):
     assert uploaded_payloads[0]["refresh_token"] == "new-rt"
 
 
+def test_cleanup_invalid_cpa_refresh_tokens_writes_rotated_rt_to_local_auths(tmp_path, monkeypatch):
+    name = "codex-ok@example.com-team-acc-oauth.json"
+    local_auth_path = tmp_path / name
+    local_auth_path.write_text(
+        json.dumps({"email": "ok@example.com", "access_token": "local-old-at", "refresh_token": "old-rt"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(cpa_sync, "AUTH_DIR", tmp_path)
+    monkeypatch.setattr(cpa_sync, "list_cpa_files", lambda: [{"name": name, "email": "ok@example.com"}])
+    monkeypatch.setattr(
+        cpa_sync,
+        "download_from_cpa",
+        lambda _name: json.dumps({"email": "ok@example.com", "access_token": "old-at", "refresh_token": "old-rt"}),
+    )
+
+    class Resp:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {
+                "access_token": "new-at",
+                "refresh_token": "new-rt",
+                "id_token": "new-id",
+                "expires_in": 3600,
+            }
+
+    monkeypatch.setattr(cpa_sync, "_refresh_token_response", lambda _rt: Resp())
+    monkeypatch.setattr(cpa_sync, "upload_to_cpa", lambda _path: True)
+
+    result = cpa_sync.cleanup_invalid_cpa_refresh_tokens()
+
+    local_payload = json.loads(local_auth_path.read_text(encoding="utf-8"))
+    assert result["checked"] == 1
+    assert result["refreshed"] == 1
+    assert result["failed"] == []
+    assert local_payload["access_token"] == "new-at"
+    assert local_payload["refresh_token"] == "new-rt"
+    assert local_payload["id_token"] == "new-id"
+
+
 def test_mark_unusable_account_deactivated_from_dir_marks_local_accounts(tmp_path, monkeypatch):
     accounts_file = tmp_path / "accounts.json"
     monkeypatch.setattr(accounts, "ACCOUNTS_FILE", accounts_file)
