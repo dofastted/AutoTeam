@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import logging
 import os
+import random
 import threading
 from urllib.parse import urlsplit
 
@@ -16,11 +18,13 @@ DEFAULT_PROXY_URL = "http://127.0.0.1:10808"
 DEFAULT_BYPASS = "localhost,127.0.0.1,::1"
 SUPPORTED_PROXY_SCHEMES = {"http", "https", "socks5", "socks5h"}
 DIRECT_MARKERS = {"direct", "none"}
+DEFAULT_STRATEGY = "task-sticky"
+SUPPORTED_STRATEGIES = {"task-sticky", "round-robin", "random"}
 
-_thread_state = threading.local()
+_UNSET = object()
+_task_proxy_var = contextvars.ContextVar("autoteam_outbound_proxy", default=_UNSET)
 _selection_lock = threading.Lock()
 _selection_index = 0
-_active_task_proxy = None
 
 
 def _get_bool_env(name: str, default: bool) -> bool:
@@ -38,6 +42,14 @@ def outbound_proxy_enabled() -> bool:
 
 def failover_enabled() -> bool:
     return _get_bool_env("OUTBOUND_PROXY_FAILOVER", True)
+
+
+def _proxy_strategy() -> str:
+    raw = os.environ.get("OUTBOUND_PROXY_STRATEGY", DEFAULT_STRATEGY)
+    value = parse_env_value(raw).strip().lower()
+    if value in SUPPORTED_STRATEGIES:
+        return value
+    return DEFAULT_STRATEGY
 
 
 def _split_pool(raw: str) -> list[str]:
@@ -120,20 +132,48 @@ def should_bypass_proxy(url: str) -> bool:
     return False
 
 
-def _select_proxy_from_pool(pool: list[str], *, after: str | None = None) -> str:
-    if not pool:
-        return ""
+def _pool_key_for_proxy(pool: list[str], proxy_url: str | None) -> str:
+    value = str(proxy_url or "").strip()
+    if not value:
+        return "direct" if "direct" in pool else ""
+    if value == "direct":
+        return "direct"
+    try:
+        return normalize_proxy_url(value)
+    except ValueError:
+        return value
 
+
+def _proxy_output(value: str) -> str:
+    return "" if value == "direct" else value
+
+
+def _select_round_robin(pool: list[str], *, after: str | None = None) -> str:
     global _selection_index
     with _selection_lock:
-        if after and after in pool:
-            index = (pool.index(after) + 1) % len(pool)
-            _selection_index = index
+        after_key = _pool_key_for_proxy(pool, after)
+        if after_key and after_key in pool:
+            index = (pool.index(after_key) + 1) % len(pool)
+            _selection_index = (index + 1) % len(pool)
         else:
             index = _selection_index % len(pool)
             _selection_index = (_selection_index + 1) % len(pool)
         selected = pool[index]
-    return "" if selected == "direct" else selected
+    return _proxy_output(selected)
+
+
+def _select_proxy_from_pool(pool: list[str], *, after: str | None = None) -> str:
+    if not pool:
+        return ""
+
+    if _proxy_strategy() == "random":
+        after_key = _pool_key_for_proxy(pool, after)
+        candidates = pool
+        if after_key in pool and len(pool) > 1:
+            candidates = [item for item in pool if item != after_key]
+        return _proxy_output(random.choice(candidates))
+
+    return _select_round_robin(pool, after=after)
 
 
 def select_proxy(*, after: str | None = None) -> str:
@@ -141,47 +181,34 @@ def select_proxy(*, after: str | None = None) -> str:
 
 
 def current_proxy_url() -> str:
-    value = getattr(_thread_state, "proxy_url", None)
-    if value is not None:
+    value = _task_proxy_var.get()
+    if value is not _UNSET:
         return value
-    if _active_task_proxy is not None:
-        return _active_task_proxy
-    return select_proxy()
+    selected = select_proxy()
+    if _proxy_strategy() == DEFAULT_STRATEGY:
+        _task_proxy_var.set(selected)
+    return selected
 
 
 def rotate_task_proxy() -> str:
     """Switch the current task/thread to the next configured proxy and return it."""
-    current = getattr(_thread_state, "proxy_url", None)
-    if current is None:
-        current = _active_task_proxy
+    current = _task_proxy_var.get()
+    if current is _UNSET:
+        current = None
     selected = select_proxy(after=current)
-    _thread_state.proxy_url = selected
-    _set_active_task_proxy(selected)
+    _task_proxy_var.set(selected)
     return selected
-
-
-def _set_active_task_proxy(proxy_url: str | None):
-    global _active_task_proxy
-    _active_task_proxy = proxy_url
 
 
 @contextlib.contextmanager
 def task_proxy_context(proxy_url: str | None = None):
-    previous = getattr(_thread_state, "proxy_url", None)
-    had_previous = hasattr(_thread_state, "proxy_url")
-    previous_active = _active_task_proxy
-
-    selected = current_proxy_url() if proxy_url is None else proxy_url
-    _thread_state.proxy_url = selected
-    _set_active_task_proxy(selected)
+    current = _task_proxy_var.get()
+    selected = current if proxy_url is None and current is not _UNSET else (select_proxy() if proxy_url is None else proxy_url)
+    token = _task_proxy_var.set(selected)
     try:
         yield selected
     finally:
-        if had_previous:
-            _thread_state.proxy_url = previous
-        elif hasattr(_thread_state, "proxy_url"):
-            delattr(_thread_state, "proxy_url")
-        _set_active_task_proxy(previous_active)
+        _task_proxy_var.reset(token)
 
 
 def requests_proxies_for(url: str, proxy_url: str | None = None) -> dict[str, str]:
@@ -252,7 +279,9 @@ def request(method: str, url: str, *, session=None, **kwargs):
         try:
             response = _request_once(session, method, url, proxy_url, **kwargs)
             if not should_bypass_proxy(url):
-                _thread_state.proxy_url = proxy_url
+                current = _task_proxy_var.get()
+                if current is not _UNSET or _proxy_strategy() == DEFAULT_STRATEGY:
+                    _task_proxy_var.set(proxy_url)
             return response
         except requests.exceptions.InvalidSchema as exc:
             if "SOCKS" in str(exc).upper():

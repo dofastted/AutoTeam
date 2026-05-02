@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import json
 import logging
 import os
@@ -144,7 +145,7 @@ class _CpaUploadWorker:
         self.hooks = hooks
         self.jobs: queue.Queue[dict | None] = queue.Queue()
         self.results: queue.Queue[dict] = queue.Queue()
-        self.thread = threading.Thread(target=self._run, name=f"cpa-upload-{hooks.run_id}", daemon=True)
+        self.thread: threading.Thread | None = None
         self._started = False
         self._finished = False
         self.failures: dict[str, int] = {}
@@ -152,6 +153,12 @@ class _CpaUploadWorker:
 
     def start(self) -> None:
         if not self._started:
+            context = contextvars.copy_context()
+            self.thread = threading.Thread(
+                target=lambda: context.run(self._run),
+                name=f"cpa-upload-{self.hooks.run_id}",
+                daemon=True,
+            )
             self.thread.start()
             self._started = True
 
@@ -171,7 +178,7 @@ class _CpaUploadWorker:
             self._finished = True
 
     def join(self, timeout: float | None = None) -> None:
-        if self._started:
+        if self._started and self.thread is not None:
             self.thread.join(timeout=timeout)
 
     def _run(self) -> None:
@@ -909,9 +916,17 @@ def _create_direct_accounts_parallel(
                 }
             )
 
-    threads = [
-        threading.Thread(target=worker, args=(index + 1, target), daemon=True) for index, target in enumerate(targets)
-    ]
+    threads = []
+    for index, target in enumerate(targets):
+        context = contextvars.copy_context()
+        threads.append(
+            threading.Thread(
+                target=lambda ctx=context, worker_index=index + 1, worker_target=target: ctx.run(
+                    worker, worker_index, worker_target
+                ),
+                daemon=True,
+            )
+        )
     with browser_parallel_limit(len(targets)):
         for thread in threads:
             thread.start()

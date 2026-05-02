@@ -1,4 +1,7 @@
 import importlib
+import random
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import requests
@@ -11,6 +14,7 @@ def reload_proxy(monkeypatch, **env):
         "OUTBOUND_PROXY_ENABLED",
         "OUTBOUND_PROXY_POOL",
         "OUTBOUND_PROXY_BYPASS",
+        "OUTBOUND_PROXY_STRATEGY",
         "OUTBOUND_PROXY_FAILOVER",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -82,6 +86,95 @@ def test_rotate_task_proxy_switches_current_task_proxy(monkeypatch):
     with proxy.task_proxy_context("http://proxy-a:8080"):
         assert proxy.rotate_task_proxy() == "http://proxy-b:8080"
         assert proxy.current_proxy_url() == "http://proxy-b:8080"
+
+
+def test_rotate_in_one_thread_does_not_leak_to_another_thread(monkeypatch):
+    proxy = reload_proxy(monkeypatch, OUTBOUND_PROXY_POOL="http://proxy-a:8080,http://proxy-b:8080")
+    rotate_done = threading.Event()
+    release_other = threading.Event()
+
+    def rotating_worker():
+        with proxy.task_proxy_context("http://proxy-a:8080"):
+            assert proxy.rotate_task_proxy() == "http://proxy-b:8080"
+            rotate_done.set()
+            release_other.wait(timeout=2)
+            return proxy.current_proxy_url()
+
+    def isolated_worker():
+        with proxy.task_proxy_context("http://proxy-a:8080"):
+            rotate_done.wait(timeout=2)
+            value = proxy.current_proxy_url()
+            release_other.set()
+            return value
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(rotating_worker)
+        second = executor.submit(isolated_worker)
+
+    assert first.result() == "http://proxy-b:8080"
+    assert second.result() == "http://proxy-a:8080"
+
+
+def test_task_proxy_context_isolates_concurrent_tasks(monkeypatch):
+    proxy = reload_proxy(monkeypatch, OUTBOUND_PROXY_POOL="http://proxy-a:8080,http://proxy-b:8080")
+    results = []
+
+    async def worker(initial_proxy, delay):
+        with proxy.task_proxy_context(initial_proxy):
+            before = proxy.current_proxy_url()
+            await delay()
+            after = proxy.rotate_task_proxy()
+            await delay()
+            results.append((initial_proxy, before, after, proxy.current_proxy_url()))
+
+    async def run():
+        import asyncio
+
+        async def delay():
+            await asyncio.sleep(0)
+
+        await asyncio.gather(
+            worker("http://proxy-a:8080", delay),
+            worker("http://proxy-b:8080", delay),
+        )
+
+    import asyncio
+
+    asyncio.run(run())
+
+    assert sorted(results) == [
+        ("http://proxy-a:8080", "http://proxy-a:8080", "http://proxy-b:8080", "http://proxy-b:8080"),
+        ("http://proxy-b:8080", "http://proxy-b:8080", "http://proxy-a:8080", "http://proxy-a:8080"),
+    ]
+
+
+def test_strategy_round_robin_and_random_select_within_pool(monkeypatch):
+    pool = "http://proxy-a:8080,http://proxy-b:8080,http://proxy-c:8080"
+    proxy = reload_proxy(monkeypatch, OUTBOUND_PROXY_POOL=pool, OUTBOUND_PROXY_STRATEGY="round-robin")
+
+    assert [proxy.select_proxy() for _ in range(4)] == [
+        "http://proxy-a:8080",
+        "http://proxy-b:8080",
+        "http://proxy-c:8080",
+        "http://proxy-a:8080",
+    ]
+    assert proxy.select_proxy(after="http://proxy-b:8080") == "http://proxy-c:8080"
+
+    proxy = reload_proxy(monkeypatch, OUTBOUND_PROXY_POOL=pool, OUTBOUND_PROXY_STRATEGY="random")
+    choices = []
+
+    def fake_choice(candidates):
+        choices.append(list(candidates))
+        return candidates[-1]
+
+    monkeypatch.setattr(random, "choice", fake_choice)
+
+    assert proxy.select_proxy() == "http://proxy-c:8080"
+    assert proxy.select_proxy(after="http://proxy-c:8080") == "http://proxy-b:8080"
+    assert choices == [
+        ["http://proxy-a:8080", "http://proxy-b:8080", "http://proxy-c:8080"],
+        ["http://proxy-a:8080", "http://proxy-b:8080"],
+    ]
 
 
 def test_residential_proxy_pool_parses_and_rotates_in_order(monkeypatch):
