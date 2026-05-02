@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright
 
 from autoteam import outbound_proxy
+from autoteam.account_lifecycle import registered_kwargs
 from autoteam.accounts import (
     CPA_STATUS_FAILED,
     CPA_STATUS_PENDING,
@@ -789,13 +790,17 @@ def _create_direct_account(
     plan_type = (session_bundle.get("plan_type") or "unknown").strip().lower()
     auth_path = save_auth_file(session_bundle, source="session")
     archive_path = _archive_account_auth(email, auth_path)
+    registration_updates = {
+        "session_auth_file": auth_path,
+        "registration_status": REGISTRATION_STATUS_SUCCESS,
+        "registration_error_message": "",
+        "plan_type": plan_type,
+        "session_archive_file": archive_path,
+        **registered_kwargs(),
+    }
     update_account(
         email,
-        session_auth_file=auth_path,
-        registration_status=REGISTRATION_STATUS_SUCCESS,
-        registration_error_message="",
-        plan_type=plan_type,
-        session_archive_file=archive_path,
+        **registration_updates,
     )
     if hooks:
         hooks.account_event(
