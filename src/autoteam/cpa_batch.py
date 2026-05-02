@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright
 
 from autoteam import outbound_proxy
-from autoteam.account_lifecycle import registered_kwargs
+from autoteam.account_lifecycle import record_rt_obtained, registered_kwargs, rt_obtained_kwargs
 from autoteam.accounts import (
     CPA_STATUS_FAILED,
     CPA_STATUS_PENDING,
@@ -32,6 +32,7 @@ from autoteam.accounts import (
     add_account,
     find_account,
     load_accounts,
+    save_accounts,
     update_account,
 )
 from autoteam.auth_archive import archive_account_auth_file
@@ -820,14 +821,25 @@ def _create_direct_account(
         oauth_plan_type = (oauth_bundle.get("plan_type") or plan_type or "unknown").strip().lower()
         oauth_path = save_auth_file(oauth_bundle, source="oauth")
         oauth_archive_path = _archive_account_auth(email, oauth_path)
+        oauth_now = int(time.time())
         update_account(
             email,
             auth_file=oauth_path,
-            rt_auth_file=oauth_path,
-            rt_obtained_at=time.time(),
             plan_type=oauth_plan_type,
+            **rt_obtained_kwargs(oauth_path, has_refresh_token=True, now=oauth_now),
             **_archive_update(oauth_archive_path),
         )
+        accounts_snapshot = load_accounts()
+        persisted_account = find_account(accounts_snapshot, email)
+        if persisted_account:
+            rt_record = record_rt_obtained(
+                persisted_account,
+                oauth_path,
+                has_refresh_token=True,
+                now=oauth_now,
+            )
+            if rt_record["changed"]:
+                save_accounts(accounts_snapshot)
         if hooks:
             hooks.account_event(
                 email,
