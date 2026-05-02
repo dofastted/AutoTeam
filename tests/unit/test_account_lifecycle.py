@@ -1,6 +1,8 @@
 import json
 
 from autoteam.account_lifecycle import (
+    inventory_kwargs,
+    mark_inventory,
     mark_registered,
     record_rt_obtained,
     registered_kwargs,
@@ -159,5 +161,131 @@ def test_rt_obtained_kwargs_returns_flat_fields_only(tmp_path):
     assert rt_obtained_kwargs(rt_file, has_refresh_token=True, now=12345) == {
         "rt_auth_file": str(rt_file),
         "rt_obtained_at": 12345,
+        "updated_at": 12345,
+    }
+
+
+def test_mark_inventory_applies_usage_health_cpa_updated_at_and_allocation():
+    account = {"id": "a", "email": "x"}
+
+    result = mark_inventory(account, now=12345)
+
+    assert result == {
+        "changed": True,
+        "applied": [
+            "usage_status",
+            "health_status",
+            "cpa_status",
+            "allocation.status",
+            "updated_at",
+        ],
+        "reason": None,
+    }
+    assert account["usage_status"] == "inventory"
+    assert account["health_status"] == "valid"
+    assert account["cpa_status"] == "success"
+    assert account["updated_at"] == 12345
+    assert account["allocation"] == {
+        "status": "inventory",
+        "project": "",
+        "allocation_id": "",
+    }
+
+
+def test_mark_inventory_skips_main_account():
+    account = {
+        "id": "a",
+        "email": "main@example.com",
+        "role": "main",
+        "usage_status": "normal",
+        "health_status": "unknown",
+    }
+
+    result = mark_inventory(account, now=12345)
+
+    assert result == {
+        "changed": False,
+        "applied": [],
+        "reason": "main_account",
+    }
+    assert account == {
+        "id": "a",
+        "email": "main@example.com",
+        "role": "main",
+        "usage_status": "normal",
+        "health_status": "unknown",
+    }
+
+
+def test_mark_inventory_skips_sold_account():
+    account = {
+        "id": "a",
+        "email": "sold@example.com",
+        "usage_status": "sold",
+        "health_status": "valid",
+    }
+
+    result = mark_inventory(account, now=12345)
+
+    assert result == {
+        "changed": False,
+        "applied": [],
+        "reason": "sold",
+    }
+    assert account["usage_status"] == "sold"
+    assert account["health_status"] == "valid"
+
+
+def test_mark_inventory_returns_changed_false_for_compliant_account():
+    account = {
+        "id": "a",
+        "email": "x",
+        "usage_status": "inventory",
+        "health_status": "valid",
+        "cpa_status": "success",
+        "updated_at": 12345,
+        "allocation": {
+            "status": "inventory",
+            "project": "",
+            "allocation_id": "",
+        },
+    }
+
+    result = mark_inventory(account, now=12345)
+
+    assert result == {
+        "changed": False,
+        "applied": [],
+        "reason": None,
+    }
+
+
+def test_mark_inventory_overwrites_existing_allocation_status():
+    account = {
+        "id": "a",
+        "email": "x",
+        "allocation": {
+            "status": "in_use",
+            "project": "proj-1",
+            "allocation_id": "alloc-1",
+        },
+    }
+
+    result = mark_inventory(account, now=12345)
+
+    assert result["changed"] is True
+    assert "allocation.status" in result["applied"]
+    assert account["allocation"] == {
+        "status": "inventory",
+        "project": "proj-1",
+        "allocation_id": "alloc-1",
+    }
+
+
+def test_inventory_kwargs_returns_flat_fields_only():
+    assert inventory_kwargs(now=12345) == {
+        "usage_status": "inventory",
+        "health_status": "valid",
+        "cpa_status": "success",
         "updated_at": 12345,
     }

@@ -17,7 +17,13 @@ from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright
 
 from autoteam import outbound_proxy
-from autoteam.account_lifecycle import record_rt_obtained, registered_kwargs, rt_obtained_kwargs
+from autoteam.account_lifecycle import (
+    inventory_kwargs,
+    mark_inventory,
+    record_rt_obtained,
+    registered_kwargs,
+    rt_obtained_kwargs,
+)
 from autoteam.accounts import (
     CPA_STATUS_FAILED,
     CPA_STATUS_PENDING,
@@ -1227,17 +1233,22 @@ def _verify_and_upload_cpa(
         raise RuntimeError(f"CPA 上传失败: {Path(auth_path).name}")
 
     archive_path = _archive_account_auth(email, auth_path)
-    now = time.time()
+    now = int(time.time())
     update_account(
         email,
-        cpa_status=CPA_STATUS_SUCCESS,
         cpa_error_message="",
-        usage_status=USAGE_INVENTORY,
-        cpa_uploaded_at=now,
-        qualified_at=now,
-        cloud_stocked_at=now,
+        cpa_uploaded_at=float(now),
+        qualified_at=float(now),
+        cloud_stocked_at=float(now),
+        **inventory_kwargs(now=now),
         **_archive_update(archive_path),
     )
+    accounts_snapshot = load_accounts()
+    persisted_account = find_account(accounts_snapshot, email)
+    if persisted_account:
+        inventory_result = mark_inventory(persisted_account, now=now)
+        if inventory_result["changed"]:
+            save_accounts(accounts_snapshot)
     return {
         "email": email,
         "plan_type": plan_type,

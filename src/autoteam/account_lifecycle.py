@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from autoteam import accounts as legacy_accounts
-from autoteam.account_models import HEALTH_VALID, REGISTRATION_REGISTERED, TEAM_ACTIVE, USAGE_NORMAL
+from autoteam.account_models import (
+    HEALTH_VALID,
+    REGISTRATION_REGISTERED,
+    TEAM_ACTIVE,
+    USAGE_INVENTORY,
+    USAGE_NORMAL,
+)
 
 LIFECYCLE_EVENT_REGISTERED = "registered"
 
@@ -134,9 +140,56 @@ def rt_obtained_kwargs(
     }
 
 
+def mark_inventory(account: dict, *, now: int | None = None, in_place: bool = True) -> dict:
+    target = account if in_place else deepcopy(account)
+    role = _normalize_key(target.get("role"))
+    if role == "main":
+        return {"changed": False, "applied": [], "reason": "main_account"}
+
+    usage_status = _normalize_key(target.get("usage_status"))
+    if usage_status == "sold":
+        return {"changed": False, "applied": [], "reason": "sold"}
+
+    unix_ts = int(now if now is not None else time.time())
+    result: dict[str, Any] = {"changed": False, "applied": [], "skipped": [], "reason": None}
+
+    _set_if_changed(target, "usage_status", USAGE_INVENTORY, result)
+    _set_if_changed(target, "health_status", HEALTH_VALID, result)
+    _set_if_changed(target, "cpa_status", legacy_accounts.CPA_STATUS_SUCCESS, result)
+
+    allocation = target.setdefault(
+        "allocation",
+        {"project": "", "allocation_id": ""},
+    )
+    if not isinstance(allocation, dict):
+        allocation = {"project": "", "allocation_id": ""}
+        target["allocation"] = allocation
+    allocation.setdefault("project", "")
+    allocation.setdefault("allocation_id", "")
+    _set_if_changed(allocation, "status", USAGE_INVENTORY, result)
+    if result["applied"] and result["applied"][-1] == "status":
+        result["applied"][-1] = "allocation.status"
+
+    _set_if_changed(target, "updated_at", unix_ts, result)
+    result.pop("skipped", None)
+    return result
+
+
+def inventory_kwargs(*, now: int | None = None) -> dict[str, Any]:
+    unix_ts = int(now if now is not None else time.time())
+    return {
+        "usage_status": USAGE_INVENTORY,
+        "health_status": HEALTH_VALID,
+        "cpa_status": legacy_accounts.CPA_STATUS_SUCCESS,
+        "updated_at": unix_ts,
+    }
+
+
 __all__ = [
     "HEALTH_VALID",
+    "inventory_kwargs",
     "LIFECYCLE_EVENT_REGISTERED",
+    "mark_inventory",
     "mark_registered",
     "record_rt_obtained",
     "registered_kwargs",
