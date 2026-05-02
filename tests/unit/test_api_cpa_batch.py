@@ -363,7 +363,7 @@ def test_create_direct_account_does_not_accept_team_membership_without_session(t
     assert mail_client.deleted is True
 
 
-def test_run_cpa_batch_single_worker_finishes_cpa_upload_before_next_account(tmp_path, monkeypatch):
+def test_run_cpa_batch_single_worker_pipelines_cpa_upload_before_return(tmp_path, monkeypatch):
     monkeypatch.setattr(flow_runs, "FLOW_RUNS_FILE", tmp_path / "flow_runs.json")
     monkeypatch.setattr(accounts, "ACCOUNTS_FILE", tmp_path / "accounts.json")
 
@@ -375,7 +375,7 @@ def test_run_cpa_batch_single_worker_finishes_cpa_upload_before_next_account(tmp
 
     created = []
     first_upload_finished = threading.Event()
-    second_created_after_first_upload_finished = {"value": False}
+    second_created_before_first_upload_finished = {"value": False}
 
     def fake_create_direct(_mail_client, hooks=None, batch_index=None):
         email = f"user{len(created) + 1}@example.com"
@@ -383,11 +383,12 @@ def test_run_cpa_batch_single_worker_finishes_cpa_upload_before_next_account(tmp
         accounts.add_account(email, "pw")
         accounts.update_account(email, status=accounts.STATUS_ACTIVE)
         if len(created) == 2:
-            second_created_after_first_upload_finished["value"] = first_upload_finished.is_set()
+            second_created_before_first_upload_finished["value"] = not first_upload_finished.is_set()
         return email
 
     def fake_verify(email, _mail_cache, **_kwargs):
         if email == "user1@example.com":
+            threading.Event().wait(0.02)
             first_upload_finished.set()
         return {
             "email": email,
@@ -405,4 +406,5 @@ def test_run_cpa_batch_single_worker_finishes_cpa_upload_before_next_account(tmp
     assert result["status"] == "completed"
     assert result["succeeded"] == 2
     assert created == ["user1@example.com", "user2@example.com"]
-    assert second_created_after_first_upload_finished["value"] is True
+    assert second_created_before_first_upload_finished["value"] is True
+    assert first_upload_finished.is_set()

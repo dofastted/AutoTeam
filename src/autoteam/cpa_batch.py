@@ -181,6 +181,14 @@ class _CpaUploadWorker:
         if self._started and self.thread is not None:
             self.thread.join(timeout=timeout)
 
+    def flush_and_close(self, timeout: float | None = None) -> None:
+        if not self._started:
+            return
+        if not self._finished:
+            self.jobs.join()
+            self.finish()
+        self.join(timeout=timeout)
+
     def _run(self) -> None:
         account_mail_cache: dict[str, object] = {}
         with outbound_proxy.task_proxy_context():
@@ -848,6 +856,7 @@ def _create_direct_accounts_parallel(
     parallel_workers: int,
     hooks: CpaBatchHooks,
     batch_index: int | None = None,
+    on_success=None,
 ) -> dict:
     total = max(0, int(total or 0))
     targets = _split_success_targets(total, parallel_workers)
@@ -898,7 +907,10 @@ def _create_direct_accounts_parallel(
                     email = _normalized_email(email)
                     if email:
                         succeeded += 1
-                        emails.append({"email": email, "worker_index": worker_index})
+                        item = {"email": email, "worker_index": worker_index}
+                        emails.append(item)
+                        if on_success:
+                            on_success(item)
                     else:
                         failed += 1
         except Exception as exc:
@@ -1316,17 +1328,62 @@ def run_cpa_batch(
     account_failures = int(existing_run.get("failed_count") or 0) if existing_run else 0
     attempts = int(existing_run.get("attempted_count") or 0) if existing_run else 0
     pending_cpa = 0
+    pending_lock = threading.Lock()
     consecutive_register_failures = 0
     cpa_worker = _CpaUploadWorker(hooks)
 
+    def get_pending_cpa() -> int:
+        with pending_lock:
+            return pending_cpa
+
+    def add_pending_cpa() -> None:
+        nonlocal pending_cpa
+        with pending_lock:
+            pending_cpa += 1
+
+    def mark_cpa_result_finished() -> None:
+        nonlocal pending_cpa
+        with pending_lock:
+            pending_cpa = max(0, pending_cpa - 1)
+
+    def enqueue_cpa_account(email: str, *, batch_index: int | None = None, worker_index: int | None = None) -> None:
+        update_account(
+            email,
+            run_id=run_id,
+            batch_index=batch_index,
+            worker_index=worker_index,
+            flow_status="running",
+            flow_stage="team_joined",
+            flow_error_level="info",
+            flow_error_message="",
+        )
+        hooks.account_event(
+            email,
+            batch_index=batch_index,
+            worker_index=worker_index,
+            stage="team_joined",
+            message="账号已注册并进入 Team",
+            status="running",
+        )
+        hooks.account_event(
+            email,
+            batch_index=batch_index,
+            worker_index=worker_index,
+            stage="cpa_queued",
+            message="已提交协议认证、CPA JSON 检查和上传，继续处理后续账号",
+            status="running",
+        )
+        cpa_worker.enqueue(email, batch_index=batch_index, worker_index=worker_index)
+        add_pending_cpa()
+
     def consume_cpa_result(*, block: bool = False, timeout: float = 1) -> bool:
-        nonlocal pending_cpa, success_count
+        nonlocal success_count
         try:
             result = cpa_worker.results.get(timeout=timeout if block else 0)
         except queue.Empty:
             return False
 
-        pending_cpa = max(0, pending_cpa - 1)
+        mark_cpa_result_finished()
         email = result.get("email", "")
         if result.get("ok"):
             success_count += 1
@@ -1344,15 +1401,29 @@ def run_cpa_batch(
             pass
 
     def wait_for_current_cpa_result() -> None:
-        while pending_cpa > 0:
+        while get_pending_cpa() > 0:
             consume_cpa_result(block=True)
+
+    def registered_success_count() -> int:
+        return success_count + get_pending_cpa()
+
+    def should_pause_for_register_success_rate() -> bool:
+        return _should_pause_for_success_rate(registered_success_count(), account_failures)
+
+    def register_success_rate_message() -> str:
+        return (
+            f"成功率保护暂停: 成功 {registered_success_count()}, 失败 {account_failures}, "
+            f"已完成成功率 {_completed_success_rate(registered_success_count(), account_failures):.2f}%"
+        )
+
+    def close_cpa_worker() -> None:
+        cpa_worker.flush_and_close()
+        drain_cpa_results()
 
     def pause_for_consecutive_register_failures(last_error: str) -> dict:
         reason = f"连续 {consecutive_register_failures} 个账号注册失败，已暂停: {last_error}"
         hooks.run_update(fatal_error=reason, pause_requested=True)
-        cpa_worker.finish()
-        cpa_worker.join()
-        drain_cpa_results()
+        close_cpa_worker()
         hooks.pause()
         logger.warning("[CPA批量] %s", reason)
         return {
@@ -1378,12 +1449,10 @@ def run_cpa_batch(
             mail_client = get_mail_client()
             mail_client.login()
 
-        while success_count < target and (attempts < max_attempts or pending_cpa > 0):
+        while success_count < target and (attempts < max_attempts or get_pending_cpa() > 0):
             drain_cpa_results()
             if hooks.pause_requested():
-                cpa_worker.finish()
-                cpa_worker.join()
-                drain_cpa_results()
+                close_cpa_worker()
                 hooks.pause()
                 return {
                     "run_id": run_id,
@@ -1395,14 +1464,11 @@ def run_cpa_batch(
                     "succeeded": success_count,
                 }
 
-            if join_mode == JOIN_MODE_DIRECT and parallel_workers <= 1 and pending_cpa > 0:
-                wait_for_current_cpa_result()
-                continue
-
             if success_count >= target:
                 break
 
-            if pending_cpa and (attempts >= max_attempts or success_count + pending_cpa >= target):
+            current_pending_cpa = get_pending_cpa()
+            if current_pending_cpa and (attempts >= max_attempts or success_count + current_pending_cpa >= target):
                 consume_cpa_result(block=True)
                 continue
 
@@ -1410,46 +1476,42 @@ def run_cpa_batch(
                 continue
 
             if join_mode == JOIN_MODE_DIRECT and parallel_workers > 1:
-                remaining_success = target - success_count - pending_cpa
+                current_pending_cpa = get_pending_cpa()
+                remaining_success = target - success_count - current_pending_cpa
                 remaining_attempts = max_attempts - attempts
                 create_target = min(remaining_success, batch_size, remaining_attempts)
                 if create_target <= 0:
                     continue
                 batch_index = (attempts // batch_size) + 1
                 hooks.run_update(current_batch=batch_index)
+                created_accounts: list[dict[str, object]] = []
+
+                def enqueue_parallel_success(item: dict[str, object]) -> None:
+                    email = _normalized_email(item.get("email"))
+                    if not email:
+                        return
+                    worker_index = item.get("worker_index")
+                    created_accounts.append({"email": email, "worker_index": worker_index})
+                    enqueue_cpa_account(email, batch_index=batch_index, worker_index=worker_index)
 
                 create_result = _create_direct_accounts_parallel(
                     create_target,
                     parallel_workers=parallel_workers,
                     hooks=hooks,
                     batch_index=batch_index,
+                    on_success=enqueue_parallel_success,
                 )
                 attempts += int(create_result.get("attempted") or 0)
                 account_failures += int(create_result.get("failed") or 0)
                 hooks.run_update(attempted_count=attempts)
-                created_accounts = []
-                for item in create_result.get("emails") or []:
-                    if isinstance(item, dict):
-                        email = _normalized_email(item.get("email"))
-                        worker_index = item.get("worker_index")
-                    else:
-                        email = _normalized_email(item)
-                        worker_index = None
-                    if email:
-                        created_accounts.append({"email": email, "worker_index": worker_index})
                 if not created_accounts:
                     consecutive_register_failures += 1
                     if not continue_on_error and consecutive_register_failures >= MAX_CONSECUTIVE_REGISTER_FAILURES:
                         return pause_for_consecutive_register_failures("并行直注注册未产生成功账号")
-                    if not continue_on_error and _should_pause_for_success_rate(success_count, account_failures):
-                        reason = (
-                            f"成功率保护暂停: 成功 {success_count}, 失败 {account_failures}, "
-                            f"已完成成功率 {_completed_success_rate(success_count, account_failures):.2f}%"
-                        )
+                    if not continue_on_error and should_pause_for_register_success_rate():
+                        reason = register_success_rate_message()
                         hooks.run_update(fatal_error=reason, pause_requested=True)
-                        cpa_worker.finish()
-                        cpa_worker.join()
-                        drain_cpa_results()
+                        close_cpa_worker()
                         hooks.pause()
                         logger.warning("[CPA批量] %s", reason)
                         return {
@@ -1465,38 +1527,7 @@ def run_cpa_batch(
                         }
                     continue
                 consecutive_register_failures = 0
-                for created in created_accounts:
-                    email = created["email"]
-                    worker_index = created.get("worker_index")
-                    update_account(
-                        email,
-                        run_id=run_id,
-                        batch_index=batch_index,
-                        worker_index=worker_index,
-                        flow_status="running",
-                        flow_stage="team_joined",
-                        flow_error_level="info",
-                        flow_error_message="",
-                    )
-                    hooks.account_event(
-                        email,
-                        batch_index=batch_index,
-                        worker_index=worker_index,
-                        stage="team_joined",
-                        message="账号已注册并进入 Team",
-                        status="running",
-                    )
-                    hooks.account_event(
-                        email,
-                        batch_index=batch_index,
-                        worker_index=worker_index,
-                        stage="cpa_queued",
-                        message="已提交协议认证、CPA JSON 检查和上传，继续处理后续账号",
-                        status="running",
-                    )
-                    cpa_worker.enqueue(email, batch_index=batch_index, worker_index=worker_index)
-                    pending_cpa += 1
-                consume_cpa_result(block=True, timeout=0.05)
+                drain_cpa_results()
                 continue
 
             attempts += 1
@@ -1570,15 +1601,10 @@ def run_cpa_batch(
                 consecutive_register_failures += 1
                 if not continue_on_error and consecutive_register_failures >= MAX_CONSECUTIVE_REGISTER_FAILURES:
                     return pause_for_consecutive_register_failures(str(exc))
-                if not continue_on_error and _should_pause_for_success_rate(success_count, account_failures):
-                    reason = (
-                        f"成功率保护暂停: 成功 {success_count}, 失败 {account_failures}, "
-                        f"已完成成功率 {_completed_success_rate(success_count, account_failures):.2f}%"
-                    )
+                if not continue_on_error and should_pause_for_register_success_rate():
+                    reason = register_success_rate_message()
                     hooks.run_update(fatal_error=reason, pause_requested=True)
-                    cpa_worker.finish()
-                    cpa_worker.join()
-                    drain_cpa_results()
+                    close_cpa_worker()
                     hooks.pause()
                     logger.warning("[CPA批量] %s", reason)
                     return {
@@ -1610,10 +1636,10 @@ def run_cpa_batch(
                     return pause_for_consecutive_register_failures(str(exc))
                 continue
 
+            enqueue_cpa_account(email, batch_index=batch_index)
+
             if hooks.pause_requested():
-                cpa_worker.finish()
-                cpa_worker.join()
-                drain_cpa_results()
+                close_cpa_worker()
                 hooks.pause()
                 return {
                     "run_id": run_id,
@@ -1625,19 +1651,7 @@ def run_cpa_batch(
                     "succeeded": success_count,
                 }
 
-            hooks.account_event(
-                email,
-                batch_index=batch_index,
-                stage="cpa_queued",
-                message="已提交协议认证、CPA JSON 检查和上传，继续处理后续账号",
-                status="running",
-            )
-            cpa_worker.enqueue(email, batch_index=batch_index)
-            pending_cpa += 1
-            if join_mode == JOIN_MODE_DIRECT and parallel_workers <= 1:
-                wait_for_current_cpa_result()
-            else:
-                consume_cpa_result(block=True, timeout=0.05)
+            drain_cpa_results()
 
         status = "completed" if success_count >= target else "partial"
         if status == "partial":
@@ -1664,9 +1678,7 @@ def run_cpa_batch(
         logger.error("[CPA批量] 任务失败: %s", exc)
         raise
     finally:
-        cpa_worker.finish()
-        cpa_worker.join()
-        drain_cpa_results()
+        close_cpa_worker()
         try:
             fail_running_flow_accounts(run_id, "任务结束时清理遗留运行记录")
         except Exception as exc:

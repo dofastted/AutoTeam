@@ -1,3 +1,4 @@
+import threading
 import time
 
 import pytest
@@ -405,7 +406,7 @@ def test_run_cpa_batch_resume_failed_run_can_continue(tmp_path, monkeypatch):
     assert updated["success_count"] == 2
 
 
-def test_direct_single_worker_waits_for_cpa_result_before_next_account(tmp_path, monkeypatch):
+def test_direct_single_worker_enqueues_cpa_before_next_account(tmp_path, monkeypatch):
     _use_tmp_flow_file(tmp_path, monkeypatch)
     emails = iter(["a1@example.com", "a2@example.com"])
     call_order = []
@@ -420,7 +421,8 @@ def test_direct_single_worker_waits_for_cpa_result_before_next_account(tmp_path,
 
     def fake_verify(email, _cache, **_kwargs):
         call_order.append(f"cpa:{email}")
-        time.sleep(0.02)
+        if email == "a1@example.com":
+            time.sleep(0.02)
         return _fake_cpa_result(email)
 
     monkeypatch.setattr(cpa_batch, "_create_direct_account", fake_create_direct)
@@ -449,21 +451,18 @@ def test_direct_single_worker_waits_for_cpa_result_before_next_account(tmp_path,
 
     assert result["status"] == "completed"
     assert result["succeeded"] == 2
-    assert call_order == [
-        "create:a1@example.com",
-        "cpa:a1@example.com",
-        "sub2api:a1@example.com",
-        "create:a2@example.com",
-        "cpa:a2@example.com",
-        "sub2api:a2@example.com",
-    ]
+    assert call_order.index("create:a2@example.com") < call_order.index("sub2api:a1@example.com")
+    assert call_order.index("cpa:a2@example.com") > call_order.index("sub2api:a1@example.com")
+    assert call_order[-1] == "sub2api:a2@example.com"
 
 
-def test_direct_single_worker_does_not_create_next_account_while_first_is_pending(tmp_path, monkeypatch):
+def test_direct_single_worker_can_create_next_account_while_first_cpa_retries(tmp_path, monkeypatch):
     _use_tmp_flow_file(tmp_path, monkeypatch)
     emails = iter(["a1@example.com", "a2@example.com"])
     call_order = []
     state = {"count": 0}
+    first_cpa_started = threading.Event()
+    second_account_created = threading.Event()
 
     monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
     monkeypatch.setattr(cpa_batch, "update_account", lambda *args, **kwargs: None)
@@ -471,12 +470,16 @@ def test_direct_single_worker_does_not_create_next_account_while_first_is_pendin
     def fake_create_direct(_mail_client, **_kwargs):
         email = next(emails)
         call_order.append(f"create:{email}")
+        if email == "a2@example.com":
+            second_account_created.set()
         return email
 
     def fake_verify(email, _cache, **_kwargs):
         state["count"] += 1
         call_order.append(f"cpa:{email}:{state['count']}")
         if state["count"] == 1:
+            first_cpa_started.set()
+            assert second_account_created.wait(timeout=1)
             raise RuntimeError("Codex 协议认证失败: HTTP 429 Rate limit exceeded")
         return _fake_cpa_result(email)
 
@@ -486,16 +489,17 @@ def test_direct_single_worker_does_not_create_next_account_while_first_is_pendin
 
     result = cpa_batch.run_cpa_batch(
         "run-direct-pending",
-        target=1,
+        target=2,
         batch_size=2,
         join_mode="direct",
         parallel_workers=1,
     )
 
     assert result["status"] == "completed"
-    assert result["succeeded"] == 1
-    assert call_order[:2] == ["create:a1@example.com", "cpa:a1@example.com:1"]
-    assert "create:a2@example.com" not in call_order[:2]
+    assert result["succeeded"] == 2
+    assert first_cpa_started.is_set()
+    assert "create:a2@example.com" in call_order
+    assert call_order.index("create:a2@example.com") < call_order.index("cpa:a2@example.com:2")
 
 
 def test_run_cpa_batch_resume_preserves_parallel_workers(tmp_path, monkeypatch):
@@ -512,7 +516,7 @@ def test_run_cpa_batch_resume_preserves_parallel_workers(tmp_path, monkeypatch):
     )
     seen = {}
 
-    def fake_create_parallel(total, *, parallel_workers, hooks, batch_index):
+    def fake_create_parallel(total, *, parallel_workers, hooks, batch_index, on_success=None):
         seen["parallel_workers"] = parallel_workers
         return {
             "attempted": 0,
@@ -588,7 +592,7 @@ def test_run_cpa_batch_parallel_direct_uses_cpa_batch_session_first_helper(tmp_p
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("manager parallel helper should not run")),
     )
 
-    def fake_create_parallel(total, *, parallel_workers, hooks, batch_index):
+    def fake_create_parallel(total, *, parallel_workers, hooks, batch_index, on_success=None):
         assert total == 3
         assert parallel_workers == 3
         assert hooks.run_id == "run-parallel-direct"
@@ -603,6 +607,8 @@ def test_run_cpa_batch_parallel_direct_uses_cpa_batch_session_first_helper(tmp_p
                 message="session saved",
                 status="running",
             )
+            if on_success:
+                on_success({"email": email, "worker_index": index})
         return {
             "attempted": 3,
             "succeeded": 3,
@@ -653,9 +659,12 @@ def test_parallel_direct_runs_protocol_auth_without_browser_oauth_deferral(tmp_p
     )
     verify_calls = []
 
-    def fake_create_parallel(total, *, parallel_workers, hooks, batch_index):
+    def fake_create_parallel(total, *, parallel_workers, hooks, batch_index, on_success=None):
         assert total == 2
         time.sleep(0.05)
+        for index, email in enumerate(["w1@example.com", "w2@example.com"], start=1):
+            if on_success:
+                on_success({"email": email, "worker_index": index})
         return {
             "attempted": 2,
             "succeeded": 2,
@@ -732,8 +741,9 @@ def test_run_cpa_batch_stops_when_pause_is_requested(tmp_path, monkeypatch):
     run = flow_runs.get_flow_run("run-4")
 
     assert result["status"] == "paused"
-    assert seen == ["a1@example.com"]
+    assert seen == ["a1@example.com", "a2@example.com"]
     assert run["status"] == "paused"
+    assert len(run["accounts"]) == 2
 
 
 def test_cpa_upload_success_syncs_sub2api_when_enabled(tmp_path, monkeypatch):
