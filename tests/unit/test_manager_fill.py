@@ -1,4 +1,7 @@
+import pytest
+
 from autoteam import manager
+from autoteam.exceptions import PhoneVerificationRequiredError
 
 
 class _FakeChatGPT:
@@ -19,6 +22,291 @@ class _FakeChatGPT:
 class _FakeMailClient:
     def login(self):
         return None
+
+
+class _FakeBody:
+    def __init__(self, text):
+        self._text = text
+
+    @property
+    def first(self):
+        return self
+
+    def is_visible(self, timeout=300):
+        return True
+
+    def inner_text(self, timeout=300):
+        return self._text
+
+    def text_content(self, timeout=300):
+        return self._text
+
+
+class _FakeVisibleLocator:
+    def __init__(self, visible=True, editable=True):
+        self._visible = visible
+        self._editable = editable
+        self.clicked = 0
+
+    @property
+    def first(self):
+        return self
+
+    def is_visible(self, timeout=300):
+        return self._visible
+
+    def is_editable(self, timeout=300):
+        return self._editable
+
+    def click(self, timeout=3000, force=False):
+        self.clicked += 1
+
+
+class _FakePage:
+    def __init__(self, url="", body="", locators=None, title="", html=""):
+        self.url = url
+        self._body = body
+        self._locators = locators or {}
+        self._title = title
+        self._html = html
+
+    def locator(self, selector):
+        for key, value in self._locators.items():
+            if key in selector or selector in key:
+                return value
+        assert selector == "body"
+        return _FakeBody(self._body)
+
+    def title(self):
+        return self._title
+
+    def content(self):
+        return self._html
+
+
+def test_is_session_ended_page_detects_auth_page():
+    page = _FakePage(
+        url="https://auth.openai.com/log-in-or-create-account",
+        body="Your session has ended Continue by logging in",
+    )
+
+    assert manager._is_session_ended_page(page) is True
+
+
+def test_try_activate_direct_signup_locator_uses_href():
+    calls = []
+
+    class FakeLocator:
+        def evaluate(self, expression):
+            calls.append(("evaluate", expression))
+            return "https://auth.openai.com/create-account"
+
+    class FakePage:
+        def goto(self, url, wait_until=None, timeout=None):
+            calls.append(("goto", url, wait_until, timeout))
+
+    assert manager._try_activate_direct_signup_locator(FakePage(), FakeLocator(), "Sign up for free") is True
+    assert calls[-1] == ("goto", "https://auth.openai.com/create-account", "domcontentloaded", 60000)
+
+
+def test_detect_direct_register_step_handles_organization_url(monkeypatch):
+    page = _FakePage(url="https://chatgpt.com/organization/create")
+
+    monkeypatch.setattr(manager, "_is_google_redirect", lambda _page: False)
+    monkeypatch.setattr(manager, "_is_cloudflare_verifying", lambda _page: False)
+
+    assert manager._detect_direct_register_step(page) == "workspace"
+
+
+def test_detect_direct_register_step_handles_create_organization_body(monkeypatch):
+    page = _FakePage(url="https://auth.openai.com/create-account", body="Create organization Continue")
+
+    monkeypatch.setattr(manager, "_is_google_redirect", lambda _page: False)
+    monkeypatch.setattr(manager, "_is_cloudflare_verifying", lambda _page: False)
+    monkeypatch.setattr(manager, "_first_visible_editable_locator", lambda *_args, **_kwargs: None)
+
+    assert manager._detect_direct_register_step(page) == "workspace"
+
+
+def test_detect_direct_register_step_handles_add_phone_url(monkeypatch):
+    page = _FakePage(url="https://auth.openai.com/add-phone")
+
+    monkeypatch.setattr(manager, "_is_google_redirect", lambda _page: False)
+
+    assert manager._detect_direct_register_step(page) == "add_phone"
+    with pytest.raises(PhoneVerificationRequiredError, match="OpenAI 风控要求手机号"):
+        manager._raise_if_add_phone_url(page.url, "risk@example.com")
+
+
+def test_direct_register_failure_diagnostics_include_step_url_title_and_html(monkeypatch):
+    page = _FakePage(
+        url="https://auth.openai.com/email-verification",
+        title="Verify email",
+        html="<html><body>Verification page markup with code input</body></html>",
+    )
+
+    monkeypatch.setattr(manager, "_is_google_redirect", lambda _page: False)
+    monkeypatch.setattr(manager, "_is_cloudflare_verifying", lambda _page: False)
+    monkeypatch.setattr(manager, "_first_visible_editable_locator", lambda *_args, **_kwargs: None)
+
+    message = manager._direct_register_failure_diagnostics(page, reason="未收到验证码")
+
+    assert "step=code" in message
+    assert "url=https://auth.openai.com/email-verification" in message
+    assert "title=Verify email" in message
+    assert "html_excerpt=<html><body>Verification page markup" in message
+    assert "reason=未收到验证码" in message
+
+
+def test_raise_direct_register_failure_includes_visible_error_text(monkeypatch):
+    error_locator = _FakeBody("Sorry, registration is blocked")
+    page = _FakePage(
+        url="https://chatgpt.com/auth/error",
+        title="Error",
+        html="<html><body><h1>Sorry</h1></body></html>",
+        locators={"[class*=error]": error_locator},
+    )
+
+    monkeypatch.setattr(manager, "_is_google_redirect", lambda _page: False)
+    monkeypatch.setattr(manager, "_is_cloudflare_verifying", lambda _page: False)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        manager._raise_direct_register_failure(page, reason="认证错误页")
+
+    message = str(exc_info.value)
+    assert "直注注册未完成:" in message
+    assert "step=auth_error" in message
+    assert "url=https://chatgpt.com/auth/error" in message
+    assert "title=Error" in message
+    assert "error_text=Sorry, registration is blocked" in message
+
+
+def test_raise_direct_register_failure_detects_ip_blocked_error(monkeypatch):
+    error_locator = _FakeBody("Failed to create account")
+    page = _FakePage(
+        url="https://auth.openai.com/create",
+        title="Create account",
+        html="<html><body>Failed to create account</body></html>",
+        locators={"[class*=error]": error_locator},
+    )
+
+    monkeypatch.setattr(manager, "_is_google_redirect", lambda _page: False)
+    monkeypatch.setattr(manager, "_is_cloudflare_verifying", lambda _page: False)
+
+    with pytest.raises(manager.OpenAiCreateAccountBlockedError) as exc_info:
+        manager._raise_direct_register_failure(page, reason="提交注册失败")
+
+    message = str(exc_info.value)
+    assert "直注注册未完成:" in message
+    assert "error_text=Failed to create account" in message
+    assert "reason=ip_blocked" in message
+
+
+def test_register_direct_once_raises_detailed_runtime_error_on_unknown_step(monkeypatch):
+    class FakeBrowser:
+        def __init__(self, page):
+            self.page = page
+            self.closed = False
+
+        def new_context(self, **_kwargs):
+            return self
+
+        def new_page(self):
+            return self.page
+
+        def close(self):
+            self.closed = True
+
+    class FakeLease:
+        def __init__(self, browser):
+            self.browser = browser
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def launch_chromium(self, **_kwargs):
+            return self.browser
+
+    page = _FakePage(
+        url="https://auth.openai.com/custom-state",
+        title="Custom Signup",
+        html="<html><body>Unexpected signup page</body></html>",
+    )
+
+    def fake_goto(url, **_kwargs):
+        page.url = "https://auth.openai.com/custom-state"
+
+    page.goto = fake_goto
+    browser = FakeBrowser(page)
+
+    monkeypatch.setattr(manager, "get_playwright_launch_options", lambda: {})
+    monkeypatch.setattr(manager, "acquire_browser_lease", lambda *_args, **_kwargs: FakeLease(browser))
+    monkeypatch.setattr(manager, "_wait_for_direct_cloudflare", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(manager, "_is_session_ended_page", lambda _page: False)
+    monkeypatch.setattr(manager, "_safe_invite_screenshot", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(manager, "_click_direct_signup_entry", lambda _page: False)
+    monkeypatch.setattr(manager, "_wait_for_direct_register_step", lambda *_args, **_kwargs: "unknown")
+    monkeypatch.setattr(manager.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        manager._register_direct_once(_FakeMailClient(), "diag@example.com", "pw-1")
+
+    message = str(exc_info.value)
+    assert "直注注册未完成:" in message
+    assert "step=unknown" in message
+    assert "url=https://auth.openai.com/custom-state" in message
+    assert "title=Custom Signup" in message
+    assert "html_excerpt=<html><body>Unexpected signup page</body></html>" in message
+    assert "reason=未识别到邮箱步骤" in message
+    assert browser.closed is True
+
+
+def test_detect_direct_register_step_prefers_visible_password_input(monkeypatch):
+    page = _FakePage(
+        url="https://auth.openai.com/email-verification",
+        locators={"input[type=\"password\"]": _FakeVisibleLocator()},
+    )
+
+    monkeypatch.setattr(manager, "_is_google_redirect", lambda _page: False)
+    monkeypatch.setattr(manager, "_is_cloudflare_verifying", lambda _page: False)
+
+    assert manager._detect_direct_register_step(page) == "password"
+
+
+def test_click_direct_continue_with_password_clicks_visible_entry(monkeypatch):
+    locator = _FakeVisibleLocator()
+    page = _FakePage(locators={"Continue with password": locator})
+    sleeps = []
+
+    monkeypatch.setattr(manager.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    assert manager._click_direct_continue_with_password(page) is True
+    assert locator.clicked == 1
+    assert sleeps == [2]
+
+
+def test_find_direct_code_inputs_accepts_numeric_otp_inputs():
+    class FakeInput:
+        def is_visible(self, timeout=200):
+            return True
+
+    class FakeLocator:
+        def __init__(self, items):
+            self._items = items
+            self.first = items[0]
+
+        def all(self):
+            return self._items
+
+    class FakePage:
+        def locator(self, selector):
+            assert "inputmode" in selector
+            return FakeLocator([FakeInput() for _ in range(6)])
+
+    assert len(manager._find_direct_code_inputs(FakePage())) == 6
 
 
 def test_cmd_fill_tries_other_reusable_accounts_before_creating_new(monkeypatch):
@@ -218,7 +506,7 @@ def test_complete_direct_about_you_uses_shared_fill_logic(monkeypatch):
     class FakePage:
         url = "https://chatgpt.com/auth/about-you"
 
-    def fake_fill(page, *, email=None, logger=None, log_prefix=None, submit_timeout=12):
+    def fake_fill(page, *, email=None, logger=None, log_prefix=None, submit_timeout=12, deadline=None):
         calls.append(
             {
                 "page": page,
@@ -226,6 +514,7 @@ def test_complete_direct_about_you_uses_shared_fill_logic(monkeypatch):
                 "logger": logger,
                 "log_prefix": log_prefix,
                 "submit_timeout": submit_timeout,
+                "deadline": deadline,
             }
         )
         return True
@@ -242,5 +531,77 @@ def test_complete_direct_about_you_uses_shared_fill_logic(monkeypatch):
             "logger": manager.logger,
             "log_prefix": "[直接注册]",
             "submit_timeout": 12,
+            "deadline": calls[0]["deadline"],
         }
     ]
+    assert calls[0]["deadline"] is not None
+
+
+def test_complete_direct_about_you_raises_on_timeout(monkeypatch):
+    class FakePage:
+        url = "https://auth.openai.com/about-you"
+
+        def title(self):
+            return "Tell us about you"
+
+        def locator(self, selector):
+            assert selector == "body"
+            return _FakeBody("About you form")
+
+    monotonic_values = iter([100.0, 191.0, 191.0])
+
+    def fake_fill(page, *, deadline=None, **_kwargs):
+        assert page.url.endswith("/about-you")
+        assert deadline == 190.0
+        return False
+
+    monkeypatch.setattr(manager.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(manager, "fill_about_you_page", fake_fill)
+
+    with pytest.raises(manager.OpenAiCreateAccountBlockedError) as exc_info:
+        manager._complete_direct_about_you(FakePage(), email="timeout@example.com", timeout=90)
+
+    assert "about-you 超时" in str(exc_info.value)
+    assert exc_info.value.email == "timeout@example.com"
+    assert exc_info.value.reason == "about_you_timeout"
+
+
+def test_complete_direct_about_you_raises_on_oops_title(monkeypatch):
+    class FakePage:
+        url = "https://auth.openai.com/about-you"
+
+        def title(self):
+            return "Oops, an error occurred"
+
+    monkeypatch.setattr(
+        manager,
+        "fill_about_you_page",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should fail before filling")),
+    )
+
+    with pytest.raises(manager.OpenAiCreateAccountBlockedError) as exc_info:
+        manager._complete_direct_about_you(FakePage(), email="oops@example.com")
+
+    assert "about-you Oops" in str(exc_info.value)
+    assert exc_info.value.email == "oops@example.com"
+    assert exc_info.value.reason == "about_you_oops"
+
+
+def test_wait_for_direct_admin_members_access_requires_admin_members(monkeypatch):
+    visited = []
+
+    class FakePage:
+        url = "https://chatgpt.com/"
+
+        def goto(self, url, **_kwargs):
+            visited.append(url)
+            self.url = url
+
+        def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(manager, "complete_workspace_selection", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(manager, "_page_excerpt", lambda _page, limit=500: "Members")
+
+    assert manager._wait_for_direct_admin_members_access(FakePage(), timeout=1) is True
+    assert visited == ["https://chatgpt.com/admin/members"]

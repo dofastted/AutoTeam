@@ -167,7 +167,7 @@ def _fill_birthday_by_meta(page, values: dict[str, str], *, logger=None, log_pre
         for kind in ("year", "month", "day"):
             meta = kind_to_meta[kind]
             spinbutton = page.locator('[role="spinbutton"]').nth(meta["index"])
-            spinbutton.click(force=True)
+            spinbutton.click(force=True, timeout=3000)
             time.sleep(0.2)
             try:
                 page.keyboard.press("ControlOrMeta+A")
@@ -199,9 +199,13 @@ def fill_about_you_page(
     logger=None,
     log_prefix: str = "[about-you]",
     submit_timeout: float = 12,
+    deadline: float | None = None,
 ) -> bool:
     if "about-you" not in (page.url or "").lower():
         return True
+
+    def _timed_out() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
 
     profile = select_about_you_profile(email)
     values = profile.birthdate_values()
@@ -212,6 +216,9 @@ def fill_about_you_page(
     ]
 
     for attempt, fallback_values in enumerate(birthday_orders, 1):
+        if _timed_out():
+            _log(logger, "warning", "%s about-you 总耗时已超时，停止填写", log_prefix)
+            return False
         if "about-you" not in (page.url or "").lower():
             return True
 
@@ -220,7 +227,7 @@ def fill_about_you_page(
                 'input[name="name"], input[placeholder*="name" i], input[id="name"], input[placeholder*="全名" i]'
             ).first
             if name_input.is_visible(timeout=2000) and name_input.is_editable(timeout=500):
-                name_input.fill(profile.full_name)
+                name_input.fill(profile.full_name, timeout=3000)
                 time.sleep(0.3)
         except Exception:
             pass
@@ -243,7 +250,9 @@ def fill_about_you_page(
 
                 try:
                     for spinbutton, fallback_value in zip(spinbuttons[:3], fallback_values):
-                        spinbutton.click(force=True)
+                        if _timed_out():
+                            return False
+                        spinbutton.click(force=True, timeout=3000)
                         time.sleep(0.2)
                         try:
                             page.keyboard.press("ControlOrMeta+A")
@@ -268,7 +277,7 @@ def fill_about_you_page(
                     'input[name="age"], input[id="age"], input[placeholder*="年龄"], input[placeholder*="Age"], input[type="number"]'
                 ).first
                 if age_input.is_visible(timeout=2000) and age_input.is_editable(timeout=500):
-                    age_input.fill(profile.age_text())
+                    age_input.fill(profile.age_text(), timeout=3000)
                     _log(logger, "info", "%s 填入年龄: %s", log_prefix, profile.age_text())
             except Exception:
                 pass
@@ -285,7 +294,7 @@ def fill_about_you_page(
             try:
                 button = page.locator(button_selector).first
                 if button.is_visible(timeout=1000):
-                    button.click()
+                    button.click(timeout=3000)
                     submitted = True
                     break
             except Exception:
@@ -297,8 +306,10 @@ def fill_about_you_page(
             except Exception:
                 pass
 
-        deadline = time.time() + submit_timeout
-        while time.time() < deadline:
+        submit_deadline = time.monotonic() + submit_timeout
+        if deadline is not None:
+            submit_deadline = min(submit_deadline, deadline)
+        while time.monotonic() < submit_deadline:
             if "about-you" not in (page.url or "").lower():
                 return True
             time.sleep(0.5)

@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import asyncio
 import threading
 import time
 import uuid
@@ -858,6 +859,35 @@ class _PlaywrightExecutor:
 _pw_executor = _PlaywrightExecutor()
 
 
+def _run_sync_in_worker_thread(func, *args, **kwargs):
+    result_holder: dict = {}
+    done = threading.Event()
+
+    def _worker():
+        try:
+            result_holder["result"] = func(*args, **kwargs)
+        except BaseException as exc:
+            result_holder["error"] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    done.wait()
+    if "error" in result_holder:
+        raise result_holder["error"]
+    return result_holder.get("result")
+
+
+def _ensure_not_asyncio_loop_thread(func, *args, **kwargs):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return func(*args, **kwargs)
+    logger.warning("[API] 检测到同步任务位于 asyncio 事件循环线程，已转入专用线程执行")
+    return _run_sync_in_worker_thread(func, *args, **kwargs)
+
+
 def _stop_playwright_resource(resource):
     if not resource:
         return
@@ -1054,6 +1084,14 @@ def _run_task(task_id: str, func, *args, **kwargs):
     global _current_task_id
     task = _tasks[task_id]
 
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        result = _run_sync_in_worker_thread(_run_task, task_id, func, *args, **kwargs)
+        return result
+
     _playwright_lock.acquire()
     _current_task_id = task_id
     if task.get("stop_requested"):
@@ -1142,6 +1180,7 @@ class CpaBatchParams(BaseModel):
     target: int | None = None
     batch_size: int | None = None
     parallel_workers: int | None = None
+    continue_on_error: bool = False
 
 
 class CleanupParams(BaseModel):
@@ -2166,19 +2205,10 @@ def post_account_cpa_auth(email: str):
         _require_account_mail_configs(acc, "CPA 认证")
 
     def _run():
-        from autoteam.accounts import STATUS_ACTIVE, STATUS_EXHAUSTED, STATUS_UNAVAILABLE, update_account
+        from autoteam.account_oauth import run_account_oauth_login
+        from autoteam.accounts import update_account
         from autoteam.auth_archive import archive_account_auth_file
-        import autoteam.codex_auth as codex_auth
-        from autoteam.codex_auth import (
-            check_codex_quota,
-            get_existing_session_auth_file,
-            login_codex_via_browser,
-            quota_result_quota_info,
-            quota_result_resets_at,
-            save_auth_file,
-        )
         from autoteam.cpa_sync import upload_to_cpa
-        from autoteam.mail_provider import get_account_mail_account_id, get_mail_client_for_account
 
         latest = find_account(load_accounts(), email)
         if not latest:
@@ -2190,69 +2220,18 @@ def post_account_cpa_auth(email: str):
         if auth_path:
             logger.info("[CPA认证] 使用已有本地认证文件: %s", email)
         else:
-            logger.info("[CPA认证] 本地缺少认证文件，开始 Codex 登录: %s", email)
-            mail_client = get_mail_client_for_account(latest)
-            mail_client.login()
-            previous_session_auth_file = get_existing_session_auth_file(latest)
-            bundle = login_codex_via_browser(
+            logger.info("[CPA认证] 本地缺少 OAuth RT 文件，开始协议 Codex 登录: %s", email)
+            oauth_result = run_account_oauth_login(
                 email,
-                latest.get("password", ""),
-                mail_client=mail_client,
-                mail_account_id=get_account_mail_account_id(latest),
+                account=latest,
+                check_quota_snapshot=True,
             )
-            if not bundle:
-                if codex_auth.LAST_OAUTH_FAILURE_REASON == "account_deactivated":
-                    update_account(
-                        email,
-                        status=STATUS_UNAVAILABLE,
-                        sync_disabled=True,
-                        unavailable_reason="account_deactivated",
-                        unavailable_at=time.time(),
-                    )
-                    raise RuntimeError(f"{email} 已返回 account_deactivated，已标记不可用")
-                raise RuntimeError(f"Codex 登录失败: {email}")
-
-            plan_type = (bundle.get("plan_type") or "unknown").strip().lower()
-            auth_path = save_auth_file(bundle, source="oauth")
-            archive_path = archive_account_auth_file(email, auth_path)
-            update_fields = {
-                "auth_file": auth_path,
-                "rt_auth_file": auth_path,
-                "plan_type": plan_type,
-                "cpa_archive_file": archive_path,
-            }
-            if previous_session_auth_file:
-                update_fields["session_auth_file"] = previous_session_auth_file
-            update_account(email, **update_fields)
-
-            if plan_type == "team":
-                update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
-                token = bundle.get("access_token")
-                if token:
-                    st, info = check_codex_quota(token, account_id=bundle.get("account_id"))
-                    if st == "ok" and isinstance(info, dict):
-                        update_account(email, last_quota=info)
-                    elif st == "exhausted":
-                        quota_info = quota_result_quota_info(info)
-                        if quota_info:
-                            update_account(email, last_quota=quota_info)
-                        update_account(
-                            email,
-                            status=STATUS_EXHAUSTED,
-                            quota_exhausted_at=time.time(),
-                            quota_resets_at=quota_result_resets_at(info) or int(time.time() + 18000),
-                        )
-                    elif st == "account_deactivated":
-                        update_account(
-                            email,
-                            status=STATUS_UNAVAILABLE,
-                            sync_disabled=True,
-                            unavailable_reason="account_deactivated",
-                            unavailable_at=time.time(),
-                        )
-                        raise RuntimeError(f"{email} 已返回 account_deactivated，已标记不可用")
-            else:
+            plan_type = (oauth_result.get("plan_type") or oauth_result.get("plan") or "unknown").strip().lower()
+            if plan_type != "team":
                 raise RuntimeError(f"{email} 登录后 plan={plan_type}，不是 team")
+            auth_path = str(oauth_result.get("rt_auth_file") or oauth_result.get("auth_file") or "")
+            if not auth_path:
+                raise RuntimeError(f"{email} 协议 Codex 登录未生成 OAuth RT 文件")
 
         if not upload_to_cpa(auth_path):
             raise RuntimeError(f"上传 CPA 失败: {Path(auth_path).name}")
@@ -2290,86 +2269,16 @@ def post_account_login(params: LoginAccountParams):
     _require_account_mail_configs(acc, "登录账号")
 
     def _run():
-        from autoteam.accounts import STATUS_ACTIVE, STATUS_STANDBY, STATUS_UNAVAILABLE, update_account
-        from autoteam.auth_archive import archive_account_auth_file
-        import autoteam.codex_auth as codex_auth
-        from autoteam.codex_auth import (
-            check_codex_quota,
-            get_existing_session_auth_file,
-            login_codex_via_browser,
-            quota_result_quota_info,
-            quota_result_resets_at,
-            save_auth_file,
-        )
-        from autoteam.mail_provider import get_account_mail_account_id, get_mail_client_for_account
+        from autoteam.account_oauth import run_account_oauth_login
 
-        mail_client = get_mail_client_for_account(acc)
-        mail_client.login()
-        previous_session_auth_file = get_existing_session_auth_file(acc)
-        bundle = login_codex_via_browser(
-            email,
-            acc.get("password", ""),
-            mail_client=mail_client,
-            mail_account_id=get_account_mail_account_id(acc),
-        )
-        if bundle:
-            auth_file = save_auth_file(bundle, source="oauth")
-            archive_path = archive_account_auth_file(email, auth_file)
-            update_fields = {
-                "auth_file": auth_file,
-                "rt_auth_file": auth_file,
-                "cpa_archive_file": archive_path,
-            }
-            if previous_session_auth_file:
-                update_fields["session_auth_file"] = previous_session_auth_file
-            update_account(email, **update_fields)
-            # 登录成功且是 team plan，自动标记为 active
-            if bundle.get("plan_type") == "team":
-                update_account(email, status=STATUS_ACTIVE, last_active_at=time.time())
-                # 查一下额度并保存快照
-                token = bundle.get("access_token")
-                if token:
-                    st, info = check_codex_quota(token)
-                    if st == "ok" and isinstance(info, dict):
-                        update_account(email, last_quota=info)
-                    elif st == "exhausted":
-                        quota_info = quota_result_quota_info(info)
-                        if quota_info:
-                            update_account(email, last_quota=quota_info)
-                        update_account(
-                            email,
-                            status="exhausted",
-                            quota_exhausted_at=time.time(),
-                            quota_resets_at=quota_result_resets_at(info) or int(time.time() + 18000),
-                        )
-                    elif st == "account_deactivated":
-                        update_account(
-                            email,
-                            status=STATUS_UNAVAILABLE,
-                            sync_disabled=True,
-                            unavailable_reason="account_deactivated",
-                            unavailable_at=time.time(),
-                        )
-                        raise RuntimeError(f"{email} 已返回 account_deactivated，已标记不可用")
-            elif bundle.get("plan_type") not in {"team", "unknown"}:
-                update_account(email, status=STATUS_STANDBY)
-            return {
-                "email": email,
-                "plan": bundle.get("plan_type"),
-                "auth_file": auth_file,
-                "rt_auth_file": auth_file,
-                "cpa_archive_file": archive_path,
-            }
-        if codex_auth.LAST_OAUTH_FAILURE_REASON == "account_deactivated":
-            update_account(
-                email,
-                status=STATUS_UNAVAILABLE,
-                sync_disabled=True,
-                unavailable_reason="account_deactivated",
-                unavailable_at=time.time(),
-            )
-            raise RuntimeError(f"{email} 已返回 account_deactivated，已标记不可用")
-        raise RuntimeError(f"Codex 登录失败: {email}")
+        result = run_account_oauth_login(email, account=acc)
+        return {
+            "email": email,
+            "plan": result.get("plan"),
+            "auth_file": result.get("auth_file"),
+            "rt_auth_file": result.get("rt_auth_file"),
+            "cpa_archive_file": result.get("cpa_archive_file"),
+        }
 
     task = _start_task(f"login:{email}", _run, {"email": email})
     return task
@@ -2753,10 +2662,11 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
         }
 
     def _fetch_with_cached_token():
+        from urllib.parse import urlencode
+
         access_token = get_chatgpt_access_token()
         if not access_token:
             return None
-
 
         headers = {
             "authorization": f"Bearer {access_token}",
@@ -2767,15 +2677,40 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
         if device_id:
             headers["oai-device-id"] = device_id
 
-        users_resp = outbound_proxy.request(
-            "GET",
-            f"https://chatgpt.com/backend-api/accounts/{account_id}/users",
-            headers=headers,
-            timeout=20,
-        )
-        users_resp.raise_for_status()
-        users_data = users_resp.json()
-        members = users_data.get("items", users_data.get("users", users_data.get("members", [])))
+        members = []
+        offset = 0
+        limit = 50
+        seen_offsets = set()
+
+        while True:
+            if offset in seen_offsets:
+                raise RuntimeError(f"Team 成员分页重复 offset={offset}，停止读取")
+            seen_offsets.add(offset)
+
+            users_resp = outbound_proxy.request(
+                "GET",
+                f"https://chatgpt.com/backend-api/accounts/{account_id}/users?{urlencode({'limit': limit, 'offset': offset})}",
+                headers=headers,
+                timeout=20,
+            )
+            users_resp.raise_for_status()
+            users_data = users_resp.json()
+            page_items = users_data.get("items", users_data.get("users", users_data.get("members", [])))
+            if not isinstance(page_items, list):
+                page_items = []
+            members.extend(page_items)
+
+            try:
+                total = int(users_data.get("total", len(members)))
+            except (TypeError, ValueError):
+                total = len(members)
+            try:
+                response_limit = int(users_data.get("limit") or limit)
+            except (TypeError, ValueError):
+                response_limit = limit
+            if len(members) >= total or not page_items:
+                break
+            offset += max(1, response_limit)
 
         invites_resp = outbound_proxy.request(
             "GET",
@@ -2798,7 +2733,7 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
             return save_team_members_cache(token_result)
     except Exception as exc:
         logger.warning("[API] 使用缓存 access token 获取 Team 成员失败: %s", exc)
-        if cached:
+        if cached and not allow_browser:
             return {**cached, "cached": True, "refresh_error": str(exc)}
         if not allow_browser:
             return _local_snapshot(str(exc))
@@ -3024,7 +2959,7 @@ def resume_cpa_batch_run(run_id: str):
 
     task = _start_task(
         "cpa-batch",
-        run_cpa_batch,
+        _ensure_not_asyncio_loop_thread,
         {
             "run_id": run_id,
             "join_mode": run.get("join_mode") or "direct",
@@ -3033,6 +2968,7 @@ def resume_cpa_batch_run(run_id: str):
             "parallel_workers": run.get("parallel_workers") or 1,
             "resume": True,
         },
+        run_cpa_batch,
         run_id,
         resume=True,
         parallel_workers=run.get("parallel_workers") or 1,
@@ -3141,19 +3077,22 @@ def post_cpa_batch(params: CpaBatchParams = CpaBatchParams()):
     run_id = uuid.uuid4().hex[:12]
     task = _start_task(
         "cpa-batch",
-        run_cpa_batch,
+        _ensure_not_asyncio_loop_thread,
         {
             "run_id": run_id,
             "join_mode": join_mode,
             "target": target,
             "batch_size": batch_size,
             "parallel_workers": parallel_workers,
+            "continue_on_error": bool(params.continue_on_error),
         },
+        run_cpa_batch,
         run_id,
         join_mode=join_mode,
         target=target,
         batch_size=batch_size,
         parallel_workers=parallel_workers,
+        continue_on_error=bool(params.continue_on_error),
     )
     return task
 

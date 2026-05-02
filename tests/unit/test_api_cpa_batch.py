@@ -44,6 +44,7 @@ def test_post_cpa_batch_starts_fixed_size_task(monkeypatch):
         "target": 100,
         "batch_size": 20,
         "parallel_workers": 1,
+        "continue_on_error": False,
     }
     assert captured["kwargs"]["join_mode"] == "invite"
 
@@ -115,6 +116,40 @@ def test_post_cpa_batch_accepts_parallel_workers(monkeypatch):
 
     assert captured["params"]["parallel_workers"] == 3
     assert captured["kwargs"]["parallel_workers"] == 3
+
+
+def test_post_cpa_batch_accepts_continue_on_error(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        api,
+        "_current_runtime_env",
+        lambda: {
+            "MAIL_PROVIDER": "mo_email",
+            "MO_EMAIL_BASE_URL": "https://mo.example.com",
+            "MO_EMAIL_API_KEY": "key",
+            "MO_EMAIL_DOMAIN": "example.com",
+            "MO_EMAIL_NAME_PREFIX": "abc",
+            "MO_EMAIL_START_INDEX": "1",
+            "MO_EMAIL_EXPIRY_TIME": "3600000",
+            "CPA_URL": "http://127.0.0.1:8317",
+            "CPA_KEY": "secret",
+        },
+    )
+    monkeypatch.setattr(api, "_admin_status", lambda: {"configured": True})
+    monkeypatch.setattr("uuid.uuid4", lambda: type("FakeUuid", (), {"hex": "runid1234567890"})())
+
+    def fake_start_task(command, func, params, *args, **kwargs):
+        captured["params"] = params
+        captured["kwargs"] = kwargs
+        return {"task_id": "task-1", "command": command, "params": params}
+
+    monkeypatch.setattr(api, "_start_task", fake_start_task)
+
+    api.post_cpa_batch(api.CpaBatchParams(join_mode="direct", continue_on_error=True))
+
+    assert captured["params"]["continue_on_error"] is True
+    assert captured["kwargs"]["continue_on_error"] is True
 
 
 def test_post_fill_accepts_parallel_workers(monkeypatch):
@@ -197,10 +232,13 @@ def test_resume_cpa_batch_run_starts_resume_task(tmp_path, monkeypatch):
     monkeypatch.setattr(flow_runs, "FLOW_RUNS_FILE", tmp_path / "flow_runs.json")
     flow_runs.create_flow_run("run-resume", target=100, batch_size=20, join_mode="direct")
     flow_runs.update_flow_run("run-resume", status="paused", success_count=20, attempted_count=23)
+    from autoteam.cpa_batch import run_cpa_batch
+
     captured = {}
 
     def fake_start_task(command, func, params, *args, **kwargs):
         captured["command"] = command
+        captured["func"] = func
         captured["params"] = params
         captured["args"] = args
         captured["kwargs"] = kwargs
@@ -212,9 +250,10 @@ def test_resume_cpa_batch_run_starts_resume_task(tmp_path, monkeypatch):
 
     assert result["task_id"] == "task-resume"
     assert captured["command"] == "cpa-batch"
+    assert captured["func"] is api._ensure_not_asyncio_loop_thread
     assert captured["params"]["run_id"] == "run-resume"
     assert captured["params"]["resume"] is True
-    assert captured["args"] == ("run-resume",)
+    assert captured["args"] == (run_cpa_batch, "run-resume")
     assert captured["kwargs"] == {"resume": True, "parallel_workers": 1}
 
 
@@ -324,7 +363,7 @@ def test_create_direct_account_does_not_accept_team_membership_without_session(t
     assert mail_client.deleted is True
 
 
-def test_run_cpa_batch_processes_cpa_upload_while_registering_next_account(tmp_path, monkeypatch):
+def test_run_cpa_batch_single_worker_finishes_cpa_upload_before_next_account(tmp_path, monkeypatch):
     monkeypatch.setattr(flow_runs, "FLOW_RUNS_FILE", tmp_path / "flow_runs.json")
     monkeypatch.setattr(accounts, "ACCOUNTS_FILE", tmp_path / "accounts.json")
 
@@ -335,9 +374,8 @@ def test_run_cpa_batch_processes_cpa_upload_while_registering_next_account(tmp_p
     monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: FakeMailClient())
 
     created = []
-    first_upload_started = threading.Event()
-    release_first_upload = threading.Event()
-    second_created_after_upload_started = {"value": False}
+    first_upload_finished = threading.Event()
+    second_created_after_first_upload_finished = {"value": False}
 
     def fake_create_direct(_mail_client, hooks=None, batch_index=None):
         email = f"user{len(created) + 1}@example.com"
@@ -345,14 +383,12 @@ def test_run_cpa_batch_processes_cpa_upload_while_registering_next_account(tmp_p
         accounts.add_account(email, "pw")
         accounts.update_account(email, status=accounts.STATUS_ACTIVE)
         if len(created) == 2:
-            second_created_after_upload_started["value"] = first_upload_started.wait(timeout=2)
-            release_first_upload.set()
+            second_created_after_first_upload_finished["value"] = first_upload_finished.is_set()
         return email
 
     def fake_verify(email, _mail_cache, **_kwargs):
         if email == "user1@example.com":
-            first_upload_started.set()
-            assert release_first_upload.wait(timeout=2)
+            first_upload_finished.set()
         return {
             "email": email,
             "plan_type": "team",
@@ -369,4 +405,4 @@ def test_run_cpa_batch_processes_cpa_upload_while_registering_next_account(tmp_p
     assert result["status"] == "completed"
     assert result["succeeded"] == 2
     assert created == ["user1@example.com", "user2@example.com"]
-    assert second_created_after_upload_started["value"] is True
+    assert second_created_after_first_upload_finished["value"] is True
