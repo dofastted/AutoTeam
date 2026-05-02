@@ -69,3 +69,61 @@ def test_select_workspace_option_shortcuts_completed_when_chatgpt_home_loaded(mo
     )
 
     assert client.select_workspace_option(0) == {"step": "completed", "detail": None}
+
+
+def test_complete_workspace_selection_uses_preferred_workspace(monkeypatch):
+    class FakePage:
+        url = "https://chatgpt.com/workspace"
+
+    page = FakePage()
+    calls = []
+
+    monkeypatch.setattr(chatgpt_api.ChatGPTTeamAPI, "__init__", lambda self: None)
+    monkeypatch.setattr(chatgpt_api.ChatGPTTeamAPI, "_is_workspace_selection_page", lambda self: True)
+    monkeypatch.setattr(chatgpt_api.ChatGPTTeamAPI, "_body_excerpt", lambda self, limit=200: "")
+    monkeypatch.setattr(
+        chatgpt_api.ChatGPTTeamAPI,
+        "list_workspace_options",
+        lambda self: [
+            {"id": "0", "label": "Personal account", "kind": "fallback"},
+            {"id": "1", "label": "Idapro", "kind": "preferred"},
+        ],
+    )
+
+    def fake_select(self, option_id):
+        calls.append(option_id)
+        return {"step": "completed", "detail": None}
+
+    monkeypatch.setattr(chatgpt_api.ChatGPTTeamAPI, "select_workspace_option", fake_select)
+
+    assert chatgpt_api.complete_workspace_selection(page, workspace_name="Idapro") is True
+    assert calls == ["1"]
+
+
+def test_complete_workspace_selection_falls_back_to_non_personal_option(monkeypatch):
+    class FakePage:
+        url = "https://chatgpt.com/organization"
+
+    page = FakePage()
+    calls = []
+
+    monkeypatch.setattr(chatgpt_api.ChatGPTTeamAPI, "__init__", lambda self: None)
+    monkeypatch.setattr(chatgpt_api.ChatGPTTeamAPI, "_is_workspace_selection_page", lambda self: True)
+    monkeypatch.setattr(chatgpt_api.ChatGPTTeamAPI, "_body_excerpt", lambda self, limit=200: "")
+    monkeypatch.setattr(
+        chatgpt_api.ChatGPTTeamAPI,
+        "list_workspace_options",
+        lambda self: [
+            {"id": "0", "label": "Personal account", "kind": "fallback"},
+            {"id": "1", "label": "New organization", "kind": "fallback"},
+        ],
+    )
+
+    def fake_select(self, option_id):
+        calls.append(option_id)
+        return {"step": "completed", "detail": None}
+
+    monkeypatch.setattr(chatgpt_api.ChatGPTTeamAPI, "select_workspace_option", fake_select)
+
+    assert chatgpt_api.complete_workspace_selection(page) is True
+    assert calls == ["1"]

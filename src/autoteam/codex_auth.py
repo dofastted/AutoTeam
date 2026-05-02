@@ -135,6 +135,8 @@ def _write_auth_file(filepath, bundle):
     }
     if bundle.get("session_token"):
         auth_data["session_token"] = bundle.get("session_token", "")
+    if bundle.get("cookie_header"):
+        auth_data["cookie_header"] = bundle.get("cookie_header", "")
     if bundle.get("credential_source"):
         auth_data["credential_source"] = bundle.get("credential_source", "")
 
@@ -213,6 +215,22 @@ def _extract_session_token_from_cookies(cookies):
     return session_token
 
 
+def _build_cookie_header_from_browser_cookies(cookies, *, domain_filters=("chatgpt.com", "auth.openai.com")):
+    pairs = []
+    seen = set()
+    for cookie in cookies or []:
+        name = str(cookie.get("name", "") or "").strip()
+        value = str(cookie.get("value", "") or "")
+        domain = str(cookie.get("domain", "") or "").lower()
+        if not name or not value or name in seen:
+            continue
+        if domain_filters and domain and not any(domain_filter in domain for domain_filter in domain_filters):
+            continue
+        seen.add(name)
+        pairs.append(f"{name}={value}")
+    return "; ".join(pairs)
+
+
 def build_chatgpt_session_auth_bundle(page, *, email="", account_id=""):
     """
     从已登录的 ChatGPT 页面提取 Web session 凭证，生成 CPA 兼容 bundle。
@@ -281,7 +299,8 @@ def build_chatgpt_session_auth_bundle(page, *, email="", account_id=""):
             except Exception:
                 expired = time.time() + 3600
 
-    session_token = _extract_session_token_from_cookies(page.context.cookies())
+    cookies = page.context.cookies()
+    session_token = _extract_session_token_from_cookies(cookies)
     bundle = {
         "access_token": access_token,
         # CPA/本地 plan 判断只需要 JWT payload；Web session 没有独立 id_token。
@@ -292,6 +311,7 @@ def build_chatgpt_session_auth_bundle(page, *, email="", account_id=""):
         "plan_type": str(plan_type or "unknown").strip().lower(),
         "expired": float(expired or time.time() + 3600),
         "session_token": session_token,
+        "cookie_header": _build_cookie_header_from_browser_cookies(cookies),
         "credential_source": "chatgpt_session",
     }
     logger.info("[Codex] 已从 ChatGPT session 获取凭证: %s (plan: %s)", bundle["email"], bundle["plan_type"])
@@ -457,6 +477,8 @@ def _classify_auth_error_text(text: str):
     value = (text or "").lower()
     if "account_deactivated" in value:
         return "account_deactivated"
+    if "no_valid_organizations" in value:
+        return "no_valid_organizations"
     if "operation timed out" in value:
         return "operation_timed_out"
     if "oops, an error occurred" in value:
@@ -600,7 +622,270 @@ def _poll_verification_code_by_mail_id(
     return None, None
 
 
-def login_codex_via_browser(email, password, mail_client=None, mail_account_id=None):
+def _complete_workspace_if_needed(page, *, workspace_name="", log_prefix="[Codex]"):
+    try:
+        from autoteam.chatgpt_api import complete_workspace_selection
+
+        return complete_workspace_selection(
+            page,
+            workspace_name=workspace_name or get_chatgpt_workspace_name(),
+            logger=logger,
+            log_prefix=log_prefix,
+        )
+    except Exception as exc:
+        logger.warning("%s workspace / organization 处理异常: %s", log_prefix, exc)
+        return False
+
+
+def login_codex_via_existing_context(
+    context,
+    email,
+    password,
+    *,
+    mail_client=None,
+    mail_account_id=None,
+    account_id="",
+    workspace_name="",
+):
+    """在已经登录 ChatGPT 的浏览器上下文里，新开标签完成 Codex OAuth。"""
+    code_verifier, code_challenge = _generate_pkce()
+    state = secrets.token_urlsafe(16)
+    auth_url = _build_auth_url(code_challenge, state)
+    used_email_ids: set[object] = set()
+    auth_code = None
+    workspace_name = workspace_name or get_chatgpt_workspace_name()
+    account_id = account_id or ""
+
+    _set_last_oauth_failure(None, "")
+    logger.info("[Codex] 在注册窗口新标签执行 OAuth: %s", email)
+    no_valid_org_retries = 0
+
+    if account_id:
+        try:
+            context.add_cookies(
+                [
+                    {
+                        "name": "_account",
+                        "value": account_id,
+                        "domain": "chatgpt.com",
+                        "path": "/",
+                        "secure": True,
+                        "sameSite": "Lax",
+                    },
+                    {
+                        "name": "_account",
+                        "value": account_id,
+                        "domain": "auth.openai.com",
+                        "path": "/",
+                        "secure": True,
+                        "sameSite": "Lax",
+                    },
+                ]
+            )
+        except Exception as exc:
+            logger.warning("[Codex] 注入账号上下文 cookie 失败: %s", exc)
+
+    def on_request(request):
+        nonlocal auth_code
+        url = request.url
+        if f"localhost:{CODEX_CALLBACK_PORT}/auth/callback" in url:
+            parsed = urllib.parse.urlparse(url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            auth_code = qs.get("code", [None])[0]
+            if auth_code:
+                logger.info("[Codex] 捕获到 auth code!")
+
+    def on_response(response):
+        nonlocal auth_code
+        url = response.url
+        if f"localhost:{CODEX_CALLBACK_PORT}/auth/callback" in url and not auth_code:
+            parsed = urllib.parse.urlparse(url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            auth_code = qs.get("code", [None])[0]
+            if auth_code:
+                logger.info("[Codex] 从 response 捕获到 auth code!")
+
+    page = context.new_page()
+    try:
+        page.on("request", on_request)
+        page.on("response", on_response)
+        page.goto(auth_url, wait_until="domcontentloaded", timeout=60000)
+        time.sleep(3)
+        _screenshot(page, "codex_existing_01_auth_page.png")
+
+        for step in range(20):
+            if auth_code:
+                break
+
+            current_url = page.url or ""
+            if f"localhost:{CODEX_CALLBACK_PORT}/auth/callback" in current_url:
+                parsed = urllib.parse.urlparse(current_url)
+                qs = urllib.parse.parse_qs(parsed.query)
+                auth_code = qs.get("code", [None])[0]
+                if auth_code:
+                    logger.info("[Codex] 从 URL 捕获到 auth code!")
+                    break
+
+            if _is_auth_error_page(page):
+                failure_text = _auth_error_excerpt(page)
+                failure_reason = _classify_auth_error_text(failure_text) or "auth_error"
+                _screenshot(page, f"codex_existing_auth_error_step{step + 1}.png")
+                if failure_reason == "no_valid_organizations" and no_valid_org_retries < 3:
+                    no_valid_org_retries += 1
+                    delay = 20 * no_valid_org_retries
+                    logger.warning(
+                        "[Codex] OAuth 暂未识别到有效组织，重新确认 admin/members 后等待 %ds 再重试 (%d/3)",
+                        delay,
+                        no_valid_org_retries,
+                    )
+                    verify_page = None
+                    try:
+                        verify_page = context.new_page()
+                        verify_page.goto(
+                            "https://chatgpt.com/admin/members",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        try:
+                            verify_page.wait_for_load_state("networkidle", timeout=8000)
+                        except Exception:
+                            pass
+                        _complete_workspace_if_needed(
+                            verify_page,
+                            workspace_name=workspace_name,
+                            log_prefix="[Codex]",
+                        )
+                    except Exception as exc:
+                        logger.warning("[Codex] OAuth 重试前确认 admin/members 异常: %s", exc)
+                    finally:
+                        try:
+                            if verify_page:
+                                verify_page.close()
+                        except Exception:
+                            pass
+                    time.sleep(delay)
+                    page.goto(auth_url, wait_until="domcontentloaded", timeout=60000)
+                    time.sleep(3)
+                    continue
+                _set_last_oauth_failure(failure_reason, failure_text)
+                return None
+
+            try:
+                if "about-you" in current_url:
+                    fill_about_you_page(page, email=email, logger=logger, log_prefix="[Codex]")
+                    time.sleep(3)
+                    continue
+            except Exception as exc:
+                logger.warning("[Codex] about-you 处理异常: %s", exc)
+
+            try:
+                if not _complete_workspace_if_needed(page, workspace_name=workspace_name, log_prefix="[Codex]"):
+                    logger.info("[Codex] workspace / organization 页面仍在等待处理")
+                if "workspace" in (page.url or "").lower() or "organization" in (page.url or "").lower():
+                    time.sleep(2)
+                    continue
+            except Exception:
+                pass
+
+            try:
+                email_input = page.locator('input[name="email"], input[id="email-input"], input[id="email"]').first
+                if email_input.is_visible(timeout=1000):
+                    email_input.fill(email)
+                    time.sleep(0.5)
+                    _click_primary_auth_button(page, email_input, ["Continue", "继续"])
+                    _wait_for_auth_page_ready(page, timeout_seconds=45)
+                    continue
+            except Exception:
+                pass
+
+            try:
+                pwd_input = page.locator('input[name="password"], input[type="password"]').first
+                if pwd_input.is_visible(timeout=1000):
+                    if password:
+                        pwd_input.fill(password)
+                        time.sleep(0.5)
+                        _click_primary_auth_button(page, pwd_input, ["Continue", "继续", "Log in"])
+                    elif _click_email_otp_login(page):
+                        logger.info("[Codex] 无密码，点击一次性验证码登录")
+                    else:
+                        logger.warning("[Codex] 无密码且未找到一次性验证码入口")
+                        return None
+                    time.sleep(5)
+                    continue
+            except Exception:
+                pass
+
+            try:
+                otp_input = page.locator(_OTP_INPUT_SELECTORS).first
+                if otp_input.is_visible(timeout=1000):
+                    if not mail_client:
+                        logger.warning("[Codex] 需要验证码但无 mail_client，无法自动获取")
+                        return None
+                    otp, otp_email_id = _poll_verification_code_by_mail_id(
+                        mail_client,
+                        email,
+                        mail_account_id=mail_account_id,
+                        used_email_ids=used_email_ids,
+                    )
+                    if not otp:
+                        _set_last_oauth_failure("otp_mail_not_found", "mail api 未返回可用 mail id 对应验证码")
+                        return None
+                    used_email_ids.add(otp_email_id)
+                    otp_input.fill(otp)
+                    time.sleep(0.5)
+                    page.locator('button[type="submit"], button:has-text("Continue"), button:has-text("继续")').first.click()
+                    logger.info("[Codex] 已输入验证码: %s", otp)
+                    time.sleep(5)
+                    continue
+            except Exception:
+                pass
+
+            try:
+                consent_btn = page.locator(
+                    'button:has-text("继续"), button:has-text("Continue"), button:has-text("Allow")'
+                ).first
+                if consent_btn.is_visible(timeout=2000):
+                    logger.info("[Codex] 点击同意/继续按钮 (existing step %d)...", step + 1)
+                    consent_btn.click()
+                    time.sleep(5)
+                    continue
+            except Exception:
+                pass
+
+            time.sleep(1)
+
+        for _ in range(30):
+            if auth_code:
+                break
+            try:
+                cur = page.url
+                if f"localhost:{CODEX_CALLBACK_PORT}/auth/callback" in cur:
+                    parsed = urllib.parse.urlparse(cur)
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    auth_code = qs.get("code", [None])[0]
+                    if auth_code:
+                        logger.info("[Codex] 从 URL 捕获到 auth code!")
+                        break
+            except Exception:
+                pass
+            time.sleep(1)
+
+        if not auth_code:
+            _screenshot(page, "codex_existing_05_no_callback.png")
+            failure_text = _auth_error_excerpt(page)
+            _set_last_oauth_failure(_classify_auth_error_text(failure_text) or "no_callback", failure_text)
+            logger.warning("[Codex] 未获取到 auth code，当前 URL: %s，页面: %s", page.url, failure_text)
+            return None
+
+        return _exchange_auth_code(auth_code, code_verifier, fallback_email=email)
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
+
+
+def login_codex_via_browser(email, password, mail_client=None, mail_account_id=None, account_id=None):
     """
     通过 Playwright 自动完成 Codex OAuth 登录。
     mail_client: CloudMailClient 实例，用于自动读取登录验证码。
@@ -610,7 +895,7 @@ def login_codex_via_browser(email, password, mail_client=None, mail_account_id=N
     state = secrets.token_urlsafe(16)
     _used_email_ids: set[object] = set()  # 记录已尝试过的邮件，避免重复提交同一封验证码邮件
 
-    chatgpt_account_id = get_chatgpt_account_id()
+    chatgpt_account_id = account_id or get_chatgpt_account_id()
 
     auth_url = _build_auth_url(code_challenge, state)
 
@@ -731,33 +1016,9 @@ def login_codex_via_browser(email, password, mail_client=None, mail_account_id=N
         _screenshot(_page, "codex_00_chatgpt_login.png")
         logger.info("[Codex] ChatGPT 登录后 URL: %s", _page.url)
 
-        # 如果是 workspace 选择页面，选择 Team
-        if "workspace" in _page.url:
-            workspace_name = get_chatgpt_workspace_name()
-            logger.info("[Codex] 检测到 workspace 选择页面...")
-            try:
-                ws_btn = _page.locator(f'text="{workspace_name}"').first
-                if workspace_name and ws_btn.is_visible(timeout=3000):
-                    logger.info("[Codex] 选择 workspace: %s", workspace_name)
-                    ws_btn.click()
-                    time.sleep(5)
-                else:
-                    # fallback: 选第二个选项（第一个通常是"个人"）
-                    options = _page.locator('a, button, [role="button"]').all()
-                    for opt in options:
-                        try:
-                            text = opt.inner_text(timeout=1000).strip()
-                            if text and "个人" not in text and "Personal" not in text and text not in ("ChatGPT", ""):
-                                logger.info("[Codex] 选择 workspace: %s", text)
-                                opt.click()
-                                time.sleep(5)
-                                break
-                        except Exception:
-                            continue
-            except Exception:
-                pass
-            _screenshot(_page, "codex_00_after_workspace.png")
-            logger.info("[Codex] 选择 workspace 后 URL: %s", _page.url)
+        _complete_workspace_if_needed(_page, workspace_name=get_chatgpt_workspace_name(), log_prefix="[Codex]")
+        _screenshot(_page, "codex_00_after_workspace.png")
+        logger.info("[Codex] workspace 处理后 URL: %s", _page.url)
 
         # _account cookie 已在登录前注入
 

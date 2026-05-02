@@ -3,6 +3,7 @@
 import json
 import logging
 from pathlib import Path
+from urllib.parse import urlencode
 
 from autoteam.accounts import find_account, load_accounts, save_accounts
 from autoteam.admin_state import get_chatgpt_account_id
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 AUTH_DIR = PROJECT_ROOT / "auths"
+TEAM_USERS_PAGE_LIMIT = 50
 
 
 def _response_excerpt(body, limit=240):
@@ -41,19 +43,74 @@ def _parse_team_api_json(response, label):
         raise RuntimeError(f"{label}接口返回了非 JSON 内容: {_response_excerpt(body)}") from exc
 
 
+def _extract_collection(data, keys):
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _build_users_path(account_id, *, limit=TEAM_USERS_PAGE_LIMIT, offset=0):
+    params = urlencode({"limit": max(1, int(limit)), "offset": max(0, int(offset))})
+    return f"/backend-api/accounts/{account_id}/users?{params}"
+
+
+def _extract_total(data, fallback_count):
+    if not isinstance(data, dict):
+        return fallback_count
+    total = data.get("total", data.get("total_count"))
+    try:
+        return int(total)
+    except (TypeError, ValueError):
+        return fallback_count
+
+
+def fetch_team_members(chatgpt_api, *, page_limit=TEAM_USERS_PAGE_LIMIT):
+    """读取 Team 全部成员，按 ChatGPT users API 的 offset 分页取完。"""
+    account_id = get_chatgpt_account_id()
+    members = []
+    offset = 0
+    limit = max(1, int(page_limit or TEAM_USERS_PAGE_LIMIT))
+    seen_offsets = set()
+
+    while True:
+        if offset in seen_offsets:
+            raise RuntimeError(f"Team 成员分页重复 offset={offset}，停止读取")
+        seen_offsets.add(offset)
+
+        users_resp = chatgpt_api._api_fetch("GET", _build_users_path(account_id, limit=limit, offset=offset))
+        data = _parse_team_api_json(users_resp, "Team 成员")
+        page_items = _extract_collection(data, ("items", "users", "members"))
+        members.extend(page_items)
+
+        total = _extract_total(data, len(members))
+        response_limit = limit
+        if isinstance(data, dict):
+            try:
+                response_limit = int(data.get("limit") or limit)
+            except (TypeError, ValueError):
+                response_limit = limit
+
+        if len(members) >= total or not page_items:
+            break
+        offset += max(1, response_limit)
+
+    return members
+
+
 def fetch_team_state(chatgpt_api):
     """读取 Team 成员和邀请状态。"""
     account_id = get_chatgpt_account_id()
-    members = []
-    invites = []
-
-    users_resp = chatgpt_api._api_fetch("GET", f"/backend-api/accounts/{account_id}/users")
-    data = _parse_team_api_json(users_resp, "Team 成员")
-    members = data.get("items", data.get("users", data.get("members", [])))
+    members = fetch_team_members(chatgpt_api)
 
     invites_resp = chatgpt_api._api_fetch("GET", f"/backend-api/accounts/{account_id}/invites")
     data = _parse_team_api_json(invites_resp, "Team 邀请")
-    invites = data if isinstance(data, list) else data.get("invites", data.get("account_invites", []))
+    invites = _extract_collection(data, ("invites", "account_invites"))
 
     return members, invites
 

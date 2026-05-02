@@ -114,6 +114,14 @@ PLAYWRIGHT_HEADLESS=false
 
 当同时存在 `PLAYWRIGHT_BROWSER_MODE` 和 `PLAYWRIGHT_HEADLESS` 时，优先使用 `PLAYWRIGHT_BROWSER_MODE`。
 
+如需复用内置 Chromium 的固定 profile，可设置：
+
+```dotenv
+PLAYWRIGHT_USER_DATA_DIR=/path/to/chromium-profile
+```
+
+该配置留空时沿用临时 profile。设置后，AutoTeam 会用持久化 profile 启动一个保活窗口；每次账号流程仍创建独立 Playwright context，任务结束时只关闭临时 context，不关闭保活窗口。若设置了 `PLAYWRIGHT_BROWSER_CDP_URL`，CDP 路径优先，`PLAYWRIGHT_USER_DATA_DIR` 不生效。
+
 ### 出口代理池
 
 AutoTeam 后端访问 OpenAI/ChatGPT、邮箱服务、CPA、Sub2API 时会使用全局出口代理池。默认值是 Windows Clash：

@@ -25,7 +25,7 @@ from playwright.sync_api import sync_playwright
 
 from autoteam.about_you import fill_about_you_page
 from autoteam.browser_runtime import acquire_browser_lease
-from autoteam.chatgpt_api import ChatGPTTeamAPI
+from autoteam.chatgpt_api import ChatGPTTeamAPI, complete_workspace_selection
 from autoteam.config import get_playwright_launch_options
 from autoteam.mail_provider import get_mail_client as CloudMailClient
 
@@ -257,6 +257,11 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
         time.sleep(3)
         screenshot(page, "reg_07_after_profile.png")
 
+    try:
+        complete_workspace_selection(page, logger=logger, log_prefix="[注册]")
+    except Exception as exc:
+        logger.warning("[注册] workspace / organization 步骤异常: %s | URL: %s", exc, page.url)
+
     # 可能需要接受条款 / 加入 workspace
     find_and_click(
         page,
@@ -272,6 +277,12 @@ def register_with_invite(page, invite_link, email, mail_client, password=None):
         timeout=5000,
     )
     time.sleep(5)
+
+    try:
+        complete_workspace_selection(page, logger=logger, log_prefix="[注册]")
+    except Exception as exc:
+        logger.warning("[注册] 二次处理 workspace / organization 异常: %s | URL: %s", exc, page.url)
+
     screenshot(page, "reg_08_final.png")
 
     # 检查结果

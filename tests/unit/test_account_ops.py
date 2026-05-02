@@ -15,7 +15,7 @@ def test_fetch_team_state_parses_members_and_invites(monkeypatch):
     monkeypatch.setattr(account_ops, "get_chatgpt_account_id", lambda: "acc-1")
     chatgpt = _FakeChatGPT(
         {
-            "/backend-api/accounts/acc-1/users": {
+            "/backend-api/accounts/acc-1/users?limit=50&offset=0": {
                 "status": 200,
                 "body": '{"items":[{"email":"member@example.com"}]}',
             },
@@ -32,11 +32,43 @@ def test_fetch_team_state_parses_members_and_invites(monkeypatch):
     assert invites == [{"email": "invite@example.com"}]
 
 
+def test_fetch_team_state_reads_all_user_pages(monkeypatch):
+    monkeypatch.setattr(account_ops, "get_chatgpt_account_id", lambda: "acc-1")
+    responses = {
+        "/backend-api/accounts/acc-1/users?limit=50&offset=0": {
+            "status": 200,
+            "body": '{"items":[{"email":"u1@example.com"}],"limit":50,"offset":0,"total":3}',
+        },
+        "/backend-api/accounts/acc-1/users?limit=50&offset=50": {
+            "status": 200,
+            "body": '{"items":[{"email":"u2@example.com"}],"limit":50,"offset":50,"total":3}',
+        },
+        "/backend-api/accounts/acc-1/users?limit=50&offset=100": {
+            "status": 200,
+            "body": '{"items":[{"email":"u3@example.com"}],"limit":50,"offset":100,"total":3}',
+        },
+        "/backend-api/accounts/acc-1/invites": {
+            "status": 200,
+            "body": '{"invites":[]}',
+        },
+    }
+    chatgpt = _FakeChatGPT(responses)
+
+    members, invites = account_ops.fetch_team_state(chatgpt)
+
+    assert [item["email"] for item in members] == [
+        "u1@example.com",
+        "u2@example.com",
+        "u3@example.com",
+    ]
+    assert invites == []
+
+
 def test_fetch_team_state_raises_readable_error_when_users_response_is_html(monkeypatch):
     monkeypatch.setattr(account_ops, "get_chatgpt_account_id", lambda: "acc-1")
     chatgpt = _FakeChatGPT(
         {
-            "/backend-api/accounts/acc-1/users": {
+            "/backend-api/accounts/acc-1/users?limit=50&offset=0": {
                 "status": 200,
                 "body": "<!doctype html><html><body>login</body></html>",
             },
@@ -55,7 +87,7 @@ def test_fetch_team_state_raises_readable_error_when_users_auth_fails(monkeypatc
     monkeypatch.setattr(account_ops, "get_chatgpt_account_id", lambda: "acc-1")
     chatgpt = _FakeChatGPT(
         {
-            "/backend-api/accounts/acc-1/users": {
+            "/backend-api/accounts/acc-1/users?limit=50&offset=0": {
                 "status": 403,
                 "body": '{"detail":"forbidden"}',
             },

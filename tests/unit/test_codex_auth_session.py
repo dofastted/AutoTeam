@@ -1,3 +1,5 @@
+import json
+
 from autoteam import codex_auth
 
 
@@ -29,6 +31,8 @@ def test_build_chatgpt_session_auth_bundle_from_page():
             return [
                 {"name": "__Secure-next-auth.session-token.0", "value": "part-a"},
                 {"name": "__Secure-next-auth.session-token.1", "value": "part-b"},
+                {"name": "cf_clearance", "value": "cf-1", "domain": ".chatgpt.com"},
+                {"name": "ignored", "value": "x", "domain": ".example.com"},
             ]
 
     class FakePage:
@@ -58,6 +62,8 @@ def test_build_chatgpt_session_auth_bundle_from_page():
     assert bundle["access_token"] == access_token
     assert bundle["id_token"] == access_token
     assert bundle["session_token"] == "part-apart-b"
+    assert "cf_clearance=cf-1" in bundle["cookie_header"]
+    assert "ignored=x" not in bundle["cookie_header"]
     assert bundle["credential_source"] == "chatgpt_session"
 
 
@@ -74,6 +80,7 @@ def test_save_auth_file_keeps_session_and_oauth_files(tmp_path, monkeypatch):
         "id_token": "session-id",
         "refresh_token": "",
         "expired": 2000000000,
+        "cookie_header": "cf_clearance=cf-1",
         "credential_source": "chatgpt_session",
     }
     oauth_bundle = {
@@ -94,6 +101,8 @@ def test_save_auth_file_keeps_session_and_oauth_files(tmp_path, monkeypatch):
     assert oauth_path.endswith("-oauth.json")
     assert (tmp_path / session_path.split("/")[-1]).exists()
     assert (tmp_path / oauth_path.split("/")[-1]).exists()
+    session_data = json.loads((tmp_path / session_path.split("/")[-1]).read_text(encoding="utf-8"))
+    assert session_data["cookie_header"] == "cf_clearance=cf-1"
 
 
 def test_login_codex_via_session_uses_unified_flow_and_returns_bundle(monkeypatch):

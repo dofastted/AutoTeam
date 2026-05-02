@@ -76,6 +76,37 @@ def test_task_proxy_context_keeps_single_proxy(monkeypatch):
         assert proxy.current_proxy_url() == first
 
 
+def test_rotate_task_proxy_switches_current_task_proxy(monkeypatch):
+    proxy = reload_proxy(monkeypatch, OUTBOUND_PROXY_POOL="http://proxy-a:8080,http://proxy-b:8080")
+
+    with proxy.task_proxy_context("http://proxy-a:8080"):
+        assert proxy.rotate_task_proxy() == "http://proxy-b:8080"
+        assert proxy.current_proxy_url() == "http://proxy-b:8080"
+
+
+def test_residential_proxy_pool_parses_and_rotates_in_order(monkeypatch):
+    pool = (
+        "http://rwhapmdk:eexy06lcufiz@208.66.79.48:5423,"
+        "http://rwhapmdk:eexy06lcufiz@208.66.79.18:5393,"
+        "http://rwhapmdk:eexy06lcufiz@63.246.131.37:6552,"
+        "http://jqcjjkua:rjqi149y9j7x@45.58.228.3:5675"
+    )
+    proxy = reload_proxy(monkeypatch, OUTBOUND_PROXY_POOL=pool)
+    expected = [
+        "http://rwhapmdk:eexy06lcufiz@208.66.79.48:5423",
+        "http://rwhapmdk:eexy06lcufiz@208.66.79.18:5393",
+        "http://rwhapmdk:eexy06lcufiz@63.246.131.37:6552",
+        "http://jqcjjkua:rjqi149y9j7x@45.58.228.3:5675",
+    ]
+
+    assert proxy.configured_proxy_pool() == expected
+    with proxy.task_proxy_context(expected[0]):
+        assert proxy.rotate_task_proxy() == expected[1]
+        assert proxy.rotate_task_proxy() == expected[2]
+        assert proxy.rotate_task_proxy() == expected[3]
+        assert proxy.rotate_task_proxy() == expected[0]
+
+
 def test_request_fails_over_on_network_error(monkeypatch):
     proxy = reload_proxy(monkeypatch, OUTBOUND_PROXY_POOL="http://proxy-a:8080,http://proxy-b:8080")
     calls = []

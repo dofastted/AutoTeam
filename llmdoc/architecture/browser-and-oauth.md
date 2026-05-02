@@ -37,11 +37,15 @@ API 模式下，Playwright 相关操作通过 `src/autoteam/api.py` (`_Playwrigh
 
 `src/autoteam/codex_auth.py`: 负责 PKCE、OAuth URL、token 交换、ChatGPT session 凭证提取、认证文件保存、额度查询和 refresh。
 
-账号池自动 OAuth 入口是 `login_codex_via_browser`。它登录账号后打开 Codex OAuth URL，捕获 callback code，换 token 并保存 OAuth RT JSON。
+`src/autoteam/protocol_oauth.py`: 账号池自动 RT 获取模块。`run_protocol_oauth_login_with_browser_context` 复用已登录的注册浏览器上下文打开 PKCE Codex OAuth 链接，拦截 `http://localhost:1455/auth/callback` 后用 `/oauth/token` 换取 `refresh_token`。`run_protocol_oauth_login` 保留为后备协议链路，用 HTTP session、邮箱 OTP、PKCE authorize 和 `/oauth/token` 获取 RT。HTTP client 优先使用 `curl_cffi`，不可用时退回 `requests`；两者都不继承系统代理，默认使用 `outbound_proxy.current_proxy_url()`。
 
-批量直注账号优先使用 `build_chatgpt_session_auth_bundle`。直注注册完成并进入 Team 后，`src/autoteam/manager.py` (`_register_direct_once`) 会在关闭同一个浏览器前读取 `https://chatgpt.com/api/auth/session` 的 `accessToken` 和 session cookie，保存为 ChatGPT Web session 备份。该备份写入 `session_auth_file`，普通同步不能上传它。
+账号池 OAuth 后备入口是 `src/autoteam/account_oauth.py` (`run_account_oauth_login`)。它读取账号邮箱、密码、邮箱 provider、`mail_account_id` 和已有 `session_auth_file` 中的 `session_token` / `cookie_header`，调用 `protocol_oauth.run_protocol_oauth_login`，成功后继续用 `codex_auth.save_auth_file(..., source="oauth")` 写入 OAuth RT 文件。
 
-批量 CPA 路径要求拿到 session bundle。`src/autoteam/cpa_batch.py` (`_create_direct_account`) 只执行一次当前邮箱注册；浏览器异常、`https://chatgpt.com/api/auth/error`、未识别邮箱步骤或 session 提取失败都会让当前邮箱失败并换下一个邮箱，不再用 Team 成员检查作为兜底。
+批量直注账号优先使用 `build_chatgpt_session_auth_bundle`。直注注册完成并进入 Team 后，`src/autoteam/manager.py` (`_register_direct_once`) 会先访问 `https://chatgpt.com/admin/members`，确认 workspace 已创建且成员页可访问，再在关闭同一个浏览器前读取 `https://chatgpt.com/api/auth/session` 的 `accessToken` 和 session cookie，保存为 ChatGPT Web session 备份。该备份写入 `session_auth_file`，普通同步不能上传它。
+
+批量 CPA 路径要求拿到 session bundle。`src/autoteam/cpa_batch.py` (`_create_direct_account`) 只执行一次当前邮箱注册；浏览器异常、`https://chatgpt.com/api/auth/error`、未识别邮箱步骤、`admin/members` 不可访问或 session 提取失败都会让当前邮箱失败并换下一个邮箱，不再用 Team 成员检查作为兜底。注册后的 workspace / organization 页由 `src/autoteam/chatgpt_api.py` (`complete_workspace_selection`) 处理，直注和邀请注册都会先尝试进入可用 Team workspace，避免后续 Codex OAuth 报 `no_valid_organizations`。
+
+直注注册窗口会在 `admin/members` 可访问后打开 PKCE Codex OAuth 链接。浏览器已带 ChatGPT 登录态，`src/autoteam/protocol_oauth.py` (`run_protocol_oauth_login_with_browser_context`) 通过 callback URL 取 code，再调用 token endpoint 生成 `auths/codex-{email}-{plan_type}-{hash}-oauth.json`。同一阶段也保存 `auths/codex-{email}-{plan_type}-{hash}-session.json` 作为 ChatGPT Web session 备份。后续 CPA worker 只有在缺少 OAuth RT 文件时才调用 `run_account_oauth_login` 后备。
 
 直注批量并行由 `src/autoteam/cpa_batch.py` (`_create_direct_accounts_parallel`) 调度。每个 worker 使用独立邮箱客户端和独立 Chromium 槽位，按 `BROWSER_PARALLEL_WORKERS=1..3` 分配目标数；该路径不会调用 `src/autoteam/manager.py` (`_create_new_accounts_parallel`)。
 

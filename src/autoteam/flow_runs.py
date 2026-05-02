@@ -166,7 +166,9 @@ def resume_flow_run(run_id: str) -> dict | None:
     run = get_flow_run(run_id)
     if not run:
         return None
-    status = "running" if run.get("status") == "paused" else run.get("status", "running")
+    status = run.get("status") or "running"
+    if status != "running":
+        status = "running"
     return update_flow_run(run_id, pause_requested=False, status=status, finished_at=None)
 
 

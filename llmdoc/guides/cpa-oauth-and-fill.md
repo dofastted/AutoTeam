@@ -44,26 +44,38 @@
 
 直注和邀请流程创建邮箱后，会立刻把真实邮箱写入账号池和 `flow_runs.json`。后续注册、凭证保存、额度检查、CPA 上传各自写阶段事件，避免浏览器流程卡住时页面只看到 `attempt-*` 占位记录。
 
-直注流程注册成功后先保存 ChatGPT Web session 备份，再生成 OAuth RT 凭证：
+直注流程注册成功后先确认 workspace，再保存 ChatGPT Web session 备份。注册浏览器不再打开 Codex OAuth，OAuth RT 由注册后的协议认证阶段获取：
 
-- `src/autoteam/manager.py` (`_register_direct_once`): 注册完成后在关闭浏览器前回传 session bundle。
+- `src/autoteam/manager.py` (`_register_direct_once`): 注册完成后先访问 `https://chatgpt.com/admin/members`，确认 workspace 成员页可访问，再在关闭浏览器前回传 session bundle。
+- `src/autoteam/chatgpt_api.py` (`complete_workspace_selection`): 处理注册后出现的 workspace / organization 选择页。直注和邀请注册都会尝试进入可用 Team workspace。
 - `src/autoteam/codex_auth.py` (`build_chatgpt_session_auth_bundle`): 读取 `/api/auth/session` 的 `accessToken`、session cookie、账号 ID 和 `plan_type`。
-- `src/autoteam/cpa_batch.py` (`_create_direct_account`): 将 session bundle 保存为 `auths/codex-{email}-{plan_type}-{hash}-session.json`，并写入 `session_auth_file`。浏览器异常、认证错误页或 session 提取失败时，当前邮箱直接失败并换下一个邮箱。
+- `src/autoteam/protocol_oauth.py` (`run_protocol_oauth_login_with_browser_context`): 复用注册成功后的浏览器 page/context 打开 PKCE Codex OAuth 链接，拦截 `http://localhost:1455/auth/callback` 获取 code，并用 `/oauth/token` 交换出 OAuth RT bundle。
+- `src/autoteam/protocol_oauth.py` (`run_protocol_oauth_login`): 后备路径。使用账号邮箱、密码、邮箱 OTP、HTTP session、PKCE、Codex authorize 和 `/oauth/token` 获取 `refresh_token`，可复用 `session_auth_file` 中的 `session_token`、`account_id` 和 cookie 信息。
+- `src/autoteam/cpa_batch.py` (`_create_direct_account`): 将 session bundle 保存为 `auths/codex-{email}-{plan_type}-{hash}-session.json`，写入 `session_auth_file`；同时保存浏览器内 PKCE 生成的 `auths/codex-{email}-{plan_type}-{hash}-oauth.json`，写入 `rt_auth_file`。浏览器异常、认证错误页、`admin/members` 不可访问、session 提取失败或 OAuth RT 生成失败时，当前邮箱直接失败并换下一个邮箱。
 - `src/autoteam/cpa_batch.py` (`_create_direct_accounts_parallel`): 直注批量并行 worker。按窗口数拆分目标，每个 worker 单独创建邮箱、注册、保存 session 凭证。
-- `src/autoteam/cpa_batch.py` (`_verify_and_upload_cpa`): 通过 `select_oauth_rt_auth_file` 选择本地 OAuth RT 文件；旧 `auth_file` 只有内容确认是 OAuth RT 时才可作为兼容候选。缺少 OAuth RT 文件时自动调用 `login_codex_via_browser` 打开该账号的 Codex OAuth 链接，拦截 callback 换 RT，保存为 `auths/codex-{email}-{plan_type}-{hash}-oauth.json`。
-- `src/autoteam/cpa_batch.py` (`_CpaUploadWorker`): OAuth RT 凭证保存后，CPA 额度检查和上传在内部 worker 线程执行；主线程可以继续注册后续账号。并行直注时，缺少 OAuth RT 的账号会先停在 `cpa_queued`，等注册浏览器窗口结束后再启动 Codex OAuth，避免 CPA OAuth 抢占注册浏览器槽位。
+- `src/autoteam/account_oauth.py` (`run_account_oauth_login`): 项目账号 OAuth RT 的共享实现。`/api/accounts/login` 和批量 CPA JSON 都调用它生成 OAuth RT 文件，成功后继续调用 `codex_auth.save_auth_file(..., source="oauth")`。
+- `src/autoteam/cpa_batch.py` (`_verify_and_upload_cpa`): 通过 `select_oauth_rt_auth_file` 选择本地 OAuth RT 文件；旧 `auth_file` 只有内容确认是 OAuth RT 时才可作为兼容候选。缺少 OAuth RT 文件时调用协议认证生成 `auths/codex-{email}-{plan_type}-{hash}-oauth.json` 后再继续 CPA 上传。
+- `src/autoteam/cpa_batch.py` (`_CpaUploadWorker`): 额度检查和 CPA 上传在内部 worker 线程执行，不占用注册浏览器槽位；只有账号缺 OAuth RT 文件时才调用后备协议认证。direct 单窗口 `parallel_workers=1` 时，当前账号必须完成注册、OAuth RT 文件落盘、CPA 上传和可选 Sub2API 同步，主线程才会创建下一个账号。direct 并行 `parallel_workers>1` 时，注册可并行，CPA worker 对已注册账号逐个检查额度和上传。
 
 成功条件：
 
-- 账号已注册并进入 Team。
+- 账号已注册并进入 Team，且 `https://chatgpt.com/admin/members` 可访问。
 - 本地状态为 `active`。
 - OAuth RT 文件解析出的 `plan_type` 是 `team`。
 - `check_codex_quota` 返回 `ok`。
 - `upload_to_cpa` 返回成功。
 - 本地账号写入 `cpa_status=success` 和 `usage_status=inventory`。
 - 若 Sub2API 已启用，CPA 上传成功后会尝试把该账号单独同步到 Sub2API；Sub2API 失败会写入警告事件，不回滚已完成的 CPA 上传。
+- CPA / Sub2API 同步只使用本地已完成的 OAuth RT 认证文件。`session_auth_file` 只是 ChatGPT Web session 备份，不作为 CPA 上传文件。
 
-注册阶段不重试同一个邮箱，也不通过 Team 成员检查兜底。`https://chatgpt.com/api/auth/error`、未识别邮箱步骤、浏览器异常或缺少 session 凭证都会让当前邮箱失败，后续继续创建新邮箱。CPA 认证、额度检查或上传阶段失败时，会对同一个已知邮箱继续重试，累计失败 3 次后才把该账号记录为 `failed`。若连续 2 个账号都在注册阶段失败，批量任务会暂停，避免继续消耗新邮箱。若已完成账号的成功率接近跌破 95%，批量任务也会写入 `pause_requested` 并暂停。任务可通过 `/api/cpa-batch/runs/{run_id}/resume` 按原 run_id 继续执行。
+注册阶段不重试同一个邮箱，也不通过 Team 成员检查兜底。`https://chatgpt.com/api/auth/error`、未识别邮箱步骤、浏览器异常、`admin/members` 不可访问或缺少 session 凭证都会让当前邮箱失败，后续继续创建新邮箱。注册后如果出现 workspace / organization 选择页，会先处理该页面；若账号没有进入有效组织，后续协议认证会记录 `no_valid_organizations` 并返回“未进入有效组织”的错误。协议认证、额度检查或上传阶段失败时，会对同一个已知邮箱继续重试，累计失败 3 次后才把该账号记录为 `failed`。若连续 2 个账号都在注册阶段失败，批量任务会暂停，避免继续消耗新邮箱。若已完成账号的成功率接近跌破 95%，批量任务也会写入 `pause_requested` 并暂停。任务可通过 `/api/cpa-batch/runs/{run_id}/resume` 按原 run_id 继续执行。
+
+验证建议：
+
+- 先调用 `POST /api/tasks/stop-all`，避免旧任务或巡检抢占任务。
+- 先跑直注 `target=1`、`parallel_workers=1`，确认 `accounts.json` 同时有 `session_auth_file` 和 `rt_auth_file`，`auths/` 同时有 `*-session.json` 与 `*-oauth.json`，且只有 `*-oauth.json` 含 `refresh_token`。
+- 再跑直注 `target=5`、`parallel_workers=1`，确认账号按“注册 -> 浏览器内 PKCE RT -> CPA 上传 -> Sub2API 同步”的顺序逐个完成。
+- 日志中不应再出现 `codex_auth.login_codex_via_browser` 作为批量 CPA 补 RT 的执行来源。
 
 暂停规则：
 

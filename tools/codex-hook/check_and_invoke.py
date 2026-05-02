@@ -13,6 +13,7 @@ if str(SRC_DIR) not in sys.path:
 
 from autoteam.codex_hook import (  # noqa: E402
     CHECKER_LOG,
+    append_managed_run_id,
     build_codex_prompt,
     campaign_reached_target,
     ensure_api_service,
@@ -98,10 +99,16 @@ def main() -> int:
                         "task_id": item.get("task_id"),
                         "command": item.get("command"),
                         "status": item.get("status"),
+                        "run_id": (item.get("params") or {}).get("run_id"),
                     }
                     for item in fetch_tasks_via_api(config)
                     if item.get("status") in {"pending", "running"}
                 ]
+                for item in busy_tasks:
+                    run_id = (item.get("run_id") or "").strip()
+                    if item.get("command") == "cpa-batch" and run_id:
+                        append_managed_run_id(run_id, config)
+                        log_line(CHECKER_LOG, f"tracked busy cpa batch run from api: {run_id}")
             except Exception as task_exc:
                 log_line(CHECKER_LOG, f"fetch tasks after api failure failed: {task_exc}")
             log_line(CHECKER_LOG, f"api action failed: {exc}; busy_tasks={busy_tasks}")

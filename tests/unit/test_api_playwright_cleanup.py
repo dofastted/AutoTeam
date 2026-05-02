@@ -1,8 +1,9 @@
 import threading
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from autoteam import api, chatgpt_api
+from autoteam import api, browser_runtime, chatgpt_api
 
 
 def test_launch_browser_stops_playwright_when_browser_launch_fails(tmp_path, monkeypatch):
@@ -25,6 +26,8 @@ def test_launch_browser_stops_playwright_when_browser_launch_fails(tmp_path, mon
             return self._playwright
 
     fake_playwright = FakePlaywright()
+    monkeypatch.delenv("PLAYWRIGHT_USER_DATA_DIR", raising=False)
+    browser_runtime._PERSISTENT_KEEPALIVE.clear()
     monkeypatch.setattr(chatgpt_api, "SCREENSHOT_DIR", tmp_path)
     monkeypatch.setattr(chatgpt_api, "get_playwright_launch_options", lambda: {"proxy": {"server": "http://proxy"}})
     monkeypatch.setattr(chatgpt_api, "sync_playwright", lambda: FakeSyncPlaywright(fake_playwright))
@@ -90,6 +93,8 @@ def test_get_team_members_stops_chatgpt_when_start_fails(monkeypatch):
     monkeypatch.setattr(api._pw_executor, "run", lambda func, *args, **kwargs: func(*args, **kwargs))
     monkeypatch.setattr("autoteam.admin_state.get_admin_session_token", lambda: "session")
     monkeypatch.setattr("autoteam.admin_state.get_chatgpt_account_id", lambda: "acc-1")
+    monkeypatch.setattr("autoteam.admin_state.get_chatgpt_access_token", lambda: "")
+    monkeypatch.setattr("autoteam.team_cache.load_team_members_cache", lambda: {})
     monkeypatch.setattr("autoteam.chatgpt_api.ChatGPTTeamAPI", FakeChatGPTTeamAPI)
 
     with pytest.raises(api.HTTPException) as exc:
@@ -128,6 +133,56 @@ def test_get_team_members_returns_local_snapshot_without_cached_token(monkeypatc
     assert result["members"][0]["email"] == "one@example.com"
     assert result["members"][0]["status"] == "active"
     assert "access token" in result["refresh_error"]
+
+
+def test_get_team_members_cached_token_reads_all_pages(monkeypatch):
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    calls = []
+
+    def fake_request(_method, url, **_kwargs):
+        calls.append(url)
+        if url.endswith("/invites"):
+            return FakeResponse({"invites": []})
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        offset = int(params.get("offset", ["0"])[0])
+        pages = {
+            0: [{"email": "u1@example.com"}],
+            50: [{"email": "u2@example.com"}],
+            100: [{"email": "u3@example.com"}],
+        }
+        return FakeResponse({"items": pages[offset], "limit": 50, "offset": offset, "total": 3})
+
+    monkeypatch.setattr(api, "_playwright_lock", threading.Lock())
+    monkeypatch.setattr(api._pw_executor, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError()))
+    monkeypatch.setattr("autoteam.admin_state.get_admin_session_token", lambda: "session")
+    monkeypatch.setattr("autoteam.admin_state.get_chatgpt_account_id", lambda: "acc-1")
+    monkeypatch.setattr("autoteam.admin_state.get_chatgpt_access_token", lambda: "access")
+    monkeypatch.setattr("autoteam.admin_state.get_chatgpt_oai_device_id", lambda: "device-1")
+    monkeypatch.setattr("autoteam.team_cache.load_team_members_cache", lambda: {})
+    monkeypatch.setattr("autoteam.team_cache.save_team_members_cache", lambda payload: {**payload, "cached": True})
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: [])
+    monkeypatch.setattr(api.outbound_proxy, "request", fake_request)
+
+    result = api.get_team_members(refresh=True)
+
+    assert result["cached"] is True
+    assert result["total"] == 3
+    assert [member["email"] for member in result["members"]] == [
+        "u1@example.com",
+        "u2@example.com",
+        "u3@example.com",
+    ]
+    assert any("offset=100" in url for url in calls)
 
 
 def test_get_team_members_enriches_cached_members_with_local_sold_status(monkeypatch):

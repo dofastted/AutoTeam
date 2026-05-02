@@ -123,6 +123,11 @@ PLAYWRIGHT_PROXY_SERVER = os.environ.get("PLAYWRIGHT_PROXY_SERVER", "").strip()
 PLAYWRIGHT_PROXY_USERNAME = os.environ.get("PLAYWRIGHT_PROXY_USERNAME", "").strip()
 PLAYWRIGHT_PROXY_PASSWORD = os.environ.get("PLAYWRIGHT_PROXY_PASSWORD", "").strip()
 PLAYWRIGHT_PROXY_BYPASS = os.environ.get("PLAYWRIGHT_PROXY_BYPASS", "").strip() or "localhost,127.0.0.1"
+PLAYWRIGHT_BROWSER_CHANNEL = os.environ.get("PLAYWRIGHT_BROWSER_CHANNEL", "").strip().lower()
+PLAYWRIGHT_BROWSER_EXECUTABLE_PATH = os.environ.get("PLAYWRIGHT_BROWSER_EXECUTABLE_PATH", "").strip()
+PLAYWRIGHT_BROWSER_CDP_URL = os.environ.get("PLAYWRIGHT_BROWSER_CDP_URL", "").strip()
+PLAYWRIGHT_BROWSER_CDP_COMMAND = os.environ.get("PLAYWRIGHT_BROWSER_CDP_COMMAND", "").strip()
+PLAYWRIGHT_USER_DATA_DIR = os.environ.get("PLAYWRIGHT_USER_DATA_DIR", "").strip()  # 固定 Chromium profile，空值时禁用
 
 
 def _format_proxy_host(hostname: str) -> str:
@@ -154,10 +159,20 @@ def _parse_proxy_url(proxy_url: str):
 
 def get_playwright_launch_options():
     """统一的 Playwright Chromium 启动参数。"""
+    args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--window-position=0,0",
+        "--window-size=1280,800",
+    ]
     options = {
         "headless": PLAYWRIGHT_HEADLESS,
-        "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        "args": args,
     }
+    if PLAYWRIGHT_BROWSER_EXECUTABLE_PATH:
+        options["executable_path"] = PLAYWRIGHT_BROWSER_EXECUTABLE_PATH
+    elif PLAYWRIGHT_BROWSER_CHANNEL:
+        options["channel"] = PLAYWRIGHT_BROWSER_CHANNEL
 
     proxy = None
     playwright_proxy_url = _get_default_playwright_proxy_url()

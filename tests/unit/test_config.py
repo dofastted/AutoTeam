@@ -27,8 +27,11 @@ def test_playwright_browser_mode_controls_visibility(monkeypatch):
     monkeypatch.setenv("PLAYWRIGHT_HEADLESS", "true")
     reloaded = importlib.reload(config)
 
+    options = reloaded.get_playwright_launch_options()
     assert reloaded.PLAYWRIGHT_BROWSER_MODE == "visible"
-    assert reloaded.get_playwright_launch_options()["headless"] is False
+    assert options["headless"] is False
+    assert "--window-position=0,0" in options["args"]
+    assert "--window-size=1280,800" in options["args"]
 
     monkeypatch.setenv("PLAYWRIGHT_BROWSER_MODE", "embedded")
     reloaded = importlib.reload(config)
@@ -38,6 +41,49 @@ def test_playwright_browser_mode_controls_visibility(monkeypatch):
 
     monkeypatch.setenv("PLAYWRIGHT_BROWSER_MODE", "")
     monkeypatch.setenv("PLAYWRIGHT_HEADLESS", "true")
+    importlib.reload(config)
+
+
+def test_playwright_browser_channel_is_forwarded(monkeypatch):
+    monkeypatch.setenv("PLAYWRIGHT_BROWSER_CHANNEL", "chrome")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSER_EXECUTABLE_PATH", "")
+    reloaded = importlib.reload(config)
+
+    assert reloaded.get_playwright_launch_options()["channel"] == "chrome"
+
+    monkeypatch.delenv("PLAYWRIGHT_BROWSER_CHANNEL", raising=False)
+    importlib.reload(config)
+
+
+def test_playwright_browser_executable_path_overrides_channel(monkeypatch):
+    monkeypatch.setenv("PLAYWRIGHT_BROWSER_CHANNEL", "chrome")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSER_EXECUTABLE_PATH", "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe")
+    reloaded = importlib.reload(config)
+
+    options = reloaded.get_playwright_launch_options()
+
+    assert options["executable_path"] == "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe"
+    assert "channel" not in options
+
+    monkeypatch.delenv("PLAYWRIGHT_BROWSER_CHANNEL", raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_BROWSER_EXECUTABLE_PATH", raising=False)
+    importlib.reload(config)
+
+
+def test_playwright_user_data_dir_defaults_empty(monkeypatch):
+    monkeypatch.setenv("PLAYWRIGHT_USER_DATA_DIR", "")
+    reloaded = importlib.reload(config)
+
+    assert reloaded.PLAYWRIGHT_USER_DATA_DIR == ""
+
+
+def test_playwright_user_data_dir_is_trimmed(monkeypatch):
+    monkeypatch.setenv("PLAYWRIGHT_USER_DATA_DIR", "  /tmp/autoteam-profile  ")
+    reloaded = importlib.reload(config)
+
+    assert reloaded.PLAYWRIGHT_USER_DATA_DIR == "/tmp/autoteam-profile"
+
+    monkeypatch.delenv("PLAYWRIGHT_USER_DATA_DIR", raising=False)
     importlib.reload(config)
 
 

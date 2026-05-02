@@ -149,6 +149,17 @@ def current_proxy_url() -> str:
     return select_proxy()
 
 
+def rotate_task_proxy() -> str:
+    """Switch the current task/thread to the next configured proxy and return it."""
+    current = getattr(_thread_state, "proxy_url", None)
+    if current is None:
+        current = _active_task_proxy
+    selected = select_proxy(after=current)
+    _thread_state.proxy_url = selected
+    _set_active_task_proxy(selected)
+    return selected
+
+
 def _set_active_task_proxy(proxy_url: str | None):
     global _active_task_proxy
     _active_task_proxy = proxy_url

@@ -1404,3 +1404,125 @@ class ChatGPTTeamAPI:
         self.page = None
         self.playwright = None
         self.browser_lease = None
+
+
+def _normalize_workspace_text(text):
+    return " ".join((text or "").split()).strip().lower()
+
+
+def _click_first_visible(page, selectors, timeout=1500):
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.is_visible(timeout=timeout):
+                locator.click()
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def complete_workspace_selection(page, workspace_name=None, *, logger=None, log_prefix="[ChatGPT]"):
+    """尽量完成 ChatGPT 的 workspace / organization 选择步骤。"""
+    if not page:
+        return True
+
+    client = ChatGPTTeamAPI()
+    client.page = page
+    if workspace_name is not None:
+        client.workspace_name = workspace_name
+
+    workspace_name = (workspace_name or getattr(client, "workspace_name", "") or "").strip()
+    if not client._is_workspace_selection_page():
+        return True
+
+    log = logger or globals().get("logger")
+    if log:
+        try:
+            body_excerpt = client._body_excerpt(limit=200)
+        except Exception:
+            body_excerpt = ""
+        log.info(
+            "%s 检测到 workspace / organization 页面 | URL=%s | body=%s",
+            log_prefix,
+            getattr(page, "url", ""),
+            body_excerpt,
+        )
+
+    options = client.list_workspace_options()
+    chosen_option = None
+    normalized_target = _normalize_workspace_text(workspace_name)
+    if normalized_target:
+        for option in options:
+            label = _normalize_workspace_text(option.get("label", ""))
+            if label == normalized_target or normalized_target in label or label in normalized_target:
+                chosen_option = option
+                break
+
+    if not chosen_option:
+        preferred = [item for item in options if item.get("kind") == "preferred"]
+        fallback = [
+            item
+            for item in options
+            if item.get("kind") == "fallback" and "personal" not in _normalize_workspace_text(item.get("label", ""))
+        ]
+        chosen_option = (preferred or fallback or [None])[0]
+
+    if chosen_option:
+        try:
+            result = client.select_workspace_option(chosen_option["id"])
+            if result.get("step") == "completed" or not client._is_workspace_selection_page():
+                return True
+        except Exception as exc:
+            if log:
+                log.warning("%s 选择 workspace 失败: %s", log_prefix, exc)
+
+    clicked = _click_first_visible(
+        page,
+        [
+            'button:has-text("Create organization")',
+            'a:has-text("Create organization")',
+            'button:has-text("New organization")',
+            'a:has-text("New organization")',
+            'button:has-text("创建组织")',
+            'a:has-text("创建组织")',
+            'button:has-text("新组织")',
+            'a:has-text("新组织")',
+            'button:has-text("Create workspace")',
+            'a:has-text("Create workspace")',
+            'button:has-text("Join workspace")',
+            'a:has-text("Join workspace")',
+            'button:has-text("Accept invite")',
+            'a:has-text("Accept invite")',
+            'button:has-text("Accept")',
+            'button:has-text("Agree")',
+            'button:has-text("Continue")',
+            'button:has-text("继续")',
+            'button:has-text("Open")',
+            'button:has-text("Launch")',
+            'button[type="submit"]',
+        ],
+        timeout=2000,
+    )
+    if clicked:
+        try:
+            client._wait_for_workspace_selection_exit(timeout=15)
+        except Exception:
+            pass
+        try:
+            client._wait_for_post_workspace_ready(timeout=12)
+        except Exception:
+            pass
+        if not client._is_workspace_selection_page():
+            return True
+
+    try:
+        if client._auto_open_preferred_workspace():
+            client._wait_for_workspace_selection_exit(timeout=10)
+            client._wait_for_post_workspace_ready(timeout=12)
+            return not client._is_workspace_selection_page()
+    except Exception as exc:
+        if log:
+            log.warning("%s 自动进入 workspace 失败: %s", log_prefix, exc)
+
+    return not client._is_workspace_selection_page()
