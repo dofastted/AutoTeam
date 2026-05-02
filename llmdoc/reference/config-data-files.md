@@ -12,6 +12,8 @@
 
 - `API_KEY`: Web 面板和 API 鉴权。启动阶段唯一强制项。
 - `MAIL_PROVIDER`: `mo_email`、`cloudmail`、`cloudflare_temp_email`。
+- `MO_EMAIL_BASE_URL`、`MO_EMAIL_DOMAIN`、`MO_EMAIL_NAME_PREFIX`、`MO_EMAIL_START_INDEX`、`MO_EMAIL_API_KEY`: MoEmail 服务接入。
+- `MO_EMAIL_EXPIRY_TIME`: 新建邮箱有效期，毫秒。`0` 表示永久邮箱。批量注册推荐 `0`：临时邮箱（如 1 小时、3 小时）会在 OTP 重试或后续 OAuth 补齐前自毁，导致收不到验证码。
 - `CPA_URL`、`CPA_KEY`、`SYNC_TARGET_CPA`: CPA 同步。
 - `SUB2API_URL`、`SUB2API_EMAIL`、`SUB2API_PASSWORD`、`SUB2API_GROUP`、`SYNC_TARGET_SUB2API`: Sub2API 同步。
 - `PLAYWRIGHT_BROWSER_MODE`: 浏览器显示方式，`hidden` 不弹窗，`visible` 显示窗口，`embedded` 当前按不弹窗运行。
@@ -110,3 +112,22 @@
 OAuth RT 文件必须包含 `refresh_token`。`credential_source=chatgpt_session` 的文件即使有 `access_token`，也不能作为 CPA / Sub2API 普通同步来源。
 
 这些文件包含敏感 token，默认不提交。
+
+## 运维脚本
+
+`scripts/` 下的运维脚本面向「服务已经在跑、需要对账号池做一次性补救」的场景，不是常规启动入口。
+
+`scripts/recreate_permanent_mailboxes.py`：把已过期的临时 MoEmail 邮箱重建为永久邮箱（`expiryTime=0`）。
+
+- 输入：默认 `.tmp/session_only_emails.json`（JSON array of emails），可通过 `argv[1]` 覆盖。
+- 流程：调用 `autoteam.mo_email.MoEmailClient` 的 `_request("POST", "/api/emails/generate", json={name, expiryTime: 0, domain})`，把返回的 `account_id` 通过 `autoteam.accounts.update_account(email, mail_account_id=...)` 写回 `accounts.json`。
+- 输出：`.tmp/recreate_permanent_mailboxes.json`，含 `total / recreated / failed / accounts_json_updated / results`。
+- 适用：账号 `password` 仍可用、但 MoEmail 邮箱列表为空 / OTP 收不到时。先重建邮箱拿新 `mail_account_id`，再做 OAuth 或 CPA 补齐。
+
+`scripts/backfill_session_only_oauth.sh`：为只有 `session_auth_file`、缺 OAuth RT 的账号串行补齐 OAuth → CPA。
+
+- 输入：`.tmp/session_only_emails.json` + `.env` 中的 `API_KEY`。
+- 默认 `API_BASE=http://127.0.0.1:8788`（与 `manager.py api` 子命令默认 8787 不同；可通过 `API_BASE` 环境变量覆盖）。
+- 流程：对每个 email 串行 `POST /api/accounts/{email}/cpa-auth` 拿 `task_id`，再每 `POLL_INTERVAL`（默认 5s）轮询 `/api/tasks/{task_id}`，直到 `status` 为 `success / failed / error` 或超过 `POLL_TIMEOUT`（默认 300s）。账号之间额外 `sleep 2`。
+- 输出：`.tmp/session-only-oauth/run-<ts>.log`、`<email>.json`、`summary.json`。
+- 必要约束：服务端 `_playwright_lock` 是全局非阻塞锁，所以脚本严格顺序执行，不能并发。

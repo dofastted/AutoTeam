@@ -109,6 +109,14 @@
 - `pending` 账号不应补传。
 - 没有 OAuth RT 文件或本地文件不存在的账号只记录跳过原因，不进入上传。
 
+## 一次性补救脚本
+
+仅用于「服务已经在跑、需要对账号池做一次性补救」的场景。详细参数见 `llmdoc/reference/config-data-files.md` 的「运维脚本」一节。
+
+`scripts/recreate_permanent_mailboxes.py`：把已过期的临时 MoEmail 邮箱重建为 `expiryTime=0` 永久邮箱，并把新 `mail_account_id` 写回 `accounts.json`。账号 `password` 仍可用、但 MoEmail 邮箱已自毁、OTP 永远收不到时使用。
+
+`scripts/backfill_session_only_oauth.sh`：为只有 `session_auth_file`、缺 OAuth RT 的账号顺序调用 `POST /api/accounts/{email}/cpa-auth` 并轮询任务结果。服务端 `_playwright_lock` 全局串行，脚本一次只跑一个账号。
+
 补传完成后：
 
 - CPA 上传成功可写 `cpa_uploaded_at`。
