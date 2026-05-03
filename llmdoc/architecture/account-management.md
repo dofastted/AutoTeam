@@ -208,46 +208,41 @@ V2 凭证结构：
 
 | 页面键 | 组件 | 作用 |
 |--------|------|------|
-| `accounts` | `web/src/components/AccountManagement.vue` | 五类账号切页和详情抽屉入口 |
+| `accounts` | `web/src/components/AccountManagement.vue` | 本地账号操作表、详情抽屉和 auth 文件盘点 |
 | `account-clean` | `web/src/components/AccountCleanPage.vue` | 扫描、预览、应用三步清理 |
 
 ### 账号管理中心
 
-`web/src/components/AccountManagement.vue:76` 定义了五个 tab：
+`web/src/components/AccountManagement.vue` 当前把账号生命周期管理和 auth 文件盘点分开：
 
-- `registered`
-- `inventory`
-- `in_use`
-- `invalid`
-- `sold`
+- `AccountTable.vue`：从 `/api/accounts` 读取 `accounts.json` 生命周期模型，提供本地账号操作入口。操作列调用 `loginAccount`、`getCodexAuth`、`kickAccount`、`sellAccount`、`deleteAccount`。
+- `AccountDrawer.vue`：详情抽屉与状态操作，只接收 `/api/accounts` 可解析的邮箱。
+- `AuthsTable.vue`：从 `/api/auths/accounts` 读取 `auths/` 文件聚合结果，提供 category、OAuth、Session、排序、邮箱搜索和分页，只作为文件盘点。
 
-默认 tab 是 `inventory`，见 `web/src/components/AccountManagement.vue:84`。
+`AuthsTable.vue` 不再触发行点击详情，避免 auth-only 邮箱调用 `/api/accounts/{email}` 后返回 404。
 
-页面由两个子组件组成：
+### Auth 文件列表
 
-- `AccountTable.vue`：列表、搜索、分页、排序、批量复制，见 `web/src/components/AccountManagement.vue:49`
-- `AccountDrawer.vue`：详情抽屉与状态操作，见 `web/src/components/AccountManagement.vue:56`
+`web/src/components/AuthsTable.vue` 当前负责：
 
-### 账号列表
+- category 下拉：`active`、`sold`、`tradable`、`unusable`、`archive`、`all`
+- OAuth 三态筛选
+- Session 三态筛选
+- 邮箱搜索
+- 排序：`email_asc`、`email_desc`、`expired_asc`、`expired_desc`、`category_asc`
+- 页大小：20、50、100、200
+- facets badge：显示按邮箱主分类聚合后的五个 bucket 计数
 
-`web/src/components/AccountTable.vue` 当前负责：
-
-- 搜索输入，见 `web/src/components/AccountTable.vue:23`
-- 排序选择，见 `web/src/components/AccountTable.vue:29`
-- 页大小选择，见 `web/src/components/AccountTable.vue:36`
-- 选中多行并复制邮箱，见 `web/src/components/AccountTable.vue:41`
-- 行级操作：复制邮箱、复制密码、查看详情，见 `web/src/components/AccountTable.vue:163`
-
-列表数据调用 `api.listAccounts`，也就是 `GET /api/accounts`，见 `web/src/components/AccountTable.vue:325`。
+列表数据调用 `api.getAuthsAccounts`，也就是 `GET /api/auths/accounts`。默认 category 为空字符串，隐藏 `archive`。
 
 当前列表列包括：
 
 - 邮箱
-- 状态徽标
-- 备注
-- 远端同步
-- Allocation
-- 操作
+- category
+- OAuth
+- Session
+- expired
+- 文件信息
 
 ### 详情抽屉
 

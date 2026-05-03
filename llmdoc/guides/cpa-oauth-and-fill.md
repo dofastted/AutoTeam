@@ -51,10 +51,10 @@
 - `src/autoteam/codex_auth.py` (`build_chatgpt_session_auth_bundle`): 读取 `/api/auth/session` 的 `accessToken`、session cookie、账号 ID 和 `plan_type`。
 - `src/autoteam/protocol_oauth.py` (`run_protocol_oauth_login_with_browser_context`): 复用注册成功后的浏览器 page/context 打开 PKCE Codex OAuth 链接，拦截 `http://localhost:1455/auth/callback` 获取 code，并用 `/oauth/token` 交换出 OAuth RT bundle。
 - `src/autoteam/protocol_oauth.py` (`run_protocol_oauth_login`): 后备路径。使用账号邮箱、密码、邮箱 OTP、HTTP session、PKCE、Codex authorize 和 `/oauth/token` 获取 `refresh_token`，可复用 `session_auth_file` 中的 `session_token`、`account_id` 和 cookie 信息。
-- `src/autoteam/cpa_batch.py` (`_create_direct_account`): 将 session bundle 保存为 `auths/codex-{email}-{plan_type}-{hash}-session.json`，写入 `session_auth_file`；同时保存浏览器内 PKCE 生成的 `auths/codex-{email}-{plan_type}-{hash}-oauth.json`，写入 `rt_auth_file`。浏览器异常、认证错误页、`admin/members` 不可访问、session 提取失败或 OAuth RT 生成失败时，当前邮箱直接失败并换下一个邮箱。
+- `src/autoteam/cpa_batch.py` (`_create_direct_account`): 将 session bundle 保存为 `auths/codex-{email}-team-{hash}-session.json`，写入 `session_auth_file`；同时保存浏览器内 PKCE 生成的 `auths/codex-{email}-team-{hash}-oauth.json`，写入 `rt_auth_file`。浏览器异常、认证错误页、`admin/members` 不可访问、session 提取失败或 OAuth RT 生成失败时，当前邮箱直接失败并换下一个邮箱。
 - `src/autoteam/cpa_batch.py` (`_create_direct_accounts_parallel`): 直注批量并行 worker。按窗口数拆分目标，每个 worker 单独创建邮箱、注册、保存 session 凭证。
 - `src/autoteam/account_oauth.py` (`run_account_oauth_login`): 项目账号 OAuth RT 的共享实现。`/api/accounts/login` 和批量 CPA JSON 都调用它生成 OAuth RT 文件，成功后继续调用 `codex_auth.save_auth_file(..., source="oauth")`。
-- `src/autoteam/cpa_batch.py` (`_verify_and_upload_cpa`): 通过 `select_oauth_rt_auth_file` 选择本地 OAuth RT 文件；旧 `auth_file` 只有内容确认是 OAuth RT 时才可作为兼容候选。缺少 OAuth RT 文件时调用协议认证生成 `auths/codex-{email}-{plan_type}-{hash}-oauth.json` 后再继续 CPA 上传。
+- `src/autoteam/cpa_batch.py` (`_verify_and_upload_cpa`): 通过 `select_oauth_rt_auth_file` 选择本地 OAuth RT 文件；旧 `auth_file` 只有内容确认是 OAuth RT 时才可作为兼容候选。缺少 OAuth RT 文件时调用协议认证生成 `auths/codex-{email}-team-{hash}-oauth.json` 后再继续 CPA 上传。
 - `src/autoteam/cpa_batch.py` (`_CpaUploadWorker`): 额度检查和 CPA 上传在内部 worker 线程执行，不占用注册浏览器槽位；只有账号缺 OAuth RT 文件时才调用后备协议认证。direct 单窗口 `parallel_workers=1` 时，当前账号必须完成注册、OAuth RT 文件落盘、CPA 上传和可选 Sub2API 同步，主线程才会创建下一个账号。direct 并行 `parallel_workers>1` 时，注册可并行，CPA worker 对已注册账号逐个检查额度和上传。
 
 成功条件：

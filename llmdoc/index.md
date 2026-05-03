@@ -38,6 +38,7 @@
 - `llmdoc/reference/module-map.md`: 主要 Python / Vue 模块职责。
 - `llmdoc/reference/account-status-axes.md`: 四轴状态枚举、旧 `status` 迁移、`category` 派生。
 - `llmdoc/reference/account-data-schema.md`: V2 嵌套结构、兼容平铺字段、凭证与导出口径。
+- `llmdoc/reference/auths-api.md`: `/api/auths/stats` 与 `/api/auths/accounts` 请求、响应和文件扫描口径。
 
 ## 记忆
 

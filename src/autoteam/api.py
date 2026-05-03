@@ -7,6 +7,7 @@ import os
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -2007,6 +2008,364 @@ def post_manual_account_cancel():
     return {"message": "手动添加账号流程已取消", "manual_account": _manual_account_status()}
 
 
+# ---------------------------------------------------------------------------
+# auths/ 目录扫描:把 codex-{email}-team-{hash}-(oauth|session).json 文件名解析
+# 成账号视图。账号管理页改成扁平大表后直接消费这两个端点;accounts.json
+# 流程不受影响。
+# ---------------------------------------------------------------------------
+
+_AUTHS_FILE_PATTERN = "codex-*.json"
+_AUTHS_KNOWN_SUBDIRS = ("sold", "tradable", "unusable", "archive")
+
+
+def _parse_auth_filename(name: str) -> dict | None:
+    """从 codex-{email}-team-{hash}-{kind}.json 文件名解析出 email / team_hash / kind。
+
+    主目录文件命名带 -oauth / -session 后缀;归档子目录文件大多不带后缀,kind 留空。
+    主号文件命名为 codex-main-{account_id}.json,这里跳过(主号不归账号管理页)。
+    """
+    if not name.startswith("codex-") or not name.endswith(".json"):
+        return None
+    if name.startswith("codex-main-"):
+        return None
+    stem = name[len("codex-"): -len(".json")]
+    # 兼容旧的 codex-user@example.com-team-unknown-auth.json 之类边缘文件
+    parts = stem.rsplit("-", 1)
+    kind = ""
+    head = stem
+    if len(parts) == 2 and parts[1] in ("oauth", "session"):
+        head = parts[0]
+        kind = parts[1]
+    # head 形如 {email}-team-{hash}
+    team_marker = "-team-"
+    idx = head.rfind(team_marker)
+    if idx <= 0:
+        return None
+    email = head[:idx]
+    team_hash = head[idx + len(team_marker):]
+    if "@" not in email:
+        return None
+    return {"email": email, "team_hash": team_hash, "kind": kind, "filename": name}
+
+
+def _scan_auths_files() -> dict:
+    """扫描 auths/ 目录,返回按账号聚合的字典 + 顶层计数。
+
+    stats 字段口径:
+    - `*_files`: 按文件计数(同一邮箱跨目录会被多次累加)。
+    - `*_accounts`: 按邮箱主分类计数(每个邮箱仅落到一个 primary,口径见
+      `_bucket_to_record`)。
+    - `unique_emails`: 唯一邮箱数,等于 sum(accounts_*)。
+
+    返回形如::
+
+        {
+            "by_email": {
+                "aqw-100@gymbro.cloud": {
+                    "email": ...,
+                    "team_hash": "dbf8c1ed",
+                    "categories": {"active"},   # active / sold / tradable / unusable / archive
+                    "has_oauth": True,
+                    "has_session": True,
+                    "files": [{"category": "active", "kind": "session", "path": "..."}],
+                },
+                ...
+            },
+            "stats": {
+                "total_files": 1480,
+                "oauth_files": 612,
+                "session_files": 700,
+                "active_files": 692,
+                "sold_files": 50,
+                "tradable_files": 41,
+                "unusable_files": 60,
+                "archive_files": 637,
+                "accounts_active": 400,
+                "accounts_sold": 50,
+                "accounts_tradable": 41,
+                "accounts_unusable": 60,
+                "accounts_archive": 0,
+                "unique_emails": 491,
+            },
+        }
+    """
+    from autoteam.auth_storage import AUTH_DIR
+
+    by_email: dict[str, dict] = {}
+    stats = {
+        "total_files": 0,
+        "oauth_files": 0,
+        "session_files": 0,
+        "active_files": 0,
+        "sold_files": 0,
+        "tradable_files": 0,
+        "unusable_files": 0,
+        "archive_files": 0,
+        "accounts_active": 0,
+        "accounts_sold": 0,
+        "accounts_tradable": 0,
+        "accounts_unusable": 0,
+        "accounts_archive": 0,
+    }
+
+    if not AUTH_DIR.exists():
+        stats["unique_emails"] = 0
+        return {"by_email": {}, "stats": stats}
+
+    def _record(category: str, path: Path):
+        nonlocal by_email
+        info = _parse_auth_filename(path.name)
+        if info is None:
+            return
+        email = info["email"]
+        bucket = by_email.setdefault(
+            email,
+            {
+                "email": email,
+                "team_hash": info.get("team_hash") or "",
+                "categories": set(),
+                "has_oauth": False,
+                "has_session": False,
+                "files": [],
+                "expired": None,
+                "credential_source": None,
+                "disabled": None,
+                "last_refresh": None,
+            },
+        )
+        bucket["categories"].add(category)
+        if not bucket["team_hash"] and info.get("team_hash"):
+            bucket["team_hash"] = info["team_hash"]
+        kind = info["kind"]
+        if kind == "oauth":
+            bucket["has_oauth"] = True
+            stats["oauth_files"] += 1
+        elif kind == "session":
+            bucket["has_session"] = True
+            stats["session_files"] += 1
+        bucket["files"].append({
+            "category": category,
+            "kind": kind,
+            "path": str(path),
+            "filename": path.name,
+        })
+        stats["total_files"] += 1
+        stats[f"{category}_files"] = stats.get(f"{category}_files", 0) + 1
+
+    # 主目录文件 = active 分类
+    for path in sorted(AUTH_DIR.glob(_AUTHS_FILE_PATTERN)):
+        if not path.is_file():
+            continue
+        _record("active", path)
+
+    # 已知归档子目录(支持嵌套 unusable/account_deactivated)
+    for sub in _AUTHS_KNOWN_SUBDIRS:
+        sub_dir = AUTH_DIR / sub
+        if not sub_dir.exists():
+            continue
+        for path in sorted(sub_dir.rglob(_AUTHS_FILE_PATTERN)):
+            if not path.is_file():
+                continue
+            _record(sub, path)
+
+    # 二次解析:从首个文件读到期/凭证来源/禁用等字段
+    for bucket in by_email.values():
+        for file_entry in bucket["files"]:
+            try:
+                payload = json.loads(read_text(Path(file_entry["path"])))
+            except Exception:
+                continue
+            if bucket["expired"] is None and payload.get("expired"):
+                bucket["expired"] = payload.get("expired")
+            if bucket["credential_source"] is None and payload.get("credential_source"):
+                bucket["credential_source"] = payload.get("credential_source")
+            if bucket["disabled"] is None and "disabled" in payload:
+                bucket["disabled"] = bool(payload.get("disabled"))
+            if bucket["last_refresh"] is None and payload.get("last_refresh"):
+                bucket["last_refresh"] = payload.get("last_refresh")
+
+    stats["unique_emails"] = len(by_email)
+
+    # 按 bucket 主分类聚合 accounts_* (优先级 sold>tradable>unusable>archive>active)
+    for bucket in by_email.values():
+        primary = _bucket_primary_category(bucket.get("categories") or set())
+        key = f"accounts_{primary}"
+        if key in stats:
+            stats[key] += 1
+
+    return {"by_email": by_email, "stats": stats}
+
+
+def _bucket_primary_category(categories: list | set | None) -> str:
+    """挑选 bucket 的主分类。
+
+    优先级 sold > tradable > unusable > archive > active。
+    分类目录(sold/tradable/unusable/archive)语义比根目录更强:同时存在根目录和
+    分类目录文件时,以分类目录为准。
+    """
+    if not categories:
+        return "unknown"
+    cats = set(categories)
+    for c in ("sold", "tradable", "unusable", "archive", "active"):
+        if c in cats:
+            return c
+    # 兜底:取字典序首个,保持向后兼容
+    return sorted(cats)[0]
+
+
+def _bucket_to_record(bucket: dict) -> dict:
+    """把 _scan_auths_files 的 bucket 转换成 API 输出 record。"""
+    categories = sorted(bucket.get("categories") or [])
+    primary = _bucket_primary_category(categories)
+    return {
+        "email": bucket["email"],
+        "team_hash": bucket.get("team_hash") or "",
+        "category": primary,
+        "categories": categories,
+        "has_oauth": bool(bucket.get("has_oauth")),
+        "has_session": bool(bucket.get("has_session")),
+        "expired": bucket.get("expired"),
+        "credential_source": bucket.get("credential_source"),
+        "disabled": bucket.get("disabled"),
+        "last_refresh": bucket.get("last_refresh"),
+        "file_count": len(bucket.get("files") or []),
+    }
+
+
+def _auth_expired_timestamp(value) -> float | None:
+    """把 auth JSON 里的 expired 字段归一成 Unix 秒,不可解析时返回 None。"""
+    if value is None or value == "":
+        return None
+
+    numeric = None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        numeric = float(value)
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            numeric = float(raw)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+
+    if numeric is None:
+        return None
+    if numeric >= 1e12:
+        return numeric / 1000
+    return numeric
+
+
+def _auth_expired_sort_key(record: dict, *, descending: bool = False) -> tuple:
+    """为 expired 排序生成稳定同类型 key,缺失或坏值始终排最后。"""
+    raw_value = record.get("expired")
+    timestamp_value = _auth_expired_timestamp(raw_value)
+    if timestamp_value is None:
+        return (1, 0, str(raw_value or ""))
+    return (0, -timestamp_value if descending else timestamp_value, str(raw_value or ""))
+
+
+@app.get("/api/auths/stats")
+def get_auths_stats():
+    """返回 auths/ 目录的聚合统计,供仪表盘卡片使用。"""
+    scan = _scan_auths_files()
+    return scan["stats"]
+
+
+@app.get("/api/auths/accounts")
+def get_auths_accounts(
+    category: str | None = None,
+    q: str | None = None,
+    has_oauth: bool | None = None,
+    has_session: bool | None = None,
+    page: int = 1,
+    page_size: int = 20,
+    sort: str = "email_asc",
+):
+    """扁平账号管理大表数据源:扫 auths/ 目录,按文件名聚合账号。
+
+    `category` 取值:active / sold / tradable / unusable / archive / all。默认排除 archive。
+    """
+    if page < 1:
+        raise HTTPException(status_code=400, detail="page 必须从 1 开始")
+    if page_size < 1 or page_size > 200:
+        raise HTTPException(status_code=400, detail="page_size 必须在 1 到 200 之间")
+
+    valid_categories = {"active", "sold", "tradable", "unusable", "archive", "all"}
+    normalized_category = (category or "").strip().lower()
+    if normalized_category and normalized_category not in valid_categories:
+        raise HTTPException(status_code=400, detail="category 非法")
+
+    sorters = {
+        "email_asc": (lambda r: (r.get("email") or "").lower(), False),
+        "email_desc": (lambda r: (r.get("email") or "").lower(), True),
+        "expired_asc": (lambda r: _auth_expired_sort_key(r), False),
+        "expired_desc": (lambda r: _auth_expired_sort_key(r, descending=True), False),
+        "category_asc": (lambda r: r.get("category") or "", False),
+    }
+    if sort not in sorters:
+        raise HTTPException(status_code=400, detail="sort 非法")
+
+    scan = _scan_auths_files()
+    records = [_bucket_to_record(b) for b in scan["by_email"].values()]
+
+    # 默认隐藏 archive,除非显式选 archive 或 all
+    if not normalized_category or normalized_category == "":
+        records = [r for r in records if r["category"] != "archive"]
+    elif normalized_category == "all":
+        pass
+    else:
+        records = [r for r in records if r["category"] == normalized_category]
+
+    if has_oauth is not None:
+        records = [r for r in records if bool(r["has_oauth"]) == bool(has_oauth)]
+    if has_session is not None:
+        records = [r for r in records if bool(r["has_session"]) == bool(has_session)]
+
+    normalized_query = (q or "").strip().lower()
+    if normalized_query:
+        records = [r for r in records if normalized_query in (r.get("email") or "").lower()]
+
+    key_func, reverse = sorters[sort]
+    records.sort(key=key_func, reverse=reverse)
+
+    total = len(records)
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_items = records[start:end]
+
+    # facets 给前端筛选条做计数提示(已经按其他筛选过滤,但 category 自身不过滤)
+    all_records = [_bucket_to_record(b) for b in scan["by_email"].values()]
+    facets = {
+        "category": {
+            "active": sum(1 for r in all_records if r["category"] == "active"),
+            "sold": sum(1 for r in all_records if r["category"] == "sold"),
+            "tradable": sum(1 for r in all_records if r["category"] == "tradable"),
+            "unusable": sum(1 for r in all_records if r["category"] == "unusable"),
+            "archive": sum(1 for r in all_records if r["category"] == "archive"),
+        }
+    }
+
+    return {
+        "items": page_items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "has_next": end < total,
+        "category": normalized_category or None,
+        "q": normalized_query or None,
+        "sort": sort,
+        "facets": facets,
+        "stats": scan["stats"],
+    }
+
+
 @app.get("/api/accounts")
 def get_accounts(
     category: str | None = None,
@@ -3081,6 +3440,7 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
                     "email": email,
                     "role": "member",
                     "user_id": "",
+                    "joined_at": account.get("registered_at") or account.get("created_at"),
                     "is_local": True,
                     "type": "member",
                     **_local_account_summary(account),
@@ -3098,6 +3458,14 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
             payload["refresh_error"] = refresh_error
         return payload
 
+    def _pick_joined_at(raw: dict) -> str | int | None:
+        # ChatGPT API 不同时期返回过 created_at / joined_at / member_since 等字段
+        for key in ("joined_at", "created_at", "member_since", "join_date", "added_at"):
+            value = raw.get(key)
+            if value:
+                return value
+        return None
+
     def _format_team_payload(members, invites):
         local_accounts = _local_accounts_by_email()
         result = []
@@ -3109,6 +3477,7 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
                     "email": m.get("email", ""),
                     "role": m.get("role", ""),
                     "user_id": m.get("user_id") or m.get("id", ""),
+                    "joined_at": _pick_joined_at(m),
                     "is_local": local_account is not None,
                     "type": "member",
                     **_local_account_summary(local_account),
@@ -3122,6 +3491,7 @@ def get_team_members(refresh: bool = False, allow_browser: bool = False):
                     "email": email,
                     "role": inv.get("role", ""),
                     "user_id": inv.get("id", ""),
+                    "joined_at": _pick_joined_at(inv),
                     "is_local": local_account is not None,
                     "type": "invite",
                     **_local_account_summary(local_account),

@@ -122,6 +122,20 @@ export const api = {
   getCpaFiles: () => request('GET', '/cpa/files'),
   startAccountCpaAuth: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/cpa-auth`),
 
+  getAuthsStats: () => request('GET', '/auths/stats'),
+  getAuthsAccounts: ({ category, q, has_oauth, has_session, page, page_size, sort } = {}) => {
+    const params = new URLSearchParams()
+    if (category) params.set('category', category)
+    if (q) params.set('q', q)
+    if (has_oauth != null) params.set('has_oauth', has_oauth ? 'true' : 'false')
+    if (has_session != null) params.set('has_session', has_session ? 'true' : 'false')
+    if (page != null) params.set('page', String(page))
+    if (page_size != null) params.set('page_size', String(page_size))
+    if (sort) params.set('sort', sort)
+    const qs = params.toString()
+    return request('GET', `/auths/accounts${qs ? '?' + qs : ''}`)
+  },
+
   startAdminLogin: (email) => request('POST', '/admin/login/start', { email }),
   submitAdminSession: (email, sessionToken) => request('POST', '/admin/login/session', { email, session_token: sessionToken }),
   submitAdminPassword: (password) => request('POST', '/admin/login/password', { password }),

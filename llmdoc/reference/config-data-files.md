@@ -90,13 +90,15 @@
 
 ## 认证文件
 
-账号池 OAuth RT 文件名：`auths/codex-{email}-{plan_type}-{hash}-oauth.json`。这是 CPA / Sub2API 普通同步的上传来源。
+账号池 OAuth RT 文件名：`auths/codex-{email}-team-{hash}-oauth.json`。这是 CPA / Sub2API 普通同步的上传来源。
 
-账号池 ChatGPT session 备份文件名：`auths/codex-{email}-{plan_type}-{hash}-session.json`。它只保留注册完成后的 ChatGPT Web session，不是 CPA / Sub2API 上传凭证。
+账号池 ChatGPT session 备份文件名：`auths/codex-{email}-team-{hash}-session.json`。它只保留注册完成后的 ChatGPT Web session，不是 CPA / Sub2API 上传凭证。
 
 主号文件名：`auths/codex-main-*.json`。
 
-账号归档文件：`auths/archive/{email}/codex-{email}-{plan_type}-{hash}-*.json`。归档文件同样包含敏感 token，不提交。
+已售、可售、不可用和归档 auth 文件分别存放在 `auths/sold/`、`auths/tradable/`、`auths/unusable/`、`auths/archive/`。这些分类目录内的文件以 `.json` 结尾，不带 `-oauth` / `-session` 后缀。
+
+同一邮箱同时存在根目录文件和分类目录文件时，auth 文件 API 的账号主分类按 `sold` > `tradable` > `unusable` > `archive` > `active` 判断；根目录 active 文件不覆盖分类目录。
 
 常见字段：
 
@@ -109,6 +111,7 @@
 - `expired`
 - `last_refresh`
 - `credential_source`
+- `disabled`
 
 OAuth RT 文件必须包含 `refresh_token`。`credential_source=chatgpt_session` 的文件即使有 `access_token`，也不能作为 CPA / Sub2API 普通同步来源。
 

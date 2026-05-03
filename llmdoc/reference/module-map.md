@@ -35,11 +35,14 @@
 
 - `web/src/App.vue`: 顶层页面状态和导航。
 - `web/src/api.js`: API client。
-- `web/src/components/Dashboard.vue`: 账号列表和账号操作。
+- `web/src/components/Dashboard.vue`: 账号、Team 和 auth 文件卡片统计。
+- `web/src/components/AccountTable.vue`: `/api/accounts` 本地账号表和操作列。
+- `web/src/components/AuthsTable.vue`: `/api/auths/accounts` 扁平 auth 文件盘点表。
+- `web/src/components/AccountManagement.vue`: 本地账号表、详情抽屉和 auth 文件盘点页。
 - `web/src/components/OAuthPage.vue`: 手动 OAuth 与 CPA 凭证检查。
 - `web/src/components/TaskPanel.vue`: 账号池和同步按钮。
 - `web/src/components/ConfigPage.vue`: 运行配置。
-- `web/src/components/TeamMembers.vue`: Team 成员。
+- `web/src/components/TeamMembers.vue`: Team member 表和 pending invite 取消入口。
 - `web/src/components/TaskHistory.vue`: 任务历史。
 - `web/src/components/LogViewer.vue`: 日志查看。
 
@@ -51,3 +54,4 @@
 - `tests/unit/test_sync_targets.py`: 同步目标开关。
 - `tests/unit/test_sub2api_sync.py`: Sub2API。
 - `tests/unit/test_api_main_codex_after_admin.py`: 主号 Codex。
+- `tests/unit/test_api_auths_endpoints.py`: auth 文件扫描、主分类优先级、`/api/auths/accounts` 和 `/api/auths/stats`。
