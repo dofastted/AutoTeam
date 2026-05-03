@@ -1928,12 +1928,97 @@ def post_manual_account_cancel():
 
 
 @app.get("/api/accounts")
-def get_accounts():
+def get_accounts(
+    category: str | None = None,
+    q: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+    sort: str = "updated_at_desc",
+):
     """获取所有账号列表"""
+    from autoteam.account_classifier import (
+        CATEGORY_IN_USE,
+        CATEGORY_INVENTORY,
+        CATEGORY_INVALID,
+        CATEGORY_NOT_REGISTERED,
+        CATEGORY_REGISTERED,
+        CATEGORY_SOLD,
+        derive_category,
+    )
     from autoteam.accounts import load_accounts
 
+    if page < 1:
+        raise HTTPException(status_code=400, detail="page 必须从 1 开始")
+    if page_size < 1 or page_size > 200:
+        raise HTTPException(status_code=400, detail="page_size 必须在 1 到 200 之间")
+
+    valid_categories = {
+        CATEGORY_REGISTERED,
+        CATEGORY_INVENTORY,
+        CATEGORY_IN_USE,
+        CATEGORY_INVALID,
+        CATEGORY_SOLD,
+        CATEGORY_NOT_REGISTERED,
+        "all",
+    }
+    normalized_category = (category or "").strip().lower()
+    if normalized_category and normalized_category not in valid_categories:
+        raise HTTPException(status_code=400, detail="category 非法")
+    if normalized_category == "all":
+        normalized_category = ""
+
+    normalized_query = (q or "").strip().lower()
+
+    def updated_sort_key(acc: dict) -> float | int:
+        return acc.get("updated_at") or acc.get("created_at") or 0
+
+    def created_sort_key(acc: dict) -> float | int:
+        return acc.get("created_at") or 0
+
+    def email_sort_key(acc: dict) -> str:
+        return (acc.get("email") or "").lower()
+
+    sorters = {
+        "updated_at_desc": (updated_sort_key, True),
+        "updated_at_asc": (updated_sort_key, False),
+        "email_asc": (email_sort_key, False),
+        "email_desc": (email_sort_key, True),
+        "created_at_desc": (created_sort_key, True),
+    }
+    sorter = sorters.get(sort)
+    if not sorter:
+        raise HTTPException(status_code=400, detail="sort 非法")
+
     accounts = load_accounts()
-    return [_sanitize_account(a) for a in accounts]
+    filtered_accounts = []
+    for acc in accounts:
+        if normalized_category and derive_category(acc) != normalized_category:
+            continue
+        if normalized_query:
+            email = (acc.get("email") or "").lower()
+            notes = str(acc.get("notes") or "").lower()
+            if normalized_query not in email and normalized_query not in notes:
+                continue
+        filtered_accounts.append(acc)
+
+    key_func, reverse = sorter
+    filtered_accounts.sort(key=key_func, reverse=reverse)
+
+    total = len(filtered_accounts)
+    start = (page - 1) * page_size
+    end = start + page_size
+    items = [_sanitize_account(acc) for acc in filtered_accounts[start:end]]
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "has_next": end < total,
+        "category": normalized_category or None,
+        "q": normalized_query or None,
+        "sort": sort,
+    }
 
 
 @app.get("/api/accounts/{email}/codex-auth")
