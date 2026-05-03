@@ -1,7 +1,7 @@
 import csv
 import io
 
-from autoteam.account_exports import export_inventory_csv
+from autoteam.account_exports import export_inventory_csv, export_sold_csv
 
 
 def _read_rows(csv_text: str) -> list[list[str]]:
@@ -148,5 +148,192 @@ def test_export_inventory_csv_empty_input():
             "registered_at",
             "updated_at",
             "note",
+        ]
+    ]
+
+
+def test_export_sold_csv_basic():
+    csv_text = export_sold_csv(
+        [
+            {
+                "email": "sold@example.com",
+                "usage_status": "sold",
+                "sold_at": 1710000200,
+                "sold_to": "buyer-a",
+                "sale_price": 88,
+                "sale_note": "done",
+                "sale_batch_id": "batch-1",
+                "plan_type": "team",
+                "inventory_at": 1709999000,
+            },
+            {
+                "email": "inventory@example.com",
+                "usage_status": "inventory",
+                "plan_type": "team",
+                "inventory_at": 1709998000,
+            },
+        ]
+    )
+
+    rows = _read_rows(csv_text)
+
+    assert csv_text.startswith("\ufeff")
+    assert rows == [
+        [
+            "email",
+            "sold_at",
+            "sold_to",
+            "sale_price",
+            "sale_note",
+            "sale_batch_id",
+            "plan_type",
+            "original_inventory_at",
+        ],
+        [
+            "sold@example.com",
+            "1710000200",
+            "buyer-a",
+            "88",
+            "done",
+            "batch-1",
+            "team",
+            "1709999000",
+        ],
+    ]
+
+
+def test_export_sold_csv_v2_sale_block():
+    csv_text = export_sold_csv(
+        [
+            {
+                "email": "v2@example.com",
+                "sale": {
+                    "sold_at": 1710000300.9,
+                    "sold_to": "buyer-v2",
+                    "price": 99.5,
+                    "note": "v2 note",
+                    "batch_id": "sale-batch-v2",
+                },
+                "plan_type": "plus",
+                "allocation": {"allocated_at": 1709999100},
+            }
+        ]
+    )
+
+    assert _read_rows(csv_text) == [
+        [
+            "email",
+            "sold_at",
+            "sold_to",
+            "sale_price",
+            "sale_note",
+            "sale_batch_id",
+            "plan_type",
+            "original_inventory_at",
+        ],
+        [
+            "v2@example.com",
+            "1710000300",
+            "buyer-v2",
+            "99.5",
+            "v2 note",
+            "sale-batch-v2",
+            "plus",
+            "1709999100",
+        ],
+    ]
+
+
+def test_export_sold_csv_legacy_flat_fields():
+    csv_text = export_sold_csv(
+        [
+            {
+                "email": "legacy@example.com",
+                "usage_status": "sold",
+                "sold_at": 1710000400,
+                "sold_to": "legacy-buyer",
+                "sale_price": "188",
+                "sale_note": "legacy note",
+                "sale_batch_id": "legacy-batch",
+                "plan_type": "team",
+                "allocation": {"allocated_at": 1709999200},
+            }
+        ]
+    )
+
+    assert _read_rows(csv_text) == [
+        [
+            "email",
+            "sold_at",
+            "sold_to",
+            "sale_price",
+            "sale_note",
+            "sale_batch_id",
+            "plan_type",
+            "original_inventory_at",
+        ],
+        [
+            "legacy@example.com",
+            "1710000400",
+            "legacy-buyer",
+            "188",
+            "legacy note",
+            "legacy-batch",
+            "team",
+            "1709999200",
+        ],
+    ]
+
+
+def test_export_sold_csv_legacy_status_field():
+    csv_text = export_sold_csv(
+        [
+            {
+                "email": "old-status@example.com",
+                "status": "sold",
+                "sold_at": 1710000500,
+                "sold_to": "buyer-old",
+                "plan_type": "team",
+            }
+        ]
+    )
+
+    assert _read_rows(csv_text) == [
+        [
+            "email",
+            "sold_at",
+            "sold_to",
+            "sale_price",
+            "sale_note",
+            "sale_batch_id",
+            "plan_type",
+            "original_inventory_at",
+        ],
+        [
+            "old-status@example.com",
+            "1710000500",
+            "buyer-old",
+            "",
+            "",
+            "",
+            "team",
+            "",
+        ],
+    ]
+
+
+def test_export_sold_csv_empty_input():
+    csv_text = export_sold_csv([])
+
+    assert _read_rows(csv_text) == [
+        [
+            "email",
+            "sold_at",
+            "sold_to",
+            "sale_price",
+            "sale_note",
+            "sale_batch_id",
+            "plan_type",
+            "original_inventory_at",
         ]
     ]
