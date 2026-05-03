@@ -4,3 +4,5 @@
 - Sub2API 同步细节只在模块级记录，后续如果继续改分组或账号导入，应补专门架构文档。
 - `docs/cpa/` 是参考脚本区域，尚未整理为 llmdoc 稳定文档。
 - 自动注册页面选择器随 OpenAI 页面变化风险高，后续修复时应补浏览器流程失败案例。
+- `cpa_batch` 主任务被外部强杀（浏览器卡死后强 kill）时，run 顶层 `status` 没有兜底回写为 `failed` 或 `paused`，会停留在 `running`，直到下次服务重启或 `resume`。后续需补强杀路径的 finally 兜底。
+- 直注注册在连续多账号顺序场景下，部分账号会跳过密码设置步骤（`未检测到密码输入框，跳过`），随后在 `about-you` 或 `email-verification` 页面卡死。后续需补 `about-you` 后的等待超时处理，以及浏览器 profile 清理策略。

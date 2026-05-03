@@ -84,18 +84,36 @@ class BrowserLeaseError(RuntimeError):
     """Raised when another browser automation flow is already running."""
 
 
+_PERSISTENT_WORKER_READY_TIMEOUT = 30.0
+
+
 class _PersistentBrowserWorker:
     def __init__(self, sync_playwright_factory: Callable):
         self.sync_playwright_factory = sync_playwright_factory
         self.queue: queue.Queue = queue.Queue()
         self.ready = threading.Event()
+        self.start_error: Exception | None = None
         self.thread = threading.Thread(target=self._worker, name="autoteam-persistent-browser", daemon=True)
         self.playwright = None
         self.thread.start()
-        self.ready.wait(timeout=5)
+        if not self.ready.wait(timeout=_PERSISTENT_WORKER_READY_TIMEOUT):
+            raise BrowserLeaseError(
+                f"持久化 Chromium worker 启动超时（{_PERSISTENT_WORKER_READY_TIMEOUT:.0f}s 内未就绪）"
+            )
+        if self.start_error is not None:
+            raise BrowserLeaseError(
+                f"持久化 Chromium worker 启动失败: {self.start_error!r}"
+            )
+        if self.playwright is None:
+            raise BrowserLeaseError("持久化 Chromium worker 启动后 Playwright 引用为空")
 
     def _worker(self) -> None:
-        self.playwright = self.sync_playwright_factory().start()
+        try:
+            self.playwright = self.sync_playwright_factory().start()
+        except Exception as exc:
+            self.start_error = exc
+            self.ready.set()
+            return
         self.ready.set()
         while True:
             item = self.queue.get()
@@ -115,8 +133,16 @@ class _PersistentBrowserWorker:
                 logger.debug("[浏览器] 停止持久化 Playwright 失败: %s", exc)
 
     def run(self, func, *args, **kwargs):
-        if not self.thread.is_alive() or self.playwright is None:
-            raise BrowserLeaseError("持久化 Chromium worker 未就绪")
+        thread_alive = self.thread.is_alive()
+        playwright_ready = self.playwright is not None
+        if not thread_alive or not playwright_ready:
+            reasons = []
+            if not thread_alive:
+                reasons.append("worker 线程已退出")
+            if not playwright_ready:
+                reasons.append("Playwright 引用已丢失")
+            detail = "，".join(reasons) or "未知原因"
+            raise BrowserLeaseError(f"持久化 Chromium worker 未就绪: {detail}")
         if threading.current_thread() is self.thread:
             return func(*args, **kwargs)
         result_event = threading.Event()
@@ -310,11 +336,14 @@ def _adapt_persistent_context_options(launch_options: dict[str, object]) -> dict
 
 
 def _persistent_keepalive_is_alive() -> bool:
+    worker = _PERSISTENT_KEEPALIVE.get("worker")
+    if isinstance(worker, _PersistentBrowserWorker) and worker.playwright is None:
+        logger.warning("[浏览器] 持久化 Chromium worker 线程仍在，但 Playwright 引用已丢失")
+        return False
     if not _persistent_keepalive_thread_is_alive():
         return False
     context = _PERSISTENT_KEEPALIVE.get("context")
     browser = _PERSISTENT_KEEPALIVE.get("browser")
-    worker = _PERSISTENT_KEEPALIVE.get("worker")
 
     def _check_alive() -> bool:
         if context is not None:
@@ -504,7 +533,11 @@ class PersistentContextBrowser:
             self._contexts.append(context)
             return _wrap_persistent_value(self.worker, context)
         except Exception as exc:
-            if not _looks_like_browser_closed_error(exc) or not self.user_data_dir:
+            should_heal = (
+                _looks_like_browser_closed_error(exc)
+                or _looks_like_persistent_worker_dead_error(exc)
+            )
+            if not should_heal or not self.user_data_dir:
                 raise
             logger.warning("[浏览器] 持久化 Chromium 已失联，重启 profile 后重试: %s", exc)
             replacement = _restart_persistent_browser_after_disconnect(self.user_data_dir, self.launch_options)
@@ -600,6 +633,15 @@ def _looks_like_browser_closed_error(exc: Exception) -> bool:
     )
 
 
+def _looks_like_persistent_worker_dead_error(exc: Exception) -> bool:
+    text = str(exc)
+    return (
+        "持久化 Chromium worker 未就绪" in text
+        or "Playwright 引用已丢失" in text
+        or "worker 线程已退出" in text
+    )
+
+
 def _restart_persistent_browser_after_disconnect(user_data_dir: str, launch_options: dict[str, object]):
     with _PERSISTENT_KEEPALIVE_LOCK:
         _discard_stale_persistent_keepalive(user_data_dir)
@@ -676,10 +718,20 @@ class BrowserLease:
             active.append({"owner": self.owner, "slot": self.slot, "acquired_at": self.acquired_at})
             _BROWSER_LEASE_STATE["max_leases"] = max_leases
         logger.debug("[浏览器] 已获取租约: %s slot=%s", self.owner, self.slot)
+        self._heal_stale_persistent_keepalive()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
+
+    def _heal_stale_persistent_keepalive(self) -> None:
+        user_data_dir = _get_playwright_user_data_dir()
+        if not user_data_dir or os.environ.get("PLAYWRIGHT_BROWSER_CDP_URL", "").strip():
+            return
+        with _PERSISTENT_KEEPALIVE_LOCK:
+            keepalive_dir = str(_PERSISTENT_KEEPALIVE.get("user_data_dir") or "")
+            if keepalive_dir and not _persistent_keepalive_is_alive():
+                _discard_stale_persistent_keepalive(keepalive_dir)
 
     def start_playwright(self):
         if not self._active:
@@ -807,3 +859,46 @@ def browser_parallel_limit(max_leases: int) -> Iterator[None]:
 
 def browser_lease_status() -> dict[str, object]:
     return dict(_BROWSER_LEASE_STATE)
+
+
+def force_release_persistent_browser(*, owner: str | None = None, reason: str = "") -> None:
+    """Wall-clock 超时等异常路径的强制释放：杀 chromium 进程 + stop worker + 清空 lease 注册。
+
+    用途：当 BrowserLease 持有者所在线程被 Playwright 调用卡死、外层无法 cooperatively
+    退出 context manager 时，由调度方（cpa_batch 等）调用此函数：
+
+    1. 杀掉持久化 profile 的 chromium 进程，让卡死线程的 page/context 调用立即抛
+       `Target page, context or browser has been closed`，从而 cooperatively 终止；
+    2. stop _PersistentBrowserWorker，清空 _PERSISTENT_KEEPALIVE，下个账号会重建；
+    3. 从 _BROWSER_LEASE_STATE 移除指定 owner（或全部）的 active 条目，避免下次
+       acquire_browser_lease 因为 stale lease 注册而 raise。
+    """
+    logger.warning(
+        "[浏览器] 强制释放持久化 Chromium：owner=%s reason=%s",
+        owner or "*",
+        reason or "(unspecified)",
+    )
+    keepalive_dir = ""
+    with _PERSISTENT_KEEPALIVE_LOCK:
+        keepalive_dir = str(_PERSISTENT_KEEPALIVE.get("user_data_dir") or "")
+        if not keepalive_dir:
+            try:
+                keepalive_dir = _get_playwright_user_data_dir()
+            except Exception:
+                keepalive_dir = ""
+        if keepalive_dir:
+            try:
+                _discard_stale_persistent_keepalive(keepalive_dir)
+            except Exception as exc:
+                logger.warning("[浏览器] 强制释放期间 _discard_stale_persistent_keepalive 失败: %s", exc)
+        else:
+            _PERSISTENT_KEEPALIVE.clear()
+    with _BROWSER_LEASE_LOCK:
+        active = _BROWSER_LEASE_STATE.setdefault("active", [])
+        if isinstance(active, list):
+            if owner is None:
+                _BROWSER_LEASE_STATE["active"] = []
+            else:
+                _BROWSER_LEASE_STATE["active"] = [
+                    item for item in active if (item or {}).get("owner") != owner
+                ]

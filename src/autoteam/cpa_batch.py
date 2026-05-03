@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import contextvars
 import json
 import logging
@@ -34,7 +35,11 @@ from autoteam.accounts import (
     update_account,
 )
 from autoteam.auth_archive import archive_account_auth_file
-from autoteam.browser_runtime import acquire_browser_lease, browser_parallel_limit
+from autoteam.browser_runtime import (
+    acquire_browser_lease,
+    browser_parallel_limit,
+    force_release_persistent_browser,
+)
 from autoteam.chatgpt_api import ChatGPTTeamAPI
 from autoteam.codex_auth import (
     check_codex_quota,
@@ -73,6 +78,10 @@ SUCCESS_RATE_SAFETY_MARGIN = 1.0
 MIN_COMPLETED_ACCOUNTS_FOR_SUCCESS_RATE_GUARD = DEFAULT_BATCH_SIZE
 RATE_LIMIT_RETRY_SECONDS = max(5, int(os.getenv("CPA_BATCH_RATE_LIMIT_RETRY_SECONDS", "600") or 600))
 MAX_CONSECUTIVE_CPA_RATE_LIMITS = max(0, int(os.getenv("CPA_BATCH_PAUSE_ON_CONSECUTIVE_RATE_LIMITS", "2") or 2))
+_DIRECT_REGISTER_WALL_CLOCK_TIMEOUT = max(
+    60.0,
+    float(os.getenv("CPA_BATCH_DIRECT_REGISTER_TIMEOUT_SECONDS", "240") or 240),
+)
 JOIN_MODE_DIRECT = "direct"
 JOIN_MODE_INVITE = "invite"
 VALID_JOIN_MODES = {JOIN_MODE_DIRECT, JOIN_MODE_INVITE}
@@ -626,16 +635,43 @@ def _create_direct_account(
         session_bundle.clear()
         try:
             try:
-                success = _register_direct_once(
-                    mail_client,
-                    email,
-                    password,
-                    mail_account_id=account_id,
-                    session_bundle_callback=capture_session_bundle,
-                    oauth_bundle_callback=capture_oauth_bundle,
-                    require_session_bundle=True,
-                    require_oauth_bundle=True,
+                _executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="register-direct"
                 )
+                try:
+                    _future = _executor.submit(
+                        _register_direct_once,
+                        mail_client,
+                        email,
+                        password,
+                        mail_account_id=account_id,
+                        session_bundle_callback=capture_session_bundle,
+                        oauth_bundle_callback=capture_oauth_bundle,
+                        require_session_bundle=True,
+                        require_oauth_bundle=True,
+                    )
+                    try:
+                        success = _future.result(timeout=_DIRECT_REGISTER_WALL_CLOCK_TIMEOUT)
+                    except concurrent.futures.TimeoutError as exc:
+                        _future.cancel()
+                        message = (
+                            f"直注注册超时（{_DIRECT_REGISTER_WALL_CLOCK_TIMEOUT:.0f}s wall-clock）"
+                            f"：浏览器疑似白屏/挂起，强制释放 lease 后放弃当前账号 {email}"
+                        )
+                        logger.error("[直接注册] %s", message)
+                        try:
+                            force_release_persistent_browser(
+                                owner="manager._register_direct_once",
+                                reason=f"direct register timeout for {email}",
+                            )
+                        except Exception as kill_exc:
+                            logger.warning(
+                                "[直接注册] 强制释放浏览器失败，将依赖下次 lease 重建: %s",
+                                kill_exc,
+                            )
+                        raise AccountFlowError(email, message) from exc
+                finally:
+                    _executor.shutdown(wait=False, cancel_futures=True)
             except TypeError as exc:
                 if "require_session_bundle" not in str(exc) and "oauth_bundle_callback" not in str(exc):
                     raise
