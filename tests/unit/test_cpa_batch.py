@@ -1,3 +1,4 @@
+import contextlib
 import threading
 import time
 
@@ -321,6 +322,46 @@ def test_run_cpa_batch_skips_phone_verification_and_continues(tmp_path, monkeypa
     assert created == ["ok-2@example.com"]
 
 
+def test_run_cpa_batch_reuses_rotated_proxy_after_phone_threshold(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    calls = []
+    rotated = []
+
+    monkeypatch.setattr(cpa_batch, "MAX_CONSECUTIVE_PHONE_BEFORE_PROXY_ROTATE", 2)
+    monkeypatch.setattr(cpa_batch, "MAX_ATTEMPT_MULTIPLIER", 3)
+    monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
+    monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", lambda email, _cache, **_kwargs: _fake_cpa_result(email))
+    monkeypatch.setattr(
+        cpa_batch.outbound_proxy,
+        "rotate_task_proxy",
+        lambda: rotated.append("http://proxy-b:8080") or "http://proxy-b:8080",
+    )
+
+    def fake_create_direct(_mail_client, **kwargs):
+        calls.append(kwargs.get("reuse_current_proxy_once"))
+        index = len(calls)
+        if index <= 2:
+            raise cpa_batch.AccountPhoneVerificationSkipped(
+                f"phone-{index}@example.com",
+                "OpenAI 风控要求手机号验证, 跳过该账号",
+            )
+        return "ok@example.com"
+
+    monkeypatch.setattr(cpa_batch, "_create_direct_account", fake_create_direct)
+
+    result = cpa_batch.run_cpa_batch(
+        "run-phone-proxy-reuse",
+        target=1,
+        batch_size=1,
+        join_mode="direct",
+        continue_on_error=True,
+    )
+
+    assert result["status"] == "completed"
+    assert rotated == ["http://proxy-b:8080"]
+    assert calls == [False, False, True]
+
+
 def test_run_cpa_batch_resume_continues_existing_run(tmp_path, monkeypatch):
     _use_tmp_flow_file(tmp_path, monkeypatch)
     flow_runs.create_flow_run("run-resume", target=2, batch_size=1, join_mode="direct")
@@ -533,6 +574,46 @@ def test_run_cpa_batch_resume_preserves_parallel_workers(tmp_path, monkeypatch):
 
     assert result["status"] == "paused"
     assert seen["parallel_workers"] == 3
+
+
+def test_parallel_direct_creator_reuses_rotated_proxy_after_phone_threshold(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    flow_runs.create_flow_run("run-parallel-phone-proxy", target=1, batch_size=20, join_mode="direct")
+    calls = []
+    rotated = []
+
+    monkeypatch.setattr(cpa_batch, "MAX_CONSECUTIVE_PHONE_BEFORE_PROXY_ROTATE", 2)
+    monkeypatch.setattr(cpa_batch, "MAX_ATTEMPT_MULTIPLIER", 3)
+    monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
+    monkeypatch.setattr(cpa_batch, "browser_parallel_limit", lambda _limit: contextlib.nullcontext())
+    monkeypatch.setattr(
+        cpa_batch.outbound_proxy,
+        "rotate_task_proxy",
+        lambda: rotated.append("http://proxy-b:8080") or "http://proxy-b:8080",
+    )
+
+    def fake_create_direct(_mail_client, **kwargs):
+        calls.append(kwargs.get("reuse_current_proxy_once"))
+        index = len(calls)
+        if index <= 2:
+            raise cpa_batch.AccountPhoneVerificationSkipped(
+                f"phone-{index}@example.com",
+                "OpenAI 风控要求手机号验证, 跳过该账号",
+            )
+        return "ok@example.com"
+
+    monkeypatch.setattr(cpa_batch, "_create_direct_account", fake_create_direct)
+
+    result = cpa_batch._create_direct_accounts_parallel(
+        1,
+        parallel_workers=1,
+        hooks=cpa_batch.CpaBatchHooks("run-parallel-phone-proxy"),
+        batch_index=1,
+    )
+
+    assert result["succeeded"] == 1
+    assert rotated == ["http://proxy-b:8080"]
+    assert calls == [False, False, True]
 
 
 def test_run_cpa_batch_resume_marks_lingering_running_accounts_failed(tmp_path, monkeypatch):

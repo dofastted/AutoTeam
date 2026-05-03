@@ -81,6 +81,9 @@ DEFAULT_BATCH_SIZE = 20
 MAX_ATTEMPT_MULTIPLIER = 2
 MAX_ACCOUNT_FAILURES = 3
 MAX_CONSECUTIVE_REGISTER_FAILURES = 2
+MAX_CONSECUTIVE_PHONE_BEFORE_PROXY_ROTATE = max(
+    1, int(os.getenv("CPA_BATCH_PHONE_PROXY_ROTATE_THRESHOLD", "3") or 3)
+)
 MIN_COMPLETED_SUCCESS_RATE = 95.0
 SUCCESS_RATE_SAFETY_MARGIN = 1.0
 MIN_COMPLETED_ACCOUNTS_FOR_SUCCESS_RATE_GUARD = DEFAULT_BATCH_SIZE
@@ -555,6 +558,7 @@ def _create_direct_account(
     hooks: CpaBatchHooks | None = None,
     batch_index: int | None = None,
     worker_index: int | None = None,
+    reuse_current_proxy_once: bool = False,
 ) -> str:
     from autoteam.manager import _register_direct_once
 
@@ -564,7 +568,10 @@ def _create_direct_account(
     proxy_already_rotated = False
 
     while True:
-        if proxy_already_rotated:
+        if reuse_current_proxy_once:
+            logger.info("[CPA批量] 当前出口 IP: %s", _proxy_host_label(outbound_proxy.current_proxy_url()))
+            reuse_current_proxy_once = False
+        elif proxy_already_rotated:
             logger.info("[CPA批量] 当前出口 IP: %s", _proxy_host_label(outbound_proxy.current_proxy_url()))
             proxy_already_rotated = False
         else:
@@ -928,6 +935,8 @@ def _create_direct_accounts_parallel(
         attempted = 0
         succeeded = 0
         failed = 0
+        consecutive_phone_failures = 0
+        reuse_current_proxy_once = False
         emails: list[dict[str, object]] = []
         try:
             with outbound_proxy.task_proxy_context():
@@ -950,22 +959,39 @@ def _create_direct_accounts_parallel(
                             hooks=hooks,
                             batch_index=batch_index,
                             worker_index=worker_index,
+                            reuse_current_proxy_once=reuse_current_proxy_once,
                         )
+                        reuse_current_proxy_once = False
                     except AccountPhoneVerificationSkipped as exc:
+                        reuse_current_proxy_once = False
                         failed += 1
+                        consecutive_phone_failures += 1
                         logger.warning("[CPA批量] 跳过 (风控要求手机号): %s", exc.email)
+                        if consecutive_phone_failures >= MAX_CONSECUTIVE_PHONE_BEFORE_PROXY_ROTATE:
+                            new_proxy = outbound_proxy.rotate_task_proxy()
+                            logger.warning(
+                                "[CPA批量] add-phone 命中 %d 次, worker %d 切换到 IP %s",
+                                consecutive_phone_failures,
+                                worker_index,
+                                _proxy_host_label(new_proxy),
+                            )
+                            consecutive_phone_failures = 0
+                            reuse_current_proxy_once = True
                         continue
                     except AccountFlowError as exc:
+                        reuse_current_proxy_once = False
                         failed += 1
                         logger.warning("[CPA批量] 直注 worker %d 注册失败: %s", worker_index, exc)
                         continue
                     except Exception as exc:
+                        reuse_current_proxy_once = False
                         failed += 1
                         logger.warning("[CPA批量] 直注 worker %d 异常: %s", worker_index, exc)
                         continue
                     email = _normalized_email(email)
                     if email:
                         succeeded += 1
+                        consecutive_phone_failures = 0
                         item = {"email": email, "worker_index": worker_index}
                         emails.append(item)
                         if on_success:
@@ -1394,6 +1420,8 @@ def run_cpa_batch(
     pending_cpa = 0
     pending_lock = threading.Lock()
     consecutive_register_failures = 0
+    consecutive_phone_failures = 0
+    reuse_current_proxy_once = False
     cpa_worker = _CpaUploadWorker(hooks)
 
     def get_pending_cpa() -> int:
@@ -1591,6 +1619,7 @@ def run_cpa_batch(
                         }
                     continue
                 consecutive_register_failures = 0
+                consecutive_phone_failures = 0
                 drain_cpa_results()
                 continue
 
@@ -1610,7 +1639,13 @@ def run_cpa_batch(
                 if join_mode == JOIN_MODE_INVITE:
                     email = _create_invited_account(chatgpt, mail_client, hooks=hooks, batch_index=batch_index)
                 else:
-                    email = _create_direct_account(mail_client, hooks=hooks, batch_index=batch_index)
+                    email = _create_direct_account(
+                        mail_client,
+                        hooks=hooks,
+                        batch_index=batch_index,
+                        reuse_current_proxy_once=reuse_current_proxy_once,
+                    )
+                reuse_current_proxy_once = False
                 email = _normalized_email(email)
                 hooks.remove_account(placeholder)
                 update_account(
@@ -1630,15 +1665,28 @@ def run_cpa_batch(
                     status="running",
                 )
                 consecutive_register_failures = 0
+                consecutive_phone_failures = 0
             except AccountPhoneVerificationSkipped as exc:
+                reuse_current_proxy_once = False
                 failed_email = exc.email or placeholder
                 if failed_email != placeholder:
                     hooks.remove_account(placeholder)
                 logger.warning("[CPA批量] 跳过 (风控要求手机号): %s", failed_email)
                 account_failures += 1
+                consecutive_phone_failures += 1
+                if consecutive_phone_failures >= MAX_CONSECUTIVE_PHONE_BEFORE_PROXY_ROTATE:
+                    new_proxy = outbound_proxy.rotate_task_proxy()
+                    logger.warning(
+                        "[CPA批量] add-phone 命中 %d 次, 切换到 IP %s",
+                        consecutive_phone_failures,
+                        _proxy_host_label(new_proxy),
+                    )
+                    consecutive_phone_failures = 0
+                    reuse_current_proxy_once = True
                 hooks.run_update(attempted_count=attempts)
                 continue
             except AccountFlowError as exc:
+                reuse_current_proxy_once = False
                 failed_email = exc.email or placeholder
                 if failed_email != placeholder:
                     hooks.remove_account(placeholder)
@@ -1684,6 +1732,7 @@ def run_cpa_batch(
                     }
                 continue
             except Exception as exc:
+                reuse_current_proxy_once = False
                 hooks.account_event(
                     placeholder,
                     batch_index=batch_index,
