@@ -4,6 +4,7 @@ from autoteam.account_inventory import (
     ALLOCATION_STATUS_IN_USE,
     allocate_account,
     release_account,
+    sell_account,
     _gen_allocation_id,
 )
 
@@ -354,3 +355,148 @@ def test_release_account_returns_copied_account_when_not_in_place():
     assert original["usage_status"] == "in_use"
     assert original["allocation"]["status"] == "in_use"
     assert "released_at" not in original["allocation"]
+
+
+def test_sell_account_marks_supported_usage_statuses_as_sold():
+    for usage_status in ("normal", "in_use", "inventory"):
+        account = _inventory_account(
+            usage_status=usage_status,
+            sync_disabled=False,
+            allocation={"status": usage_status, "allocation_id": "alloc_1"},
+        )
+
+        result = sell_account(account, now=999)
+
+        assert result["changed"] is True
+        assert result["reason"] is None
+        assert result["warning"] is None
+        assert account["usage_status"] == "sold"
+        assert account["sync_disabled"] is True
+        assert account["allocation"]["status"] == "sold"
+        assert account["sale"]["sold_at"] == 999
+        assert account["updated_at"] == 999
+
+
+def test_sell_account_writes_sale_metadata():
+    account = _inventory_account(usage_status="inventory")
+
+    result = sell_account(account, buyer="张三", price=100, note="测试", now=123)
+
+    assert result == {
+        "changed": True,
+        "applied": [
+            "usage_status",
+            "sync_disabled",
+            "allocation.status",
+            "sale.sold_at",
+            "sale.buyer",
+            "sale.price",
+            "sale.note",
+            "updated_at",
+        ],
+        "reason": None,
+        "warning": None,
+        "account": account,
+    }
+    assert account["sale"] == {
+        "sold_at": 123,
+        "buyer": "张三",
+        "price": 100,
+        "note": "测试",
+    }
+
+
+def test_sell_account_rejects_main_account():
+    account = _inventory_account(role="main", usage_status="inventory", sync_disabled=False)
+
+    result = sell_account(account, buyer="buyer", price=99, note="note", now=456)
+
+    assert result == {
+        "changed": False,
+        "applied": [],
+        "reason": "main_account",
+        "warning": None,
+        "account": account,
+    }
+    assert account["usage_status"] == "inventory"
+    assert account["sync_disabled"] is False
+    assert "sale" not in account
+
+
+def test_sell_account_is_idempotent_when_already_sold_with_same_payload():
+    account = _inventory_account(
+        usage_status="sold",
+        sync_disabled=True,
+        updated_at=321,
+        allocation={"status": "sold", "allocation_id": "alloc_1"},
+        sale={"sold_at": 200, "buyer": "张三", "price": 100, "note": "测试"},
+    )
+
+    result = sell_account(account, buyer="张三", price=100, note="测试", now=999)
+
+    assert result == {
+        "changed": False,
+        "applied": [],
+        "reason": None,
+        "warning": None,
+        "account": account,
+    }
+    assert account["sale"]["sold_at"] == 200
+    assert account["updated_at"] == 321
+
+
+def test_sell_account_updates_note_for_existing_sold_account():
+    account = _inventory_account(
+        usage_status="sold",
+        sync_disabled=True,
+        updated_at=321,
+        allocation={"status": "sold", "allocation_id": "alloc_1"},
+        sale={"sold_at": 200, "buyer": "张三", "price": 100, "note": "旧备注"},
+    )
+
+    result = sell_account(account, buyer="张三", price=100, note="新备注", now=777)
+
+    assert result["changed"] is True
+    assert result["applied"] == ["sale.note", "updated_at"]
+    assert account["sale"]["sold_at"] == 200
+    assert account["sale"]["note"] == "新备注"
+    assert account["updated_at"] == 777
+
+
+def test_sell_account_allows_invalid_health_status():
+    account = _inventory_account(usage_status="normal", health_status="invalid")
+
+    result = sell_account(account, now=111)
+
+    assert result["changed"] is True
+    assert result["reason"] is None
+    assert result["warning"] is None
+    assert account["usage_status"] == "sold"
+
+
+def test_sell_account_returns_copied_account_when_not_in_place():
+    original = _inventory_account(
+        usage_status="inventory",
+        sync_disabled=False,
+        allocation={"status": "inventory", "allocation_id": "alloc_1"},
+    )
+
+    result = sell_account(original, buyer="buyer", price="200", note="copy", now=555, in_place=False)
+
+    copied = result["account"]
+    assert copied is not original
+    assert copied["usage_status"] == "sold"
+    assert copied["sync_disabled"] is True
+    assert copied["allocation"]["status"] == "sold"
+    assert copied["sale"] == {
+        "sold_at": 555,
+        "buyer": "buyer",
+        "price": "200",
+        "note": "copy",
+    }
+    assert copied["updated_at"] == 555
+    assert original["usage_status"] == "inventory"
+    assert original["sync_disabled"] is False
+    assert original["allocation"]["status"] == "inventory"
+    assert "sale" not in original
+    assert "updated_at" not in original

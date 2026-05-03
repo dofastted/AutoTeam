@@ -254,6 +254,69 @@ def release_account(
     return result
 
 
+def sell_account(
+    account: dict,
+    *,
+    buyer: str = "",
+    price: Any = None,
+    note: str = "",
+    now: int | None = None,
+    in_place: bool = True,
+) -> dict:
+    target = _copy_account(account, in_place=in_place)
+    usage_status = _normalize_key(target.get("usage_status"))
+    role = _normalize_key(target.get("role"))
+
+    if role == "main":
+        return {
+            "changed": False,
+            "applied": [],
+            "reason": "main_account",
+            "warning": None,
+            "account": target,
+        }
+
+    unix_ts = int(now if now is not None else time.time())
+    result: dict[str, Any] = {
+        "changed": False,
+        "applied": [],
+        "reason": None,
+        "warning": None,
+        "account": target,
+    }
+
+    _set_if_changed(target, "usage_status", USAGE_SOLD, result)
+    _set_if_changed(target, "sync_disabled", True, result)
+
+    allocation = target.get("allocation")
+    if not isinstance(allocation, dict):
+        allocation = {}
+        target["allocation"] = allocation
+
+    _set_nested_if_changed(
+        allocation,
+        "status",
+        ALLOCATION_STATUS_SOLD,
+        result,
+        applied_name="allocation.status",
+    )
+
+    sale = target.get("sale")
+    if not isinstance(sale, dict):
+        sale = {}
+        target["sale"] = sale
+
+    sold_at = sale.get("sold_at") if usage_status == USAGE_SOLD and sale.get("sold_at") is not None else unix_ts
+    _set_nested_if_changed(sale, "sold_at", sold_at, result, applied_name="sale.sold_at")
+    _set_nested_if_changed(sale, "buyer", buyer, result, applied_name="sale.buyer")
+    _set_nested_if_changed(sale, "price", price, result, applied_name="sale.price")
+    _set_nested_if_changed(sale, "note", note, result, applied_name="sale.note")
+
+    if result["changed"]:
+        _set_if_changed(target, "updated_at", unix_ts, result)
+    return result
+
+
 __all__ = [
     "ALLOCATION_STATUS_INVENTORY",
     "ALLOCATION_STATUS_IN_USE",
@@ -261,4 +324,5 @@ __all__ = [
     "ALLOCATION_STATUS_SOLD",
     "allocate_account",
     "release_account",
+    "sell_account",
 ]
