@@ -322,6 +322,47 @@ def test_persistent_playwright_restarts_across_threads(monkeypatch):
     assert browser_runtime._PERSISTENT_KEEPALIVE.get("context") is fakes[0].persistent_context
 
 
+def test_persistent_worker_reports_lost_playwright():
+    fake = FakePlaywright()
+    worker = browser_runtime._PersistentBrowserWorker(lambda: FakeSyncPlaywright(fake))
+    try:
+        worker.playwright = None
+        with pytest.raises(BrowserLeaseError, match="Playwright 引用已丢失"):
+            worker.run(lambda: None)
+    finally:
+        worker.stop()
+
+
+def test_persistent_keepalive_rebuilds_when_worker_loses_playwright(monkeypatch):
+    monkeypatch.setenv("PLAYWRIGHT_BROWSER_CDP_URL", "")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSER_CDP_COMMAND", "")
+    monkeypatch.setenv("PLAYWRIGHT_USER_DATA_DIR", "/tmp/autoteam-profile")
+    monkeypatch.setattr(browser_runtime, "_kill_chromium_processes_for_profile", lambda _user_data_dir: None)
+    monkeypatch.setattr(browser_runtime, "_cleanup_persistent_profile_locks", lambda _user_data_dir: None)
+
+    fakes = [FakePlaywright(), FakePlaywright()]
+
+    with acquire_browser_lease("persistent-1", sync_playwright_factory=lambda: FakeSyncPlaywright(fakes[0])) as lease:
+        lease.launch_chromium(headless=True)
+
+    stale_worker = browser_runtime._PERSISTENT_KEEPALIVE.get("worker")
+    assert stale_worker is not None
+    stale_worker.playwright = None
+    assert stale_worker.thread.is_alive()
+
+    with acquire_browser_lease("persistent-2", sync_playwright_factory=lambda: FakeSyncPlaywright(fakes[1])) as lease:
+        browser = lease.launch_chromium(headless=True)
+        context = browser.new_context()
+
+    assert fakes[0].start_count == 1
+    assert fakes[1].start_count == 1
+    assert stale_worker.thread.is_alive() is False
+    assert browser_runtime._PERSISTENT_KEEPALIVE.get("playwright") is fakes[1]
+    assert browser_runtime._PERSISTENT_KEEPALIVE.get("worker") is not stale_worker
+    assert context.closed is True
+    assert fakes[1].browser.closed is False
+
+
 def test_persistent_objects_proxy_all_page_access_to_worker_thread(monkeypatch):
     monkeypatch.setenv("PLAYWRIGHT_BROWSER_CDP_URL", "")
     monkeypatch.setenv("PLAYWRIGHT_BROWSER_CDP_COMMAND", "")

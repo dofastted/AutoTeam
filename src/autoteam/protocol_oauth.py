@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlu
 import requests
 
 from autoteam import outbound_proxy
+from autoteam import sentinel as _sentinel
 from autoteam.codex_auth import (
     CODEX_AUTH_URL,
     CODEX_CLIENT_ID,
@@ -344,6 +345,27 @@ def _common_headers(session, referer: str = "https://chatgpt.com/") -> dict[str,
     except Exception:
         pass
     return headers
+
+
+def _inject_sentinel_token(session, headers: dict[str, str], *, flow: str = "authorize_continue") -> None:
+    """Add `openai-sentinel-token` header (PoW + Turnstile) to OpenAI auth requests.
+
+    OpenAI 反欺诈系统要求 OTP/authorize/password 类请求带此 header；缺失时
+    后端静默丢弃请求 / 不下发邮箱 OTP。device_id 取自 session 已设置的
+    `oai-did` cookie（由 `_apply_existing_session` 写入）。
+    """
+    try:
+        device_id = _cookie_value(session, "oai-did") or str(uuid.uuid4())
+        token = _sentinel.get_sentinel_token(
+            session,
+            device_id=device_id,
+            flow=flow,
+            user_agent=USER_AGENT,
+        )
+        if token:
+            headers["openai-sentinel-token"] = token
+    except Exception as exc:  # 不让 sentinel 失败阻断主流程，留 PoW-only fallback
+        logger.warning("[协议OAuth] sentinel token 生成失败 flow=%s: %s", flow, exc)
 
 
 def _response_json(resp) -> dict:
@@ -1365,6 +1387,7 @@ def _send_or_resend_otp(session) -> None:
     ):
         headers = _common_headers(session, referer)
         headers["Content-Type"] = "application/json"
+        _inject_sentinel_token(session, headers, flow="authorize_continue")
         resp = session.request(method, url, headers=headers, timeout=30)
         if resp.status_code == 200:
             return
@@ -1374,6 +1397,7 @@ def _send_or_resend_otp(session) -> None:
 def _authorize_continue(session, email: str, *, screen_hint: str, referer: str) -> dict[str, Any]:
     headers = _common_headers(session, referer)
     headers["Content-Type"] = "application/json"
+    _inject_sentinel_token(session, headers, flow="authorize_continue")
     resp = session.post(
         "https://auth.openai.com/api/accounts/authorize/continue",
         headers=headers,
@@ -1388,6 +1412,7 @@ def _authorize_continue(session, email: str, *, screen_hint: str, referer: str) 
 def _login_password_verify(session, password: str) -> dict[str, Any]:
     headers = _common_headers(session, "https://auth.openai.com/log-in/password")
     headers["Content-Type"] = "application/json"
+    _inject_sentinel_token(session, headers, flow="authorize_continue")
     resp = session.post(
         "https://auth.openai.com/api/accounts/password/verify",
         headers=headers,
@@ -1402,6 +1427,7 @@ def _login_password_verify(session, password: str) -> dict[str, Any]:
 def _validate_email_otp(session, otp_code: str) -> dict[str, Any]:
     headers = _common_headers(session, "https://auth.openai.com/email-verification")
     headers["Content-Type"] = "application/json"
+    _inject_sentinel_token(session, headers, flow="authorize_continue")
     resp = session.post(
         "https://auth.openai.com/api/accounts/email-otp/validate",
         headers=headers,

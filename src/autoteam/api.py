@@ -2233,8 +2233,12 @@ def get_standby():
 
 
 @app.delete("/api/accounts/{email}")
-def delete_account(email: str):
-    """删除本地管理账号及其关联资源。"""
+def delete_account(email: str, sync_cpa_after: bool = True):
+    """删除本地管理账号及其关联资源。
+
+    sync_cpa_after=false 时跳过尾部 sync_to_cpa 同步，便于批量删除时由调用方
+    在末尾统一触发一次同步，避免每个 DELETE 都阻塞数分钟。
+    """
     if not _playwright_lock.acquire(blocking=False):
         running = _tasks.get(_current_task_id, {})
         raise HTTPException(
@@ -2260,7 +2264,11 @@ def delete_account(email: str):
         if not any(a["email"].lower() == email.lower() for a in accounts):
             raise HTTPException(status_code=404, detail="账号不存在")
 
-        cleanup = _pw_executor.run(delete_managed_account, email)
+        cleanup = _pw_executor.run(
+            delete_managed_account,
+            email,
+            sync_cpa_after=sync_cpa_after,
+        )
         return {
             "message": "账号删除完成",
             "deleted_email": email,
