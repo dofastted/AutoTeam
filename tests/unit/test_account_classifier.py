@@ -183,3 +183,71 @@ def test_derive_category_is_pure_function():
 
     assert category == "inventory"
     assert "category" not in account
+
+
+def _make_account(**overrides):
+    account = {
+        "email": "user@example.com",
+        "registration_status": REGISTRATION_REGISTERED,
+        "health_status": HEALTH_VALID,
+        "usage_status": "normal",
+        "sync_disabled": False,
+    }
+    account.update(overrides)
+    return account
+
+
+def test_classifier_in_use_with_allocation_metadata():
+    account = _make_account(
+        usage_status=USAGE_IN_USE,
+        cpa_status="success",
+        rt_auth_file="auths/example-oauth.json",
+        allocation={"allocated_to": "worker-1", "project": "proj-a"},
+    )
+
+    result = classify_account(account)
+
+    assert result["category"] == "in_use"
+    assert result["usage_status"] == USAGE_IN_USE
+
+
+def test_classifier_not_registered_for_registering_status():
+    account = _make_account(registration_status="registering")
+
+    result = classify_account(account)
+
+    assert result["category"] == "not_registered"
+
+
+def test_classifier_quota_exhausted_in_use_is_not_invalid():
+    account = _make_account(
+        health_status=HEALTH_QUOTA_EXHAUSTED,
+        usage_status=USAGE_IN_USE,
+        allocation={"allocated_to": "worker-1"},
+    )
+
+    result = classify_account(account)
+
+    assert result["category"] == "in_use"
+
+
+def test_classifier_main_account_keeps_current_inventory_behavior():
+    account = _make_account(
+        is_main_account=True,
+        cpa_status="success",
+        rt_auth_file="auths/main-oauth.json",
+    )
+
+    result = classify_account(account)
+
+    assert result["category"] == "inventory"
+    assert result["usage_status"] == "inventory"
+
+
+def test_classifier_email_only_account_falls_back_without_error():
+    account = {"email": "only@example.com"}
+
+    result = classify_account(account)
+
+    assert result["category"] == "not_registered"
+    assert result["email"] == "only@example.com"
