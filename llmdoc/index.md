@@ -25,11 +25,16 @@
 
 - `llmdoc/guides/local-development.md`: 本地安装、测试、前端构建、启动。
 - `llmdoc/guides/cpa-oauth-and-fill.md`: OAuth 登录页 CPA 凭证检查与 10 个一批补位流程。
+- `llmdoc/guides/account-management-howto.md`: 账号列表、详情、清理、分配释放、主号守卫。
+- `llmdoc/guides/account-ledger-tracing.md`: 账号事件 ledger 的手动接入和历史查询。
+- `llmdoc/guides/account-csv-export-import.md`: 库存 CSV、已售 CSV、外部 CSV dry-run 导入。
 
 ## 参考
 
 - `llmdoc/reference/config-data-files.md`: `.env`、`accounts.json`、`state.json`、`auths/` 等数据文件。
 - `llmdoc/reference/module-map.md`: 主要 Python / Vue 模块职责。
+- `llmdoc/reference/account-status-axes.md`: 四轴状态枚举、旧 `status` 迁移、`category` 派生。
+- `llmdoc/reference/account-data-schema.md`: V2 嵌套结构、兼容平铺字段、凭证与导出口径。
 
 ## 记忆
 
