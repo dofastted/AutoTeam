@@ -9,6 +9,7 @@
 - `OUTBOUND_PROXY_BYPASS=localhost,127.0.0.1,::1`: 本地地址默认直连。
 - `OUTBOUND_PROXY_STRATEGY=task-sticky`: 一次任务内固定一个代理。
 - `OUTBOUND_PROXY_FAILOVER=true`: 网络失败后尝试下一个代理。
+- `PROXY_NODE_PROVIDER=webshare`: 可选代理节点接口。启用后可从 Webshare 拉取 / refresh 节点，并写入 `OUTBOUND_PROXY_POOL`。
 
 支持的代理值：
 
@@ -30,6 +31,18 @@
 - `src/autoteam/setup_wizard.py`: 配置连通性验证。
 
 `src/autoteam/codex_hook.py` 也使用同一工具，但它访问 `http://127.0.0.1:8787`，按默认绕过规则直连本地 API。
+
+## 代理节点接口
+
+`src/autoteam/proxy_nodes.py`: 迁移自 `Gpt-Agreement-Payment/pipeline.py` 的 Webshare 节点 API 能力。
+
+确认行为：
+
+- `GET /api/proxy-nodes/status`: 读取节点接口配置、当前节点和最近一次刷新结果。
+- `POST /api/proxy-nodes/refresh`: 调用 Webshare 当前节点、替换额度、refresh、轮询新节点，然后按 `PROXY_NODE_PROTOCOL` 生成 `http` / `socks5` / `socks5h` 代理 URL。
+- `PROXY_NODE_APPLY_TO_OUTBOUND_POOL=true` 时，把生成的代理 URL 写入当前进程的 `OUTBOUND_PROXY_POOL`。
+- `PROXY_NODE_AUTO_REFRESH=true` 且 `PROXY_NODE_REFRESH_BEFORE_TASK=true` 时，`src/autoteam/api.py` (`_run_task`) 会在任务进入 `task_proxy_context` 前刷新节点。
+- 自动巡检每轮检查前也会尝试刷新节点；失败只记录警告，不阻断本轮检查。
 
 ## Playwright
 

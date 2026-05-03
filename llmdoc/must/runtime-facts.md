@@ -9,6 +9,7 @@
 - ChatGPT Team 中已有 owner 或外部成员也计入目标人数。轮转目标不是“本地管理账号数”。
 - Playwright 默认隐藏运行。`PLAYWRIGHT_BROWSER_MODE=visible` 可显示窗口；`embedded` 当前按不弹窗处理。旧 `PLAYWRIGHT_HEADLESS=false` 仍兼容。配置入口是 `src/autoteam/config.py` (`get_playwright_launch_options`)。
 - 后端外部请求默认走出口代理池。`OUTBOUND_PROXY_POOL` 默认 `http://127.0.0.1:10808`，`localhost`、`127.0.0.1`、`::1` 默认直连；任务内固定一个代理，网络失败后可尝试下一个。
+- 代理节点接口由 `src/autoteam/proxy_nodes.py` 管理。当前支持 `PROXY_NODE_PROVIDER=webshare`，可通过 `POST /api/proxy-nodes/refresh` 调节点 API 轮询新节点，并按 `PROXY_NODE_PROTOCOL=http/socks5/socks5h` 写入 `OUTBOUND_PROXY_POOL`。`PROXY_NODE_AUTO_REFRESH=true` 时，API 后台任务和自动巡检会在业务动作前先尝试刷新节点。
 - `BROWSER_PARALLEL_WORKERS` 控制账号补满、轮转和直注批量任务的新号创建并行窗口数，范围 `1..3`，默认 `1`。API 业务任务仍由 `src/autoteam/api.py` (`_playwright_lock`) 串行调度。
 - CPA 批量直注的并行窗口由 `src/autoteam/cpa_batch.py` 自己调度。注册阶段必须先创建邮箱、完成注册入席、确认 `https://chatgpt.com/admin/members` 可访问、拿到 ChatGPT session 备份，并在同一个注册浏览器上下文内完成 Codex PKCE OAuth 生成 OAuth RT 文件；注册后的 workspace / organization 选择页由 `src/autoteam/chatgpt_api.py` (`complete_workspace_selection`) 处理。浏览器错误、认证错误页、成员页不可访问、缺少 session 凭证或缺少 OAuth RT 时，当前邮箱失败并换新邮箱，不做 Team 成员检查兜底。direct 单窗口 `parallel_workers=1` 时，一个账号完成注册、OAuth RT 文件落盘、CPA 上传和可选 Sub2API 同步后，才会创建下一个账号；`parallel_workers>1` 允许注册并行，CPA worker 不占用注册浏览器槽位。
 - CPA 云端上传只使用 OAuth RT auth 文件。`src/autoteam/cpa_batch.py` (`_create_direct_account`) 优先在注册浏览器内通过 `src/autoteam/protocol_oauth.py` (`run_protocol_oauth_login_with_browser_context`) 生成 `-oauth.json`；`_verify_and_upload_cpa` 缺少 RT 文件时才调用 `src/autoteam/account_oauth.py` (`run_account_oauth_login`) 作为后备，随后检查额度并上传 CPA。

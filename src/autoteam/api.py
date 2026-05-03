@@ -1,9 +1,9 @@
 """AutoTeam HTTP API - 将 CLI 功能暴露为 HTTP 接口"""
 
+import asyncio
 import json
 import logging
 import os
-import asyncio
 import threading
 import time
 import uuid
@@ -146,6 +146,7 @@ _SUB2API_REQUIRED_KEYS = ("SUB2API_URL", "SUB2API_EMAIL", "SUB2API_PASSWORD")
 _SYNC_TARGET_TOGGLE_KEYS = ("SYNC_TARGET_CPA", "SYNC_TARGET_SUB2API")
 _CPA_VERIFY_KEYS = ("SYNC_TARGET_CPA", *_CPA_REQUIRED_KEYS)
 _SUB2API_VERIFY_KEYS = ("SYNC_TARGET_SUB2API", "SUB2API_GROUP", *_SUB2API_REQUIRED_KEYS)
+_PROXY_NODE_REQUIRED_KEYS = ("PROXY_NODE_API_KEY", "PROXY_NODE_BASE_URL", "PROXY_NODE_PROTOCOL")
 
 _ALL_RUNTIME_ENV_KEYS = [
     "MAIL_PROVIDER",
@@ -192,6 +193,17 @@ _ALL_RUNTIME_ENV_KEYS = [
     "OUTBOUND_PROXY_BYPASS",
     "OUTBOUND_PROXY_STRATEGY",
     "OUTBOUND_PROXY_FAILOVER",
+    "PROXY_NODE_ENABLED",
+    "PROXY_NODE_PROVIDER",
+    "PROXY_NODE_API_KEY",
+    "PROXY_NODE_BASE_URL",
+    "PROXY_NODE_PROTOCOL",
+    "PROXY_NODE_AUTO_REFRESH",
+    "PROXY_NODE_REFRESH_BEFORE_TASK",
+    "PROXY_NODE_POLL_INTERVAL_SECONDS",
+    "PROXY_NODE_POLL_TIMEOUT_SECONDS",
+    "PROXY_NODE_COUNTRY",
+    "PROXY_NODE_APPLY_TO_OUTBOUND_POOL",
 ]
 _RUNTIME_ENV_BASE = {key: os.environ.get(key) for key in _ALL_RUNTIME_ENV_KEYS}
 _runtime_env_reload_lock = threading.Lock()
@@ -303,6 +315,17 @@ def _require_sub2api_configs(action_label: str):
     _require_runtime_configs(_SUB2API_REQUIRED_KEYS, action_label)
 
 
+def _require_proxy_node_configs(action_label: str):
+    env = _current_runtime_env()
+    provider = (env.get("PROXY_NODE_PROVIDER", "none") or "none").strip().lower()
+    enabled = (env.get("PROXY_NODE_ENABLED", "false") or "false").strip().lower() in {"1", "true", "yes", "y", "on"}
+    if not enabled or provider == "none":
+        raise HTTPException(status_code=400, detail=f"{action_label} 前请先启用代理节点接口")
+    if provider != "webshare":
+        raise HTTPException(status_code=400, detail=f"未知代理节点提供者: {provider}")
+    _require_runtime_configs(_PROXY_NODE_REQUIRED_KEYS, action_label, env=env)
+
+
 def _require_sync_target_configs(action_label: str):
     from autoteam.sync_targets import get_enabled_sync_targets
 
@@ -396,6 +419,7 @@ def _reload_runtime_config_modules():
         "autoteam.cpa_sync",
         "autoteam.sub2api_sync",
         "autoteam.outbound_proxy",
+        "autoteam.proxy_nodes",
     ):
         try:
             module = importlib.import_module(module_name)
@@ -723,6 +747,26 @@ def get_mo_email_domains():
     client = MoEmailClient()
     domains, payload = client._available_domains()
     return {"domains": domains, "config": payload}
+
+
+@app.get("/api/proxy-nodes/status")
+def get_proxy_node_status():
+    """读取代理节点接口状态。"""
+    from autoteam import proxy_nodes
+
+    return proxy_nodes.status()
+
+
+@app.post("/api/proxy-nodes/refresh")
+def post_proxy_node_refresh():
+    """调用代理节点接口刷新节点，并按配置写入出口代理池。"""
+    from autoteam import proxy_nodes
+
+    _require_proxy_node_configs("刷新代理节点")
+    result = proxy_nodes.refresh_proxy_node(force_rotate=True)
+    if result.get("applied"):
+        _reload_runtime_config_modules()
+    return result
 
 
 @app.put("/api/config/runtime")
@@ -1079,6 +1123,22 @@ def _request_stop_all_tasks(reason: str):
     return stopped
 
 
+def _maybe_refresh_proxy_node_for_task(task: dict):
+    try:
+        from autoteam import proxy_nodes
+
+        result = proxy_nodes.maybe_refresh_before_task()
+    except Exception as exc:
+        logger.warning("[代理节点] 任务前刷新失败，继续使用当前出口代理: %s", exc)
+        task["proxy_node_refresh"] = {"error": str(exc)}
+        return
+
+    if result:
+        task["proxy_node_refresh"] = result
+        if result.get("applied"):
+            _reload_runtime_config_modules()
+
+
 def _run_task(task_id: str, func, *args, **kwargs):
     """在后台线程中执行任务"""
     global _current_task_id
@@ -1104,6 +1164,7 @@ def _run_task(task_id: str, func, *args, **kwargs):
     task["started_at"] = time.time()
 
     try:
+        _maybe_refresh_proxy_node_for_task(task)
         with outbound_proxy.task_proxy_context() as proxy_url:
             task["proxy_url"] = proxy_url or "direct"
             logger.info("[API] 任务 %s 使用出口代理: %s", task_id[:8], proxy_url or "direct")

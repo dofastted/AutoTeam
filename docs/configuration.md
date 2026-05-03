@@ -38,6 +38,14 @@ cp .env.example .env
 | `OUTBOUND_PROXY_BYPASS` | 出口代理绕过列表 | 否（默认 `localhost,127.0.0.1,::1`） |
 | `OUTBOUND_PROXY_STRATEGY` | 出口代理选择策略 | 否（当前为 `task-sticky`） |
 | `OUTBOUND_PROXY_FAILOVER` | 网络失败后是否尝试下一个代理 | 否（默认 `true`） |
+| `PROXY_NODE_ENABLED` | 是否启用代理节点接口 | 否（默认 `false`） |
+| `PROXY_NODE_PROVIDER` | 节点提供者，当前支持 `none` / `webshare` | 否（默认 `none`） |
+| `PROXY_NODE_API_KEY` | 节点 API Key | 否 |
+| `PROXY_NODE_BASE_URL` | 节点 API 地址 | 否（默认 Webshare API v2） |
+| `PROXY_NODE_PROTOCOL` | 写入出口池的协议，支持 `http`、`socks5`、`socks5h` | 否（默认 `http`） |
+| `PROXY_NODE_AUTO_REFRESH` | 自动化任务和巡检前是否轮询刷新节点 | 否（默认 `false`） |
+| `PROXY_NODE_POLL_INTERVAL_SECONDS` | 等待新节点时的轮询间隔 | 否（默认 `5`） |
+| `PROXY_NODE_POLL_TIMEOUT_SECONDS` | 等待新节点的超时秒数 | 否（默认 `120`） |
 | `PLAYWRIGHT_PROXY_URL` | Playwright 浏览器代理 URL，如 `socks5://host:port` 或 `http://user:pass@host:port` | 否 |
 | `PLAYWRIGHT_PROXY_BYPASS` | Playwright 代理绕过列表，如 `localhost,127.0.0.1` | 否 |
 | `AUTO_CHECK_THRESHOLD` | 额度低于此百分比触发轮转 | 否（默认 `10`） |
@@ -142,6 +150,32 @@ OUTBOUND_PROXY_FAILOVER=true
 - `OUTBOUND_PROXY_POOL` 支持逗号或换行分隔，支持 `http`、`https`、`socks5`、`socks5h`，也支持 `direct` / `none` 表示直连。
 - `localhost`、`127.0.0.1`、`::1` 默认不走代理，避免影响 OAuth 本地回调和本地 API。
 - 如果使用 `socks5`，当前 Python 环境需要安装 `requests[socks]`；否则请改用 HTTP 代理。
+
+### 代理节点接口
+
+AutoTeam 可从代理节点 API 获取最新节点，并写入 `OUTBOUND_PROXY_POOL`。当前迁移的是 `Gpt-Agreement-Payment` 中的 Webshare 节点逻辑：读取当前代理、触发 refresh、按间隔轮询到新 IP 后格式化为代理 URL。
+
+```dotenv
+PROXY_NODE_ENABLED=true
+PROXY_NODE_PROVIDER=webshare
+PROXY_NODE_API_KEY=your_webshare_api_key
+PROXY_NODE_BASE_URL=https://proxy.webshare.io/api/v2
+PROXY_NODE_PROTOCOL=http
+PROXY_NODE_AUTO_REFRESH=false
+PROXY_NODE_REFRESH_BEFORE_TASK=true
+PROXY_NODE_POLL_INTERVAL_SECONDS=5
+PROXY_NODE_POLL_TIMEOUT_SECONDS=120
+PROXY_NODE_COUNTRY=US
+PROXY_NODE_APPLY_TO_OUTBOUND_POOL=true
+```
+
+说明：
+
+- 手动刷新接口是 `POST /api/proxy-nodes/refresh`。
+- 状态接口是 `GET /api/proxy-nodes/status`。
+- `PROXY_NODE_PROTOCOL=http` 会生成 `http://user:pass@host:port`；`socks5` / `socks5h` 会生成对应协议的 URL。
+- `PROXY_NODE_AUTO_REFRESH=true` 时，API 后台任务开始前会先调用节点接口刷新，再用刷新后的代理进入任务固定上下文。
+- 自动巡检线程也会在每轮检查前刷新节点；失败时只记录警告，本轮继续使用现有出口代理。
 
 ### Playwright 覆盖代理
 

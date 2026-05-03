@@ -24,7 +24,8 @@ outbound_proxy = importlib.reload(outbound_proxy)
 
 
 def _get_int_env(name: str, default: int) -> int:
-    return int(parse_env_value(os.environ.get(name, str(default))))
+    raw = parse_env_value(os.environ.get(name, str(default))).strip()
+    return int(raw) if raw else default
 
 
 def _get_bool_env(name: str, default: bool) -> bool:
@@ -93,6 +94,19 @@ OUTBOUND_PROXY_POOL = os.environ.get("OUTBOUND_PROXY_POOL", outbound_proxy.DEFAU
 OUTBOUND_PROXY_BYPASS = os.environ.get("OUTBOUND_PROXY_BYPASS", outbound_proxy.DEFAULT_BYPASS).strip()
 OUTBOUND_PROXY_STRATEGY = os.environ.get("OUTBOUND_PROXY_STRATEGY", "task-sticky").strip() or "task-sticky"
 OUTBOUND_PROXY_FAILOVER = _get_bool_env("OUTBOUND_PROXY_FAILOVER", True)
+
+# 代理节点接口配置。当前 provider 迁移自 Gpt-Agreement-Payment 的 Webshare 节点 API。
+PROXY_NODE_ENABLED = _get_bool_env("PROXY_NODE_ENABLED", False)
+PROXY_NODE_PROVIDER = os.environ.get("PROXY_NODE_PROVIDER", "none").strip().lower() or "none"
+PROXY_NODE_API_KEY = os.environ.get("PROXY_NODE_API_KEY", "").strip()
+PROXY_NODE_BASE_URL = os.environ.get("PROXY_NODE_BASE_URL", "https://proxy.webshare.io/api/v2").strip()
+PROXY_NODE_PROTOCOL = os.environ.get("PROXY_NODE_PROTOCOL", "http").strip().lower() or "http"
+PROXY_NODE_AUTO_REFRESH = _get_bool_env("PROXY_NODE_AUTO_REFRESH", False)
+PROXY_NODE_REFRESH_BEFORE_TASK = _get_bool_env("PROXY_NODE_REFRESH_BEFORE_TASK", True)
+PROXY_NODE_POLL_INTERVAL_SECONDS = _get_int_env("PROXY_NODE_POLL_INTERVAL_SECONDS", 5)
+PROXY_NODE_POLL_TIMEOUT_SECONDS = _get_int_env("PROXY_NODE_POLL_TIMEOUT_SECONDS", 120)
+PROXY_NODE_COUNTRY = os.environ.get("PROXY_NODE_COUNTRY", "").strip().upper()
+PROXY_NODE_APPLY_TO_OUTBOUND_POOL = _get_bool_env("PROXY_NODE_APPLY_TO_OUTBOUND_POOL", True)
 
 # Playwright 代理配置
 _PLAYWRIGHT_BROWSER_MODES = {"hidden", "visible", "embedded"}

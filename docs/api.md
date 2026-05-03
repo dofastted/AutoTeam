@@ -26,6 +26,8 @@ Authorization: Bearer <API_KEY>
 | PUT | `/api/config/runtime` | 保存运行配置 |
 | GET | `/api/config/source` | 读取 `.env` 源文件 |
 | PUT | `/api/config/source` | 保存 `.env` 源文件 |
+| GET | `/api/proxy-nodes/status` | 查看代理节点接口状态、当前节点和最近刷新结果 |
+| POST | `/api/proxy-nodes/refresh` | 调用代理节点接口刷新节点，并按配置写入出口代理池 |
 | GET | `/api/status` | 账号状态 + 实时额度 |
 | GET | `/api/accounts` | 所有账号列表 |
 | GET | `/api/accounts/active` | 活跃账号 |

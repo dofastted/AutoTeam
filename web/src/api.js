@@ -87,6 +87,8 @@ export const api = {
   getRuntimeConfigSource: () => request('GET', '/config/source'),
   saveRuntimeConfigSource: (payload) => request('PUT', '/config/source', payload),
   getMoEmailDomains: () => request('GET', '/mail/mo-email/domains'),
+  getProxyNodeStatus: () => request('GET', '/proxy-nodes/status'),
+  refreshProxyNode: () => request('POST', '/proxy-nodes/refresh'),
 
   getStatus: ({ realtimeQuota = false } = {}) => request('GET', `/status?realtime_quota=${realtimeQuota ? 'true' : 'false'}`),
   getAdminStatus: () => request('GET', '/admin/status'),

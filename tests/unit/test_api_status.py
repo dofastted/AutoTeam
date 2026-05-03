@@ -707,6 +707,17 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
                 "OUTBOUND_PROXY_BYPASS=localhost,127.0.0.1,::1",
                 "OUTBOUND_PROXY_STRATEGY=task-sticky",
                 "OUTBOUND_PROXY_FAILOVER=true",
+                "PROXY_NODE_ENABLED=true",
+                "PROXY_NODE_PROVIDER=webshare",
+                "PROXY_NODE_API_KEY=node-key",
+                "PROXY_NODE_BASE_URL=https://proxy.webshare.io/api/v2",
+                "PROXY_NODE_PROTOCOL=socks5",
+                "PROXY_NODE_AUTO_REFRESH=true",
+                "PROXY_NODE_REFRESH_BEFORE_TASK=true",
+                "PROXY_NODE_POLL_INTERVAL_SECONDS=5",
+                "PROXY_NODE_POLL_TIMEOUT_SECONDS=120",
+                "PROXY_NODE_COUNTRY=US",
+                "PROXY_NODE_APPLY_TO_OUTBOUND_POOL=true",
                 "API_KEY=runtime-key",
             ]
         ),
@@ -732,6 +743,17 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
         "OUTBOUND_PROXY_BYPASS",
         "OUTBOUND_PROXY_STRATEGY",
         "OUTBOUND_PROXY_FAILOVER",
+        "PROXY_NODE_ENABLED",
+        "PROXY_NODE_PROVIDER",
+        "PROXY_NODE_API_KEY",
+        "PROXY_NODE_BASE_URL",
+        "PROXY_NODE_PROTOCOL",
+        "PROXY_NODE_AUTO_REFRESH",
+        "PROXY_NODE_REFRESH_BEFORE_TASK",
+        "PROXY_NODE_POLL_INTERVAL_SECONDS",
+        "PROXY_NODE_POLL_TIMEOUT_SECONDS",
+        "PROXY_NODE_COUNTRY",
+        "PROXY_NODE_APPLY_TO_OUTBOUND_POOL",
         "API_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -755,6 +777,11 @@ def test_get_runtime_config_returns_current_values_from_env_file(tmp_path, monke
     assert fields["OUTBOUND_PROXY_POOL"]["value"] == "http://127.0.0.1:10808"
     assert fields["OUTBOUND_PROXY_BYPASS"]["value"] == "localhost,127.0.0.1,::1"
     assert fields["OUTBOUND_PROXY_FAILOVER"]["value"] == "true"
+    assert fields["PROXY_NODE_ENABLED"]["value"] == "true"
+    assert fields["PROXY_NODE_PROVIDER"]["value"] == "webshare"
+    assert fields["PROXY_NODE_PROTOCOL"]["value"] == "socks5"
+    assert fields["PROXY_NODE_AUTO_REFRESH"]["value"] == "true"
+    assert fields["PROXY_NODE_COUNTRY"]["value"] == "US"
     assert fields["API_KEY"]["value"] == "runtime-key"
     assert fields["API_KEY"]["runtime_required"] is True
 
@@ -1051,6 +1078,52 @@ def test_runtime_env_file_hot_reload_updates_current_process_without_restart(tmp
     assert api.os.environ["CPA_URL"] == "http://100.78.125.121:8317"
     assert api.os.environ["CPA_KEY"] == "external-key"
     assert api.API_KEY == "new-key"
+
+
+def test_run_task_refreshes_proxy_node_before_selecting_task_proxy(monkeypatch):
+    import importlib
+
+    task_id = "taskproxy123"
+    api._tasks[task_id] = {
+        "task_id": task_id,
+        "command": "test",
+        "params": {},
+        "status": "pending",
+        "created_at": time.time(),
+        "started_at": None,
+        "finished_at": None,
+        "result": None,
+        "error": None,
+    }
+
+    monkeypatch.setattr(api, "_reload_runtime_config_modules", lambda: None)
+    monkeypatch.setenv("OUTBOUND_PROXY_ENABLED", "true")
+    monkeypatch.setenv("OUTBOUND_PROXY_POOL", "http://old-proxy:8080")
+    monkeypatch.setenv("PROXY_NODE_ENABLED", "true")
+    monkeypatch.setenv("PROXY_NODE_PROVIDER", "webshare")
+    monkeypatch.setenv("PROXY_NODE_AUTO_REFRESH", "true")
+    monkeypatch.setenv("PROXY_NODE_REFRESH_BEFORE_TASK", "true")
+    importlib.reload(api.outbound_proxy)
+
+    def fake_refresh():
+        api.os.environ["OUTBOUND_PROXY_POOL"] = "http://new-proxy:8080"
+        importlib.reload(api.outbound_proxy)
+        return {"applied": True, "proxy_url": "http://new-proxy:8080"}
+
+    monkeypatch.setattr("autoteam.proxy_nodes.maybe_refresh_before_task", fake_refresh)
+
+    def task_func():
+        return {"proxy": api.outbound_proxy.current_proxy_url()}
+
+    try:
+        api._run_task(task_id, task_func)
+        task = api._tasks[task_id]
+        assert task["status"] == "completed"
+        assert task["proxy_url"] == "http://new-proxy:8080"
+        assert task["result"] == {"proxy": "http://new-proxy:8080"}
+        assert task["proxy_node_refresh"]["proxy_url"] == "http://new-proxy:8080"
+    finally:
+        api._tasks.pop(task_id, None)
 
 
 @pytest.mark.parametrize(

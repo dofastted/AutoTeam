@@ -319,104 +319,316 @@
         </div>
       </div>
 
-      <div v-else-if="selectedRuntimeCategory === 'proxy'" class="space-y-4">
-        <div class="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <div class="mb-4">
-            <div class="text-sm font-medium text-white">浏览器显示方式</div>
-            <div class="mt-1 text-xs leading-5 text-slate-400">
-              控制 Playwright 自动化浏览器是否弹出窗口。隐藏和内嵌模式都不会弹出独立窗口。
-            </div>
-          </div>
-          <select
-            v-model="runtimeForm.PLAYWRIGHT_BROWSER_MODE"
-            class="input-dark"
-            @change="syncBrowserModeCompatibility"
+      <div v-else-if="selectedRuntimeCategory === 'proxy'" class="space-y-5">
+        <div class="grid gap-5 lg:grid-cols-[240px_minmax(0,1fr)]">
+          <nav
+            class="rounded-2xl border border-white/10 bg-white/5 p-2"
+            aria-label="代理配置菜单"
           >
-            <option value="hidden">隐藏</option>
-            <option value="embedded">内嵌</option>
-            <option value="visible">可见窗口</option>
-          </select>
-        </div>
+            <button
+              v-for="item in proxyMenuSections"
+              :key="item.key"
+              type="button"
+              @click="proxyMenuSection = item.key"
+              :aria-pressed="proxyMenuSection === item.key"
+              class="group flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+              :class="proxyMenuSection === item.key ? 'bg-blue-500/15 text-blue-100' : 'text-slate-300'"
+            >
+              <span
+                class="mt-1 h-2.5 w-2.5 shrink-0 rounded-full"
+                :class="item.dotClass"
+              ></span>
+              <span class="min-w-0">
+                <span class="block text-sm font-medium">{{ item.label }}</span>
+                <span class="mt-1 block text-xs leading-5 text-slate-500 group-hover:text-slate-400">
+                  {{ item.description }}
+                </span>
+              </span>
+            </button>
+          </nav>
 
-        <div v-if="fieldByKey('BROWSER_PARALLEL_WORKERS')" class="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <div class="mb-4">
-            <div class="text-sm font-medium text-white">并行窗口数</div>
-            <div class="mt-1 text-xs leading-5 text-slate-400">
-              账号补满、轮转和直注批量任务最多可同时启动 3 个独立浏览器。
-            </div>
-          </div>
-          <input
-            v-model.number="runtimeForm.BROWSER_PARALLEL_WORKERS"
-            type="number"
-            min="1"
-            max="3"
-            class="input-dark"
-          />
-        </div>
-
-        <div class="rounded-2xl border border-white/10 bg-white/5 p-5">
-          <div class="mb-4 flex items-center justify-between gap-4">
-            <div>
-              <div class="text-sm font-medium text-white">出口代理池</div>
-              <div class="mt-1 text-xs leading-5 text-slate-400">
-                后端访问 OpenAI、邮箱服务、CPA 和 Sub2API 时使用。默认走 Windows Clash。
+          <div class="min-w-0 space-y-4">
+            <div class="rounded-2xl border border-white/10 bg-white/5 p-5">
+              <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <div class="text-sm font-medium text-white">{{ currentProxyMenuMeta.label }}</div>
+                  <div class="mt-1 text-xs leading-5 text-slate-400">
+                    {{ currentProxyMenuMeta.longDescription }}
+                  </div>
+                </div>
+                <div class="status-badge text-xs text-slate-400">
+                  {{ currentProxyMenuStatus }}
+                </div>
               </div>
             </div>
-            <div class="status-badge text-xs text-slate-400">
-              {{ outboundProxyEnabled ? '已启用' : '已关闭' }}
+
+            <div v-if="proxyMenuSection === 'browser'" class="space-y-4">
+              <div class="rounded-2xl border border-white/10 bg-white/5 p-5">
+                <div class="mb-4">
+                  <div class="text-sm font-medium text-white">浏览器显示方式</div>
+                  <div class="mt-1 text-xs leading-5 text-slate-400">
+                    控制 Playwright 自动化浏览器是否弹出窗口。隐藏和内嵌模式都不会弹出独立窗口。
+                  </div>
+                </div>
+                <select
+                  v-model="runtimeForm.PLAYWRIGHT_BROWSER_MODE"
+                  class="input-dark"
+                  @change="syncBrowserModeCompatibility"
+                >
+                  <option value="hidden">隐藏</option>
+                  <option value="embedded">内嵌</option>
+                  <option value="visible">可见窗口</option>
+                </select>
+              </div>
+
+              <div v-if="fieldByKey('BROWSER_PARALLEL_WORKERS')" class="rounded-2xl border border-white/10 bg-white/5 p-5">
+                <div class="mb-4">
+                  <div class="text-sm font-medium text-white">并行窗口数</div>
+                  <div class="mt-1 text-xs leading-5 text-slate-400">
+                    账号补满、轮转和直注批量任务最多可同时启动 3 个独立浏览器。
+                  </div>
+                </div>
+                <input
+                  v-model.number="runtimeForm.BROWSER_PARALLEL_WORKERS"
+                  type="number"
+                  min="1"
+                  max="3"
+                  class="input-dark"
+                />
+              </div>
             </div>
-          </div>
-          <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <div v-for="field in outboundProxyFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
-              <label class="mb-2 block text-sm font-medium text-slate-300">
-                {{ field.prompt }}
-                <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
-              </label>
-              <select
-                v-if="isToggleField(field.key)"
-                v-model="runtimeForm[field.key]"
-                class="input-dark"
+
+            <div v-else-if="proxyMenuSection === 'outbound'" class="rounded-2xl border border-white/10 bg-white/5 p-5">
+              <div class="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <div class="text-sm font-medium text-white">出口代理池</div>
+                  <div class="mt-1 text-xs leading-5 text-slate-400">
+                    后端访问 OpenAI、邮箱服务、CPA 和 Sub2API 时使用。默认走 Windows Clash。
+                  </div>
+                </div>
+                <div class="status-badge text-xs text-slate-400">
+                  {{ outboundProxyEnabled ? '已启用' : '已关闭' }}
+                </div>
+              </div>
+              <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                <div v-for="field in outboundProxyFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+                  <label class="mb-2 block text-sm font-medium text-slate-300">
+                    {{ field.prompt }}
+                    <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+                  </label>
+                  <select
+                    v-if="isToggleField(field.key)"
+                    v-model="runtimeForm[field.key]"
+                    class="input-dark"
+                  >
+                    <option value="true">启用</option>
+                    <option value="false">关闭</option>
+                  </select>
+                  <input
+                    v-else
+                    v-model="runtimeForm[field.key]"
+                    :type="fieldInputType(field.key)"
+                    :placeholder="field.default || ''"
+                    class="input-dark"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div v-else-if="proxyMenuSection === 'node'" class="space-y-4">
+              <div class="rounded-2xl border border-white/10 bg-white/5 p-5">
+                <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                  <div>
+                    <div class="text-sm font-medium text-white">代理节点状态</div>
+                    <div class="mt-1 text-xs leading-5 text-slate-400">
+                      状态读取和手动刷新使用后端已经保存的配置。改完字段后先保存，再刷新节点。
+                    </div>
+                  </div>
+                  <div class="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      @click="loadProxyNodeStatus"
+                      :disabled="proxyNodeLoading"
+                      class="btn-secondary"
+                    >
+                      {{ proxyNodeLoading ? '读取中...' : '读取状态' }}
+                    </button>
+                    <button
+                      type="button"
+                      @click="refreshProxyNode"
+                      :disabled="proxyNodeRefreshing || !proxyNodeCanRefresh"
+                      class="btn-primary"
+                    >
+                      {{ proxyNodeRefreshing ? '刷新中...' : '刷新节点' }}
+                    </button>
+                  </div>
+                </div>
+
+                <div
+                  v-if="proxyNodeMessage"
+                  class="mt-4 rounded-2xl border px-4 py-3 text-sm"
+                  :class="proxyNodeMessageClass"
+                >
+                  {{ proxyNodeMessage }}
+                </div>
+
+                <div class="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  <div class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+                    <div class="text-xs text-slate-500">接口状态</div>
+                    <div class="mt-2 text-sm font-medium text-white">{{ proxyNodeStatusEnabledText }}</div>
+                  </div>
+                  <div class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+                    <div class="text-xs text-slate-500">提供者</div>
+                    <div class="mt-2 text-sm font-medium text-white">{{ proxyNodeStatusProviderText }}</div>
+                  </div>
+                  <div class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+                    <div class="text-xs text-slate-500">当前出口池</div>
+                    <div class="mt-2 break-all font-mono text-xs text-slate-200">{{ proxyNodeOutboundPoolText }}</div>
+                  </div>
+                  <div class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+                    <div class="text-xs text-slate-500">最近刷新</div>
+                    <div class="mt-2 text-sm font-medium text-white">{{ proxyNodeLastRefreshText }}</div>
+                  </div>
+                </div>
+
+                <div class="mt-4 grid gap-3 lg:grid-cols-2">
+                  <div class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+                    <div class="mb-2 text-xs text-slate-500">当前节点</div>
+                    <div class="break-all font-mono text-xs leading-5 text-slate-200">
+                      {{ proxyNodeCurrentText }}
+                    </div>
+                  </div>
+                  <div class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+                    <div class="mb-2 text-xs text-slate-500">刷新结果</div>
+                    <div class="break-all font-mono text-xs leading-5 text-slate-200">
+                      {{ proxyNodeRefreshResultText }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="rounded-2xl border border-white/10 bg-white/5 p-5">
+                <div class="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <div class="text-sm font-medium text-white">接口连接</div>
+                    <div class="mt-1 text-xs leading-5 text-slate-400">
+                      选择节点提供者、协议和 API 地址。当前只支持 Webshare。
+                    </div>
+                  </div>
+                  <div class="status-badge text-xs text-slate-400">
+                    {{ proxyNodeEnabled ? '已启用' : '已关闭' }}
+                  </div>
+                </div>
+                <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  <div v-for="field in proxyNodeConnectionFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+                    <label class="mb-2 block text-sm font-medium text-slate-300">
+                      {{ field.prompt }}
+                      <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+                    </label>
+                    <select
+                      v-if="field.key === 'PROXY_NODE_PROVIDER'"
+                      v-model="runtimeForm[field.key]"
+                      class="input-dark"
+                    >
+                      <option value="none">不使用</option>
+                      <option value="webshare">Webshare</option>
+                    </select>
+                    <select
+                      v-else-if="field.key === 'PROXY_NODE_PROTOCOL'"
+                      v-model="runtimeForm[field.key]"
+                      class="input-dark"
+                    >
+                      <option value="http">HTTP</option>
+                      <option value="socks5">SOCKS5</option>
+                      <option value="socks5h">SOCKS5H</option>
+                    </select>
+                    <select
+                      v-else-if="isToggleField(field.key)"
+                      v-model="runtimeForm[field.key]"
+                      class="input-dark"
+                    >
+                      <option value="true">启用</option>
+                      <option value="false">关闭</option>
+                    </select>
+                    <input
+                      v-else
+                      v-model="runtimeForm[field.key]"
+                      :type="fieldInputType(field.key)"
+                      :placeholder="field.default || ''"
+                      class="input-dark"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div class="rounded-2xl border border-white/10 bg-white/5 p-5">
+                <div class="mb-4">
+                  <div class="text-sm font-medium text-white">刷新行为</div>
+                  <div class="mt-1 text-xs leading-5 text-slate-400">
+                    设置任务前是否自动刷新、等待新节点的间隔和超时，以及是否写入出口代理池。
+                  </div>
+                </div>
+                <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  <div v-for="field in proxyNodeRefreshFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+                    <label class="mb-2 block text-sm font-medium text-slate-300">
+                      {{ field.prompt }}
+                      <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+                    </label>
+                    <select
+                      v-if="isToggleField(field.key)"
+                      v-model="runtimeForm[field.key]"
+                      class="input-dark"
+                    >
+                      <option value="true">启用</option>
+                      <option value="false">关闭</option>
+                    </select>
+                    <input
+                      v-else
+                      v-model="runtimeForm[field.key]"
+                      :type="fieldInputType(field.key)"
+                      :placeholder="field.default || ''"
+                      class="input-dark"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div v-else-if="proxyMenuSection === 'advanced'" class="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <button
+                type="button"
+                @click="proxyExpanded = !proxyExpanded"
+                :aria-expanded="proxyExpanded"
+                aria-controls="proxy-advanced-fields"
+                class="flex w-full items-center justify-between gap-4 rounded-xl px-1 py-1 text-left focus:outline-none focus:ring-2 focus:ring-blue-500/30"
               >
-                <option value="true">启用</option>
-                <option value="false">关闭</option>
-              </select>
-              <input
-                v-else
-                v-model="runtimeForm[field.key]"
-                :type="fieldInputType(field.key)"
-                :placeholder="field.default || ''"
-                class="input-dark"
-              />
-            </div>
-          </div>
-        </div>
+                <div>
+                  <div class="text-sm font-medium text-white">高级代理设置</div>
+                  <div class="mt-1 text-xs leading-5 text-slate-400">
+                    只有浏览器流量需要覆盖出口代理池时才填写。默认保持折叠，避免误改。
+                  </div>
+                </div>
+                <span class="text-xs text-slate-400">{{ proxyExpanded ? '收起' : '展开' }}</span>
+              </button>
 
-        <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
-          <button
-            @click="proxyExpanded = !proxyExpanded"
-            class="flex w-full items-center justify-between gap-4 text-left"
-          >
-            <div>
-              <div class="text-sm font-medium text-white">高级代理设置</div>
-              <div class="mt-1 text-xs leading-5 text-slate-400">
-                低频配置，默认折叠。只有浏览器流量需要覆盖出口代理池时才填写。
+              <div
+                v-if="proxyExpanded"
+                id="proxy-advanced-fields"
+                class="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3"
+              >
+                <div v-for="field in proxyFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+                  <label class="mb-2 block text-sm font-medium text-slate-300">
+                    {{ field.prompt }}
+                    <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+                  </label>
+                  <input
+                    v-model="runtimeForm[field.key]"
+                    :type="fieldInputType(field.key)"
+                    :placeholder="field.default || ''"
+                    class="input-dark"
+                  />
+                </div>
               </div>
-            </div>
-            <span class="text-xs text-slate-400">{{ proxyExpanded ? '收起' : '展开' }}</span>
-          </button>
-
-          <div v-if="proxyExpanded" class="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <div v-for="field in proxyFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
-              <label class="mb-2 block text-sm font-medium text-slate-300">
-                {{ field.prompt }}
-                <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
-              </label>
-              <input
-                v-model="runtimeForm[field.key]"
-                :type="fieldInputType(field.key)"
-                :placeholder="field.default || ''"
-                class="input-dark"
-              />
             </div>
           </div>
         </div>
@@ -564,7 +776,7 @@ const emit = defineEmits(['refresh', 'admin-progress'])
 const runtimeCategoryKeys = {
   cloudmail: ['MAIL_PROVIDER', 'MO_EMAIL_BASE_URL', 'MO_EMAIL_API_KEY', 'MO_EMAIL_DOMAIN', 'MO_EMAIL_NAME_PREFIX', 'MO_EMAIL_START_INDEX', 'MO_EMAIL_EXPIRY_TIME', 'CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN', 'CF_TEMP_EMAIL_BASE_URL', 'CF_TEMP_EMAIL_ADMIN_PASSWORD', 'CF_TEMP_EMAIL_DOMAIN'],
   sync: ['SYNC_TARGET_CPA', 'SYNC_TARGET_SUB2API', 'CPA_URL', 'CPA_KEY', 'SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP'],
-  proxy: ['PLAYWRIGHT_BROWSER_MODE', 'PLAYWRIGHT_HEADLESS', 'BROWSER_PARALLEL_WORKERS', 'OUTBOUND_PROXY_ENABLED', 'OUTBOUND_PROXY_POOL', 'OUTBOUND_PROXY_BYPASS', 'OUTBOUND_PROXY_STRATEGY', 'OUTBOUND_PROXY_FAILOVER', 'PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS'],
+  proxy: ['PLAYWRIGHT_BROWSER_MODE', 'PLAYWRIGHT_HEADLESS', 'BROWSER_PARALLEL_WORKERS', 'OUTBOUND_PROXY_ENABLED', 'OUTBOUND_PROXY_POOL', 'OUTBOUND_PROXY_BYPASS', 'OUTBOUND_PROXY_STRATEGY', 'OUTBOUND_PROXY_FAILOVER', 'PROXY_NODE_ENABLED', 'PROXY_NODE_PROVIDER', 'PROXY_NODE_API_KEY', 'PROXY_NODE_BASE_URL', 'PROXY_NODE_PROTOCOL', 'PROXY_NODE_AUTO_REFRESH', 'PROXY_NODE_REFRESH_BEFORE_TASK', 'PROXY_NODE_POLL_INTERVAL_SECONDS', 'PROXY_NODE_POLL_TIMEOUT_SECONDS', 'PROXY_NODE_COUNTRY', 'PROXY_NODE_APPLY_TO_OUTBOUND_POOL', 'PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS'],
   security: ['API_KEY'],
 }
 
@@ -613,6 +825,7 @@ const visualCategories = [
 
 const visualCategory = ref('cloudmail')
 const proxyExpanded = ref(false)
+const proxyMenuSection = ref('browser')
 
 const runtimeFields = ref([])
 const runtimeForm = reactive({})
@@ -622,6 +835,11 @@ const runtimeSaving = ref(false)
 const runtimeSaved = ref(false)
 const runtimeMessage = ref('')
 const runtimeMessageClass = ref('')
+const proxyNodeStatus = ref(null)
+const proxyNodeLoading = ref(false)
+const proxyNodeRefreshing = ref(false)
+const proxyNodeMessage = ref('')
+const proxyNodeMessageClass = ref('')
 
 const sourcePath = ref('')
 const sourceContent = ref('')
@@ -647,6 +865,8 @@ function fieldsByKeys(keys) {
 
 const securityFields = computed(() => fieldsByKeys(runtimeCategoryKeys.security))
 const outboundProxyFields = computed(() => fieldsByKeys(['OUTBOUND_PROXY_ENABLED', 'OUTBOUND_PROXY_POOL', 'OUTBOUND_PROXY_BYPASS', 'OUTBOUND_PROXY_STRATEGY', 'OUTBOUND_PROXY_FAILOVER']))
+const proxyNodeConnectionFields = computed(() => fieldsByKeys(['PROXY_NODE_ENABLED', 'PROXY_NODE_PROVIDER', 'PROXY_NODE_PROTOCOL', 'PROXY_NODE_BASE_URL', 'PROXY_NODE_API_KEY']))
+const proxyNodeRefreshFields = computed(() => fieldsByKeys(['PROXY_NODE_AUTO_REFRESH', 'PROXY_NODE_REFRESH_BEFORE_TASK', 'PROXY_NODE_POLL_INTERVAL_SECONDS', 'PROXY_NODE_POLL_TIMEOUT_SECONDS', 'PROXY_NODE_COUNTRY', 'PROXY_NODE_APPLY_TO_OUTBOUND_POOL']))
 const proxyFields = computed(() => fieldsByKeys(['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS']))
 const syncToggleFields = computed(() => fieldsByKeys(['SYNC_TARGET_CPA', 'SYNC_TARGET_SUB2API']))
 const selectedMailProvider = computed(() => {
@@ -660,8 +880,126 @@ const cfTempEmailFields = computed(() => fieldsByKeys(['CF_TEMP_EMAIL_BASE_URL',
 const syncCpaEnabled = computed(() => String(runtimeForm.SYNC_TARGET_CPA || '').toLowerCase() === 'true')
 const syncSub2apiEnabled = computed(() => String(runtimeForm.SYNC_TARGET_SUB2API || '').toLowerCase() === 'true')
 const outboundProxyEnabled = computed(() => String(runtimeForm.OUTBOUND_PROXY_ENABLED || 'true').toLowerCase() === 'true')
+const proxyNodeEnabled = computed(() => String(runtimeForm.PROXY_NODE_ENABLED || 'false').toLowerCase() === 'true')
+const proxyNodeProvider = computed(() => String(runtimeForm.PROXY_NODE_PROVIDER || 'none').toLowerCase())
+const proxyNodeCanRefresh = computed(() => proxyNodeEnabled.value && proxyNodeProvider.value === 'webshare' && !runtimeLoading.value)
 const syncCpaFields = computed(() => syncCpaEnabled.value ? fieldsByKeys(['CPA_URL', 'CPA_KEY']) : [])
 const syncSub2apiFields = computed(() => syncSub2apiEnabled.value ? fieldsByKeys(['SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP']) : [])
+
+const proxyMenuSections = [
+  {
+    key: 'browser',
+    label: '浏览器',
+    description: '显示方式和并行窗口',
+    longDescription: '控制自动化浏览器是否显示，以及批量任务允许的浏览器窗口数。',
+    dotClass: 'bg-cyan-400 shadow-[0_0_12px_rgba(34,211,238,0.75)]',
+  },
+  {
+    key: 'outbound',
+    label: '出口代理池',
+    description: '后端外部请求出口',
+    longDescription: '设置后端访问 OpenAI、邮箱服务和远端同步服务时使用的代理池。',
+    dotClass: 'bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.75)]',
+  },
+  {
+    key: 'node',
+    label: '节点接口',
+    description: 'Webshare 刷新和状态',
+    longDescription: '配置代理节点接口，查看当前节点，并手动刷新后写入出口代理池。',
+    dotClass: 'bg-blue-400 shadow-[0_0_12px_rgba(96,165,250,0.75)]',
+  },
+  {
+    key: 'advanced',
+    label: '高级覆盖',
+    description: 'Playwright 专用代理',
+    longDescription: '仅在浏览器流量需要覆盖全局出口代理池时使用。',
+    dotClass: 'bg-amber-400 shadow-[0_0_12px_rgba(251,191,36,0.75)]',
+  },
+]
+
+const currentProxyMenuMeta = computed(() => proxyMenuSections.find(item => item.key === proxyMenuSection.value) || proxyMenuSections[0])
+
+const currentProxyMenuStatus = computed(() => {
+  if (proxyMenuSection.value === 'browser') {
+    return normalizedBrowserMode.value === 'visible'
+      ? '可见窗口'
+      : normalizedBrowserMode.value === 'embedded'
+        ? '内嵌'
+        : '隐藏'
+  }
+  if (proxyMenuSection.value === 'outbound') {
+    return outboundProxyEnabled.value ? '出口代理已启用' : '出口代理已关闭'
+  }
+  if (proxyMenuSection.value === 'node') {
+    if (!proxyNodeEnabled.value || proxyNodeProvider.value === 'none') {
+      return '节点接口未启用'
+    }
+    return proxyNodeProvider.value === 'webshare' ? 'Webshare' : proxyNodeProvider.value
+  }
+  return fieldsByKeys(['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS']).some(field => field.configured)
+    ? '已设置覆盖'
+    : '未设置覆盖'
+})
+
+const proxyNodeStatusEnabledText = computed(() => {
+  const status = proxyNodeStatus.value
+  if (!status) {
+    return proxyNodeEnabled.value ? '表单已启用，未读取后端状态' : '未启用'
+  }
+  return status.enabled ? '后端已启用' : '后端未启用'
+})
+
+const proxyNodeStatusProviderText = computed(() => {
+  const status = proxyNodeStatus.value
+  return status?.provider || proxyNodeProvider.value || 'none'
+})
+
+const proxyNodeOutboundPoolText = computed(() => {
+  const status = proxyNodeStatus.value
+  return status?.outbound_proxy_pool || runtimeForm.OUTBOUND_PROXY_POOL || '未设置'
+})
+
+const proxyNodeLastRefreshText = computed(() => {
+  const refresh = proxyNodeStatus.value?.last_refresh
+  if (!refresh || Object.keys(refresh).length === 0) {
+    return '暂无记录'
+  }
+  if (refresh.refreshed_at) {
+    return formatUnixTime(refresh.refreshed_at)
+  }
+  if (refresh.message) {
+    return refresh.message
+  }
+  return '已有记录'
+})
+
+const proxyNodeCurrentText = computed(() => {
+  const current = proxyNodeStatus.value?.current
+  if (!current || Object.keys(current).length === 0) {
+    return proxyNodeLoading.value ? '正在读取...' : '暂无当前节点'
+  }
+  if (current.error) {
+    return current.error
+  }
+  if (current.proxy_url) {
+    return current.proxy_url
+  }
+  return compactJson(current.node || current)
+})
+
+const proxyNodeRefreshResultText = computed(() => {
+  const refresh = proxyNodeStatus.value?.last_refresh
+  if (!refresh || Object.keys(refresh).length === 0) {
+    return '暂无刷新结果'
+  }
+  if (refresh.proxy_url) {
+    return `${refresh.proxy_url}${refresh.applied ? '，已写入出口代理池' : '，未写入出口代理池'}`
+  }
+  if (refresh.message) {
+    return refresh.message
+  }
+  return compactJson(refresh)
+})
 
 const currentRuntimeFields = computed(() => {
   if (selectedRuntimeCategory.value === 'cloudmail') {
@@ -805,12 +1143,47 @@ function setSourceMessage(text, type = 'success') {
   }, 8000)
 }
 
+function setProxyNodeMessage(text, type = 'success') {
+  proxyNodeMessage.value = text
+  proxyNodeMessageClass.value = type === 'success'
+    ? 'bg-green-500/10 text-green-400 border-green-500/20'
+    : 'bg-red-500/10 text-red-400 border-red-500/20'
+  window.clearTimeout(setProxyNodeMessage._timer)
+  setProxyNodeMessage._timer = window.setTimeout(() => {
+    proxyNodeMessage.value = ''
+  }, 8000)
+}
+
 function fieldInputType(key) {
   return key.includes('PASSWORD') || key.includes('KEY') ? 'password' : 'text'
 }
 
+function compactJson(value) {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value || '')
+  }
+}
+
+function formatUnixTime(value) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return '时间未知'
+  }
+  return new Date(numeric * 1000).toLocaleString('zh-CN', { hour12: false })
+}
+
 function isToggleField(key) {
-  return key === 'SYNC_TARGET_CPA' || key === 'SYNC_TARGET_SUB2API' || key === 'PLAYWRIGHT_HEADLESS' || key === 'OUTBOUND_PROXY_ENABLED' || key === 'OUTBOUND_PROXY_FAILOVER'
+  return key === 'SYNC_TARGET_CPA'
+    || key === 'SYNC_TARGET_SUB2API'
+    || key === 'PLAYWRIGHT_HEADLESS'
+    || key === 'OUTBOUND_PROXY_ENABLED'
+    || key === 'OUTBOUND_PROXY_FAILOVER'
+    || key === 'PROXY_NODE_ENABLED'
+    || key === 'PROXY_NODE_AUTO_REFRESH'
+    || key === 'PROXY_NODE_REFRESH_BEFORE_TASK'
+    || key === 'PROXY_NODE_APPLY_TO_OUTBOUND_POOL'
 }
 
 const normalizedBrowserMode = computed(() => {
@@ -881,6 +1254,39 @@ async function loadMoEmailDomains() {
   }
 }
 
+async function loadProxyNodeStatus() {
+  proxyNodeLoading.value = true
+  try {
+    proxyNodeStatus.value = await api.getProxyNodeStatus()
+  } catch (e) {
+    setProxyNodeMessage('读取代理节点状态失败: ' + e.message, 'error')
+  } finally {
+    proxyNodeLoading.value = false
+  }
+}
+
+async function refreshProxyNode() {
+  proxyNodeRefreshing.value = true
+  try {
+    const result = await api.refreshProxyNode()
+    proxyNodeStatus.value = {
+      ...(proxyNodeStatus.value || {}),
+      enabled: result.enabled,
+      provider: result.provider,
+      protocol: result.protocol,
+      outbound_proxy_pool: result.proxy_url || proxyNodeStatus.value?.outbound_proxy_pool || runtimeForm.OUTBOUND_PROXY_POOL || '',
+      current: result.node ? { provider: result.provider, proxy_url: result.proxy_url, node: result.node } : proxyNodeStatus.value?.current || {},
+      last_refresh: result,
+    }
+    setProxyNodeMessage(result.proxy_url ? '代理节点已刷新' : (result.message || '代理节点刷新完成'))
+    await Promise.all([loadProxyNodeStatus(), loadRuntimeConfig()])
+  } catch (e) {
+    setProxyNodeMessage(e.message, 'error')
+  } finally {
+    proxyNodeRefreshing.value = false
+  }
+}
+
 async function saveRuntimeConfig() {
   runtimeSaving.value = true
   runtimeSaved.value = false
@@ -944,6 +1350,15 @@ async function saveSourceConfig() {
 watch(visualCategory, async (next) => {
   if (next === 'source' && !sourceLoaded.value) {
     await loadSourceConfig()
+  }
+  if (next === 'proxy' && proxyMenuSection.value === 'node') {
+    await loadProxyNodeStatus()
+  }
+})
+
+watch(proxyMenuSection, async (next) => {
+  if (visualCategory.value === 'proxy' && next === 'node') {
+    await loadProxyNodeStatus()
   }
 })
 
