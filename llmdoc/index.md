@@ -14,6 +14,7 @@
 
 ## 架构文档
 
+- `llmdoc/architecture/account-management.md`: 账号生命周期与四轴状态。
 - `llmdoc/architecture/account-lifecycle.md`: 账号状态、轮转、补位、清理。
 - `llmdoc/architecture/browser-and-oauth.md`: Playwright、管理员登录、Codex OAuth、手动 OAuth。
 - `llmdoc/architecture/outbound-proxy.md`: 后端外部请求、出口代理池、Playwright 代理继承。
