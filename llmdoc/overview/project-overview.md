@@ -29,3 +29,7 @@ AutoTeam 是面向 ChatGPT Team 的账号轮转与认证同步工具。
 - `docs/troubleshooting.md`: 常见故障。
 
 当前 llmdoc 只记录可从代码和已有文档确认的事实。没有确认的线上行为不要写成事实。
+
+## 账号管理补充
+
+AutoTeam 账号管理子系统现在用四轴状态模型 `registration_status` / `health_status` / `usage_status` / `team_status` 替代旧单一 `status` 字段。`category` 由 `src/autoteam/account_classifier.py` (`derive_category`) 聚合；当前代码顺序与业务目标优先级存在差异，维护时先看 [account-management.md](../architecture/account-management.md) 和 `llmdoc/reference/account-status-axes.md`。

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import logging
+import os
 import re
 import threading
 import time
@@ -28,6 +29,10 @@ _REQUEST_TIMEOUT = 15
 _PAGE_LIMIT = 100
 _CREATE_EMAIL_LOCK = threading.Lock()
 _RESERVED_EMAIL_NAMES: set[str] = set()
+_DEFAULT_EMAIL_NAME_PATTERN = "{prefix}-{index:03d}"
+_LEGACY_EMAIL_NAME_PATTERN = "{prefix}-{index}"
+_INDEX_PLACEHOLDER_RE = re.compile(r"{index(?::[^}]*)?}")
+MO_EMAIL_NAME_PATTERN = os.getenv("MO_EMAIL_NAME_PATTERN", _DEFAULT_EMAIL_NAME_PATTERN)
 
 _VERIFICATION_CODE_PATTERNS = (
     r"(?:temporary\s+(?:openai|chatgpt)\s+login\s+code(?:\s+is)?|verification\s+code(?:\s+is)?|login\s+code(?:\s+is)?|code(?:\s+is)?|验证码(?:为|是)?)\D{0,24}(\d{6})",
@@ -47,6 +52,69 @@ def _coerce_int(value, default: int) -> int:
         return int(str(value).strip())
     except Exception:
         return default
+
+
+def _resolve_email_name_pattern(pattern: str | None = None) -> str:
+    value = pattern
+    if value is None:
+        value = os.getenv("MO_EMAIL_NAME_PATTERN") or MO_EMAIL_NAME_PATTERN
+    value = str(value or "").strip()
+    if "{prefix}" not in value or "{index" not in value:
+        return _DEFAULT_EMAIL_NAME_PATTERN
+    return value
+
+
+def format_email_name(prefix: str, index: int, pattern: str | None = None) -> str:
+    resolved_pattern = _resolve_email_name_pattern(pattern)
+    return resolved_pattern.format(prefix=prefix, index=index)
+
+
+def _extract_email_name_index(name: str, prefix: str, pattern: str) -> int | None:
+    resolved_pattern = _resolve_email_name_pattern(pattern)
+    parts = re.split(r"({prefix}|{index(?::[^}]*)?})", resolved_pattern)
+    regex_parts = []
+
+    for part in parts:
+        if not part:
+            continue
+        if part == "{prefix}":
+            regex_parts.append(re.escape(prefix))
+            continue
+        if _INDEX_PLACEHOLDER_RE.fullmatch(part):
+            regex_parts.append(r"(\d+)")
+            continue
+        regex_parts.append(re.escape(part))
+
+    match = re.fullmatch("".join(regex_parts), str(name or "").strip(), re.IGNORECASE)
+    if not match:
+        return None
+    return _coerce_int(match.group(1), -1)
+
+
+def _iter_email_name_patterns() -> list[str]:
+    raw_pattern = os.getenv("MO_EMAIL_NAME_PATTERN")
+    if raw_pattern is None:
+        return [_LEGACY_EMAIL_NAME_PATTERN]
+
+    patterns = [_resolve_email_name_pattern(raw_pattern)]
+    if patterns[0] != _LEGACY_EMAIL_NAME_PATTERN:
+        patterns.append(_LEGACY_EMAIL_NAME_PATTERN)
+    return patterns
+
+
+def _format_generated_email_name(prefix: str, index: int) -> str:
+    raw_pattern = os.getenv("MO_EMAIL_NAME_PATTERN")
+    if raw_pattern is None:
+        return _LEGACY_EMAIL_NAME_PATTERN.format(prefix=prefix, index=index)
+    return format_email_name(prefix, index, raw_pattern)
+
+
+def _match_email_name_index(name: str, prefix: str) -> int | None:
+    for pattern in _iter_email_name_patterns():
+        matched_index = _extract_email_name_index(name, prefix, pattern)
+        if matched_index is not None and matched_index >= 0:
+            return matched_index
+    return None
 
 
 class MoEmailClient:
@@ -228,19 +296,24 @@ class MoEmailClient:
     def _next_prefix(self):
         base = self.name_prefix.strip()
         domain = self.domain.strip().lower()
-        pattern = re.compile(rf"^{re.escape(base)}-(\d+)@{re.escape(domain)}$", re.IGNORECASE)
         max_index = self.start_index - 1
 
         for email in self._iter_existing_email_values():
-            match = pattern.match(str(email or "").strip())
-            if match:
-                max_index = max(max_index, int(match.group(1)))
+            local_name, _, email_domain = str(email or "").strip().partition("@")
+            if email_domain.lower() != domain:
+                continue
+            matched_index = _match_email_name_index(local_name, base)
+            if matched_index is not None:
+                max_index = max(max_index, matched_index)
         for reserved in _RESERVED_EMAIL_NAMES:
-            match = pattern.match(reserved)
-            if match:
-                max_index = max(max_index, int(match.group(1)))
+            local_name, _, email_domain = str(reserved or "").strip().partition("@")
+            if email_domain.lower() != domain:
+                continue
+            matched_index = _match_email_name_index(local_name, base)
+            if matched_index is not None:
+                max_index = max(max_index, matched_index)
 
-        return f"{base}-{max_index + 1}"
+        return _format_generated_email_name(base, max_index + 1)
 
     def create_temp_email(self, prefix=None):
         with _CREATE_EMAIL_LOCK:

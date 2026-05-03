@@ -105,13 +105,13 @@ try:
 except Exception:
     pass
 ")
-    if [[ "$STATUS" == "success" || "$STATUS" == "failed" || "$STATUS" == "error" ]]; then
+    if [[ "$STATUS" == "success" || "$STATUS" == "completed" || "$STATUS" == "failed" || "$STATUS" == "error" ]]; then
       break
     fi
   done
 
   printf '%s' "$TASK_JSON" > "$PER_FILE"
-  if [[ "$STATUS" == "success" ]]; then
+  if [[ "$STATUS" == "success" || "$STATUS" == "completed" ]]; then
     echo "  -> success ($WAITED s)" | tee -a "$LOG_FILE"
     OK=$((OK + 1))
   elif [[ "$STATUS" == "failed" || "$STATUS" == "error" ]]; then

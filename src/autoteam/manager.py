@@ -947,7 +947,7 @@ _DIRECT_CONTINUE_WITH_PASSWORD_SELECTORS = (
     'button:has-text("继续使用密码"), a:has-text("继续使用密码")'
 )
 _DIRECT_SIGNUP_START_URL = "https://chatgpt.com/auth/login"
-_DIRECT_ABOUT_YOU_TIMEOUT_SECONDS = 90.0
+_DIRECT_ABOUT_YOU_TIMEOUT_SECONDS = 60.0
 
 
 def _safe_invite_screenshot(page, name):

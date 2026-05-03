@@ -18,6 +18,13 @@ from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright
 
 from autoteam import outbound_proxy
+from autoteam.account_lifecycle import (
+    inventory_kwargs,
+    mark_inventory,
+    record_rt_obtained,
+    registered_kwargs,
+    rt_obtained_kwargs,
+)
 from autoteam.accounts import (
     CPA_STATUS_FAILED,
     CPA_STATUS_PENDING,
@@ -32,6 +39,7 @@ from autoteam.accounts import (
     add_account,
     find_account,
     load_accounts,
+    save_accounts,
     update_account,
 )
 from autoteam.auth_archive import archive_account_auth_file
@@ -825,13 +833,17 @@ def _create_direct_account(
     plan_type = (session_bundle.get("plan_type") or "unknown").strip().lower()
     auth_path = save_auth_file(session_bundle, source="session")
     archive_path = _archive_account_auth(email, auth_path)
+    registration_updates = {
+        "session_auth_file": auth_path,
+        "registration_status": REGISTRATION_STATUS_SUCCESS,
+        "registration_error_message": "",
+        "plan_type": plan_type,
+        "session_archive_file": archive_path,
+        **registered_kwargs(),
+    }
     update_account(
         email,
-        session_auth_file=auth_path,
-        registration_status=REGISTRATION_STATUS_SUCCESS,
-        registration_error_message="",
-        plan_type=plan_type,
-        session_archive_file=archive_path,
+        **registration_updates,
     )
     if hooks:
         hooks.account_event(
@@ -851,14 +863,25 @@ def _create_direct_account(
         oauth_plan_type = (oauth_bundle.get("plan_type") or plan_type or "unknown").strip().lower()
         oauth_path = save_auth_file(oauth_bundle, source="oauth")
         oauth_archive_path = _archive_account_auth(email, oauth_path)
+        oauth_now = int(time.time())
         update_account(
             email,
             auth_file=oauth_path,
-            rt_auth_file=oauth_path,
-            rt_obtained_at=time.time(),
             plan_type=oauth_plan_type,
+            **rt_obtained_kwargs(oauth_path, has_refresh_token=True, now=oauth_now),
             **_archive_update(oauth_archive_path),
         )
+        accounts_snapshot = load_accounts()
+        persisted_account = find_account(accounts_snapshot, email)
+        if persisted_account:
+            rt_record = record_rt_obtained(
+                persisted_account,
+                oauth_path,
+                has_refresh_token=True,
+                now=oauth_now,
+            )
+            if rt_record["changed"]:
+                save_accounts(accounts_snapshot)
         if hooks:
             hooks.account_event(
                 email,
@@ -1246,17 +1269,22 @@ def _verify_and_upload_cpa(
         raise RuntimeError(f"CPA 上传失败: {Path(auth_path).name}")
 
     archive_path = _archive_account_auth(email, auth_path)
-    now = time.time()
+    now = int(time.time())
     update_account(
         email,
-        cpa_status=CPA_STATUS_SUCCESS,
         cpa_error_message="",
-        usage_status=USAGE_INVENTORY,
-        cpa_uploaded_at=now,
-        qualified_at=now,
-        cloud_stocked_at=now,
+        cpa_uploaded_at=float(now),
+        qualified_at=float(now),
+        cloud_stocked_at=float(now),
+        **inventory_kwargs(now=now),
         **_archive_update(archive_path),
     )
+    accounts_snapshot = load_accounts()
+    persisted_account = find_account(accounts_snapshot, email)
+    if persisted_account:
+        inventory_result = mark_inventory(persisted_account, now=now)
+        if inventory_result["changed"]:
+            save_accounts(accounts_snapshot)
     return {
         "email": email,
         "plan_type": plan_type,

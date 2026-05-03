@@ -187,3 +187,23 @@ def delete_account_from_configured_targets(
         results[SYNC_TARGET_SUB2API] = delete_account_from_sub2api(email, auth_names=auth_names or [])
 
     return results
+
+
+def account_skip_reason(account: dict[str, object]) -> str | None:
+    if account.get("sync_disabled") is True:
+        return "sync_disabled"
+    if account.get("usage_status") == "sold":
+        return "sold"
+    if account.get("role") == "main":
+        return "main_account"
+    if account.get("health_status") == "deactivated":
+        return "deactivated"
+    return None
+
+
+def should_sync_account(account: dict[str, object]) -> bool:
+    return account_skip_reason(account) is None
+
+
+def filter_sync_eligible(accounts: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [account for account in accounts if should_sync_account(account)]

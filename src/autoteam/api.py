@@ -1317,6 +1317,25 @@ class AuthMetadataMigrationParams(BaseModel):
     apply: bool = False
 
 
+class AllocateAccountParams(BaseModel):
+    project: str = ""
+    allocated_to: str = ""
+    force: bool = False
+
+
+class ReleaseAccountParams(BaseModel):
+    reason: str = ""
+
+
+class MarkInvalidParams(BaseModel):
+    reason: str
+    last_error: str = ""
+
+
+class RepairOauthParams(BaseModel):
+    note: str = ""
+
+
 def _normalized_email(value: str | None) -> str:
     return (value or "").strip().lower()
 
@@ -1989,12 +2008,229 @@ def post_manual_account_cancel():
 
 
 @app.get("/api/accounts")
-def get_accounts():
+def get_accounts(
+    category: str | None = None,
+    q: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+    sort: str = "updated_at_desc",
+):
     """获取所有账号列表"""
+    from autoteam.account_classifier import (
+        CATEGORY_IN_USE,
+        CATEGORY_INVENTORY,
+        CATEGORY_INVALID,
+        CATEGORY_NOT_REGISTERED,
+        CATEGORY_REGISTERED,
+        CATEGORY_SOLD,
+        derive_category,
+    )
     from autoteam.accounts import load_accounts
 
+    if page < 1:
+        raise HTTPException(status_code=400, detail="page 必须从 1 开始")
+    if page_size < 1 or page_size > 200:
+        raise HTTPException(status_code=400, detail="page_size 必须在 1 到 200 之间")
+
+    valid_categories = {
+        CATEGORY_REGISTERED,
+        CATEGORY_INVENTORY,
+        CATEGORY_IN_USE,
+        CATEGORY_INVALID,
+        CATEGORY_SOLD,
+        CATEGORY_NOT_REGISTERED,
+        "all",
+    }
+    normalized_category = (category or "").strip().lower()
+    if normalized_category and normalized_category not in valid_categories:
+        raise HTTPException(status_code=400, detail="category 非法")
+    if normalized_category == "all":
+        normalized_category = ""
+
+    normalized_query = (q or "").strip().lower()
+
+    def updated_sort_key(acc: dict) -> float | int:
+        return acc.get("updated_at") or acc.get("created_at") or 0
+
+    def created_sort_key(acc: dict) -> float | int:
+        return acc.get("created_at") or 0
+
+    def email_sort_key(acc: dict) -> str:
+        return (acc.get("email") or "").lower()
+
+    sorters = {
+        "updated_at_desc": (updated_sort_key, True),
+        "updated_at_asc": (updated_sort_key, False),
+        "email_asc": (email_sort_key, False),
+        "email_desc": (email_sort_key, True),
+        "created_at_desc": (created_sort_key, True),
+    }
+    sorter = sorters.get(sort)
+    if not sorter:
+        raise HTTPException(status_code=400, detail="sort 非法")
+
     accounts = load_accounts()
-    return [_sanitize_account(a) for a in accounts]
+    filtered_accounts = []
+    for acc in accounts:
+        if normalized_category and derive_category(acc) != normalized_category:
+            continue
+        if normalized_query:
+            email = (acc.get("email") or "").lower()
+            notes = str(acc.get("notes") or "").lower()
+            if normalized_query not in email and normalized_query not in notes:
+                continue
+        filtered_accounts.append(acc)
+
+    key_func, reverse = sorter
+    filtered_accounts.sort(key=key_func, reverse=reverse)
+
+    total = len(filtered_accounts)
+    start = (page - 1) * page_size
+    end = start + page_size
+    items = [_sanitize_account(acc) for acc in filtered_accounts[start:end]]
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "has_next": end < total,
+        "category": normalized_category or None,
+        "q": normalized_query or None,
+        "sort": sort,
+    }
+
+
+@app.get("/api/accounts/{email}")
+def get_account_detail(email: str):
+    """获取单个账号的聚合详情"""
+    from autoteam.account_classifier import derive_category
+    from autoteam.account_credentials import identify_credential_file
+    from autoteam.account_health import is_invalid, is_quota_exhausted
+    from autoteam.account_remote import default_remote_block, summarize_remote
+    from autoteam.accounts import find_account, load_accounts
+
+    normalized_email = email.strip().lower()
+    accounts = load_accounts()
+    acc = find_account(accounts, normalized_email)
+    is_main = _is_main_account_email(normalized_email)
+
+    if not acc and is_main:
+        acc = {"email": normalized_email}
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    def build_credential(path_value: str | None) -> dict:
+        path_str = str(path_value or "").strip()
+        if not path_str:
+            return {"path": "", "exists": False, "type": "missing"}
+
+        identified = identify_credential_file(path_str)
+        return {
+            "path": path_str,
+            "exists": Path(path_str).exists(),
+            "type": identified.get("type") or "missing",
+        }
+
+    remote = default_remote_block()
+    account_remote = acc.get("remote")
+    if isinstance(account_remote, dict):
+        for kind, fallback in remote.items():
+            item = account_remote.get(kind)
+            if isinstance(item, dict):
+                remote[kind] = dict(item)
+            else:
+                remote[kind] = dict(fallback)
+
+    # 兼容当前 summarize_remote 的列表汇总签名，至少让缺失状态走统一的 unknown/present 判定。
+    remote_summary = summarize_remote([acc])
+    for kind, statuses in remote_summary.items():
+        if remote[kind].get("status"):
+            continue
+        matched_status = next((status for status, count in statuses.items() if count), None)
+        if matched_status:
+            remote[kind]["status"] = matched_status
+
+    return {
+        "account": _sanitize_account(acc),
+        "category": "main" if is_main else derive_category(acc),
+        "credentials": {
+            "rt_auth_file": build_credential(acc.get("rt_auth_file")),
+            "session_auth_file": build_credential(acc.get("session_auth_file")),
+            "auth_file": build_credential(acc.get("auth_file")),
+        },
+        "remote": remote,
+        "allocation": {} if is_main else dict(acc.get("allocation") or {}),
+        "sale": {} if is_main else dict(acc.get("sale") or {}),
+        "health": {
+            "health_status": acc.get("health_status", ""),
+            "invalid_reason": acc.get("invalid_reason", ""),
+            "is_invalid": is_invalid(acc),
+            "is_quota_exhausted": is_quota_exhausted(acc),
+        },
+        "events": [],
+    }
+
+
+@app.post("/api/accounts/clean/dry-run")
+def post_accounts_clean_dry_run():
+    """扫描账号池清理问题，返回报告和 CSV，不写文件。"""
+    from autoteam import account_cleaner
+
+    try:
+        report = account_cleaner.scan_accounts(accounts=None)
+        csv_text = account_cleaner.format_scan_report_csv(report)
+    except Exception as exc:
+        logger.exception("[API] 账号清理 dry-run 失败")
+        raise HTTPException(status_code=500, detail=f"账号清理 dry-run 失败: {exc}") from exc
+
+    return {
+        "report": report,
+        "csv": csv_text,
+    }
+
+
+@app.post("/api/accounts/clean/apply")
+def post_accounts_clean_apply():
+    """备份并应用账号池清理，然后返回清理结果和清理后扫描报告。"""
+    from autoteam import account_cleaner
+    from autoteam.accounts import load_accounts, save_accounts
+
+    try:
+        backup_path = account_cleaner.backup_accounts_file()
+    except Exception as exc:
+        logger.exception("[API] 账号清理备份失败")
+        raise HTTPException(status_code=500, detail=f"账号清理备份失败: {exc}") from exc
+
+    try:
+        accounts = load_accounts()
+    except Exception as exc:
+        logger.exception("[API] 账号清理加载账号失败")
+        raise HTTPException(status_code=500, detail=f"账号清理加载账号失败: {exc}") from exc
+
+    try:
+        result = account_cleaner.cleanup_accounts(accounts=accounts)
+    except Exception as exc:
+        logger.exception("[API] 账号清理执行失败")
+        raise HTTPException(status_code=500, detail=f"账号清理执行失败: {exc}") from exc
+
+    try:
+        save_accounts(accounts)
+    except Exception as exc:
+        logger.exception("[API] 账号清理保存失败")
+        raise HTTPException(status_code=500, detail=f"账号清理保存失败: {exc}") from exc
+
+    try:
+        report_after = account_cleaner.scan_accounts(accounts=accounts)
+    except Exception as exc:
+        logger.exception("[API] 账号清理重扫失败")
+        raise HTTPException(status_code=500, detail=f"账号清理重扫失败: {exc}") from exc
+
+    return {
+        "backup_path": str(backup_path) if backup_path else None,
+        "result": result,
+        "report_after": report_after,
+    }
 
 
 @app.get("/api/accounts/{email}/codex-auth")
@@ -2058,8 +2294,12 @@ def get_standby():
 
 
 @app.delete("/api/accounts/{email}")
-def delete_account(email: str):
-    """删除本地管理账号及其关联资源。"""
+def delete_account(email: str, sync_cpa_after: bool = True):
+    """删除本地管理账号及其关联资源。
+
+    sync_cpa_after=false 时跳过尾部 sync_to_cpa 同步，便于批量删除时由调用方
+    在末尾统一触发一次同步，避免每个 DELETE 都阻塞数分钟。
+    """
     if not _playwright_lock.acquire(blocking=False):
         running = _tasks.get(_current_task_id, {})
         raise HTTPException(
@@ -2085,7 +2325,11 @@ def delete_account(email: str):
         if not any(a["email"].lower() == email.lower() for a in accounts):
             raise HTTPException(status_code=404, detail="账号不存在")
 
-        cleanup = _pw_executor.run(delete_managed_account, email)
+        cleanup = _pw_executor.run(
+            delete_managed_account,
+            email,
+            sync_cpa_after=sync_cpa_after,
+        )
         return {
             "message": "账号删除完成",
             "deleted_email": email,
@@ -2236,6 +2480,175 @@ def post_account_usage_status(email: str, params: UsageStatusParams):
         raise HTTPException(status_code=400, detail="usage_status 只允许 normal 或 inventory")
     updated = mark_account_usage_status(email, usage_status)
     return {"email": email, "usage_status": updated.get("usage_status")}
+
+
+@app.post("/api/accounts/{email}/allocate")
+def post_allocate_account(email: str, params: AllocateAccountParams = AllocateAccountParams()):
+    """将库存账号分配为 in_use。"""
+    from autoteam import account_inventory, accounts
+
+    email = email.strip().lower()
+    try:
+        account_items = accounts.load_accounts()
+    except Exception as exc:
+        logger.exception("[API] 加载账号失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"加载账号失败: {exc}") from exc
+
+    acc = accounts.find_account(account_items, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    result = account_inventory.allocate_account(
+        acc,
+        project=params.project,
+        allocated_to=params.allocated_to,
+        force=params.force,
+        in_place=True,
+    )
+
+    try:
+        accounts.save_accounts(account_items)
+    except Exception as exc:
+        logger.exception("[API] 分配库存账号保存失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"保存账号失败: {exc}") from exc
+
+    return {
+        "changed": bool(result.get("changed")),
+        "applied": list(result.get("applied") or []),
+        "reason": result.get("reason"),
+        "warning": result.get("warning"),
+        "account": _sanitize_account(result.get("account") or acc),
+    }
+
+
+@app.post("/api/accounts/{email}/release")
+def post_release_account(email: str, params: ReleaseAccountParams = ReleaseAccountParams()):
+    """释放 in_use 账号回库存。"""
+    from autoteam import account_inventory, accounts
+
+    email = email.strip().lower()
+    try:
+        account_items = accounts.load_accounts()
+    except Exception as exc:
+        logger.exception("[API] 加载账号失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"加载账号失败: {exc}") from exc
+
+    acc = accounts.find_account(account_items, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    result = account_inventory.release_account(
+        acc,
+        reason=params.reason,
+        in_place=True,
+    )
+
+    try:
+        accounts.save_accounts(account_items)
+    except Exception as exc:
+        logger.exception("[API] 释放库存账号保存失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"保存账号失败: {exc}") from exc
+
+    return {
+        "changed": bool(result.get("changed")),
+        "applied": list(result.get("applied") or []),
+        "reason": result.get("reason"),
+        "warning": result.get("warning"),
+        "account": _sanitize_account(result.get("account") or acc),
+    }
+
+
+@app.post("/api/accounts/{email}/mark-invalid")
+def post_mark_invalid_account(email: str, params: MarkInvalidParams):
+    """将账号标记为 invalid。"""
+    from autoteam import account_health, accounts
+
+    email = email.strip().lower()
+    reason = (params.reason or "").strip().lower()
+    if reason not in account_health.ALL_INVALID_REASONS:
+        raise HTTPException(status_code=400, detail="reason 非法")
+
+    try:
+        account_items = accounts.load_accounts()
+    except Exception as exc:
+        logger.exception("[API] 加载账号失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"加载账号失败: {exc}") from exc
+
+    acc = accounts.find_account(account_items, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    result = account_health.mark_invalid(
+        acc,
+        reason=reason,
+        last_error=params.last_error,
+        in_place=True,
+    )
+
+    try:
+        accounts.save_accounts(account_items)
+    except Exception as exc:
+        logger.exception("[API] 标记失效账号保存失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"保存账号失败: {exc}") from exc
+
+    return {
+        "changed": bool(result.get("changed")),
+        "applied": list(result.get("applied") or []),
+        "reason": result.get("reason"),
+        "warning": result.get("warning"),
+        "account": _sanitize_account(result.get("account") or acc),
+    }
+
+
+@app.post("/api/accounts/{email}/repair-oauth")
+def post_repair_oauth_account(email: str, params: RepairOauthParams = RepairOauthParams()):
+    """只回写 OAuth 修复元数据，不触发浏览器流程。"""
+    from autoteam import accounts
+    from autoteam.account_models import HEALTH_VALID
+
+    email = email.strip().lower()
+    try:
+        account_items = accounts.load_accounts()
+    except Exception as exc:
+        logger.exception("[API] 加载账号失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"加载账号失败: {exc}") from exc
+
+    acc = accounts.find_account(account_items, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    now = int(time.time())
+    changed = False
+    applied: list[str] = []
+
+    def _set_field(field: str, value):
+        nonlocal changed
+        if acc.get(field) == value:
+            return
+        acc[field] = value
+        changed = True
+        applied.append(field)
+
+    _set_field("health_status", HEALTH_VALID)
+    _set_field("invalid_reason", None)
+    _set_field("last_error", "")
+    _set_field("last_oauth_repair_at", now)
+    _set_field("last_oauth_repair_note", params.note)
+    _set_field("updated_at", now)
+
+    try:
+        accounts.save_accounts(account_items)
+    except Exception as exc:
+        logger.exception("[API] OAuth 修复元数据保存失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"保存账号失败: {exc}") from exc
+
+    return {
+        "changed": changed,
+        "applied": applied,
+        "reason": None,
+        "warning": None,
+        "account": _sanitize_account(acc),
+    }
 
 
 class LoginAccountParams(BaseModel):
