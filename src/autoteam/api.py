@@ -1293,6 +1293,21 @@ class TeamMemberRemoveParams(BaseModel):
     type: str
 
 
+class BulkActionItem(BaseModel):
+    email: str
+    user_id: str | None = None
+    type: str | None = None
+    plan_type: str | None = None
+    is_team_plan: bool | None = None
+
+
+class BulkActionParams(BaseModel):
+    action: str
+    items: list[BulkActionItem]
+    options: dict | None = None
+    confirm: bool = False
+
+
 class SellAccountParams(BaseModel):
     note: str | None = None
 
@@ -2009,17 +2024,23 @@ def post_manual_account_cancel():
 
 
 # ---------------------------------------------------------------------------
-# auths/ 目录扫描:把 codex-{email}-team-{hash}-(oauth|session).json 文件名解析
+# auths/ 目录扫描:把 codex-{email}-{plan_type}-{hash}-(oauth|session).json 文件名解析
 # 成账号视图。账号管理页改成扁平大表后直接消费这两个端点;accounts.json
 # 流程不受影响。
 # ---------------------------------------------------------------------------
 
 _AUTHS_FILE_PATTERN = "codex-*.json"
 _AUTHS_KNOWN_SUBDIRS = ("sold", "tradable", "unusable", "archive")
+_AUTHS_PLAN_TYPES = {"team", "plus", "free", "unknown"}
+
+
+def _normalize_plan_type(value: str | None) -> str:
+    plan_type = (value or "").strip().lower()
+    return plan_type if plan_type in _AUTHS_PLAN_TYPES else "unknown"
 
 
 def _parse_auth_filename(name: str) -> dict | None:
-    """从 codex-{email}-team-{hash}-{kind}.json 文件名解析出 email / team_hash / kind。
+    """从 codex-{email}-{plan_type}-{hash}-{kind}.json 文件名解析出账号信息。
 
     主目录文件命名带 -oauth / -session 后缀;归档子目录文件大多不带后缀,kind 留空。
     主号文件命名为 codex-main-{account_id}.json,这里跳过(主号不归账号管理页)。
@@ -2036,16 +2057,30 @@ def _parse_auth_filename(name: str) -> dict | None:
     if len(parts) == 2 and parts[1] in ("oauth", "session"):
         head = parts[0]
         kind = parts[1]
-    # head 形如 {email}-team-{hash}
-    team_marker = "-team-"
-    idx = head.rfind(team_marker)
+    # head 形如 {email}-{plan_type}-{hash};兼容旧版固定 team。
+    marker = ""
+    idx = -1
+    for plan_type in sorted(_AUTHS_PLAN_TYPES, key=len, reverse=True):
+        candidate = f"-{plan_type}-"
+        candidate_idx = head.rfind(candidate)
+        if candidate_idx > 0:
+            marker = candidate
+            idx = candidate_idx
+            break
     if idx <= 0:
         return None
     email = head[:idx]
-    team_hash = head[idx + len(team_marker):]
+    plan_type = marker.strip("-") or "unknown"
+    team_hash = head[idx + len(marker):]
     if "@" not in email:
         return None
-    return {"email": email, "team_hash": team_hash, "kind": kind, "filename": name}
+    return {
+        "email": email,
+        "team_hash": team_hash,
+        "plan_type": _normalize_plan_type(plan_type),
+        "kind": kind,
+        "filename": name,
+    }
 
 
 def _scan_auths_files() -> dict:
@@ -2123,6 +2158,7 @@ def _scan_auths_files() -> dict:
             {
                 "email": email,
                 "team_hash": info.get("team_hash") or "",
+                "plan_types": set(),
                 "categories": set(),
                 "has_oauth": False,
                 "has_session": False,
@@ -2134,6 +2170,7 @@ def _scan_auths_files() -> dict:
             },
         )
         bucket["categories"].add(category)
+        bucket["plan_types"].add(_normalize_plan_type(info.get("plan_type")))
         if not bucket["team_hash"] and info.get("team_hash"):
             bucket["team_hash"] = info["team_hash"]
         kind = info["kind"]
@@ -2146,6 +2183,7 @@ def _scan_auths_files() -> dict:
         bucket["files"].append({
             "category": category,
             "kind": kind,
+            "plan_type": _normalize_plan_type(info.get("plan_type")),
             "path": str(path),
             "filename": path.name,
         })
@@ -2186,7 +2224,7 @@ def _scan_auths_files() -> dict:
 
     stats["unique_emails"] = len(by_email)
 
-    # 按 bucket 主分类聚合 accounts_* (优先级 sold>tradable>unusable>archive>active)
+    # 按 bucket 主分类聚合 accounts_* (优先级 sold>tradable>unusable>active>archive)
     for bucket in by_email.values():
         primary = _bucket_primary_category(bucket.get("categories") or set())
         key = f"accounts_{primary}"
@@ -2199,14 +2237,14 @@ def _scan_auths_files() -> dict:
 def _bucket_primary_category(categories: list | set | None) -> str:
     """挑选 bucket 的主分类。
 
-    优先级 sold > tradable > unusable > archive > active。
-    分类目录(sold/tradable/unusable/archive)语义比根目录更强:同时存在根目录和
-    分类目录文件时,以分类目录为准。
+    优先级 sold > tradable > unusable > active > archive。
+    sold/tradable/unusable 目录语义比根目录更强；archive 是普通备份目录，
+    不能覆盖根目录仍存在的 active 文件。
     """
     if not categories:
         return "unknown"
     cats = set(categories)
-    for c in ("sold", "tradable", "unusable", "archive", "active"):
+    for c in ("sold", "tradable", "unusable", "active", "archive"):
         if c in cats:
             return c
     # 兜底:取字典序首个,保持向后兼容
@@ -2217,9 +2255,22 @@ def _bucket_to_record(bucket: dict) -> dict:
     """把 _scan_auths_files 的 bucket 转换成 API 输出 record。"""
     categories = sorted(bucket.get("categories") or [])
     primary = _bucket_primary_category(categories)
+    plan_types = sorted(_normalize_plan_type(p) for p in (bucket.get("plan_types") or []))
+    plan_types = sorted(set(plan_types))
+    if "team" in plan_types:
+        plan_type = "team"
+    elif plan_types:
+        plan_type = plan_types[0]
+    else:
+        plan_type = "unknown"
+    is_team_plan = plan_type == "team"
     return {
         "email": bucket["email"],
         "team_hash": bucket.get("team_hash") or "",
+        "plan_type": plan_type,
+        "plan_types": plan_types,
+        "is_team_plan": is_team_plan,
+        "is_limited_view": not is_team_plan,
         "category": primary,
         "categories": categories,
         "has_oauth": bool(bucket.get("has_oauth")),
@@ -2281,6 +2332,7 @@ def get_auths_stats():
 @app.get("/api/auths/accounts")
 def get_auths_accounts(
     category: str | None = None,
+    plan_type: str | None = None,
     q: str | None = None,
     has_oauth: bool | None = None,
     has_session: bool | None = None,
@@ -2291,6 +2343,7 @@ def get_auths_accounts(
     """扁平账号管理大表数据源:扫 auths/ 目录,按文件名聚合账号。
 
     `category` 取值:active / sold / tradable / unusable / archive / all。默认排除 archive。
+    `plan_type` 取值:team / plus / free / unknown / all。默认不过滤 plan。
     """
     if page < 1:
         raise HTTPException(status_code=400, detail="page 必须从 1 开始")
@@ -2301,6 +2354,10 @@ def get_auths_accounts(
     normalized_category = (category or "").strip().lower()
     if normalized_category and normalized_category not in valid_categories:
         raise HTTPException(status_code=400, detail="category 非法")
+    valid_plan_types = {*_AUTHS_PLAN_TYPES, "all"}
+    normalized_plan_type = (plan_type or "").strip().lower()
+    if normalized_plan_type and normalized_plan_type not in valid_plan_types:
+        raise HTTPException(status_code=400, detail="plan_type 非法")
 
     sorters = {
         "email_asc": (lambda r: (r.get("email") or "").lower(), False),
@@ -2308,6 +2365,7 @@ def get_auths_accounts(
         "expired_asc": (lambda r: _auth_expired_sort_key(r), False),
         "expired_desc": (lambda r: _auth_expired_sort_key(r, descending=True), False),
         "category_asc": (lambda r: r.get("category") or "", False),
+        "plan_asc": (lambda r: (r.get("plan_type") or "unknown", (r.get("email") or "").lower()), False),
     }
     if sort not in sorters:
         raise HTTPException(status_code=400, detail="sort 非法")
@@ -2322,6 +2380,9 @@ def get_auths_accounts(
         pass
     else:
         records = [r for r in records if r["category"] == normalized_category]
+
+    if normalized_plan_type and normalized_plan_type != "all":
+        records = [r for r in records if r["plan_type"] == normalized_plan_type]
 
     if has_oauth is not None:
         records = [r for r in records if bool(r["has_oauth"]) == bool(has_oauth)]
@@ -2349,7 +2410,13 @@ def get_auths_accounts(
             "tradable": sum(1 for r in all_records if r["category"] == "tradable"),
             "unusable": sum(1 for r in all_records if r["category"] == "unusable"),
             "archive": sum(1 for r in all_records if r["category"] == "archive"),
-        }
+        },
+        "plan_type": {
+            "team": sum(1 for r in all_records if r["plan_type"] == "team"),
+            "plus": sum(1 for r in all_records if r["plan_type"] == "plus"),
+            "free": sum(1 for r in all_records if r["plan_type"] == "free"),
+            "unknown": sum(1 for r in all_records if r["plan_type"] == "unknown"),
+        },
     }
 
     return {
@@ -2359,11 +2426,323 @@ def get_auths_accounts(
         "page_size": page_size,
         "has_next": end < total,
         "category": normalized_category or None,
+        "plan_type": normalized_plan_type or None,
         "q": normalized_query or None,
         "sort": sort,
         "facets": facets,
         "stats": scan["stats"],
     }
+
+
+_BULK_ACTIONS = {"mark-invalid", "sell", "delete", "remove-team", "cancel-invite"}
+_BULK_LOCK_ACTIONS = {"delete", "remove-team", "cancel-invite"}
+
+
+def _bulk_result(
+    email: str,
+    *,
+    ok: bool,
+    status: str,
+    message: str = "",
+    skipped_reason: str | None = None,
+    data: dict | None = None,
+) -> dict:
+    payload = {
+        "email": email,
+        "ok": ok,
+        "status": status,
+        "message": message,
+        "skipped_reason": skipped_reason,
+    }
+    if data is not None:
+        payload["data"] = data
+    return payload
+
+
+def _exception_message(exc: Exception) -> str:
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, str):
+            return detail
+        if isinstance(detail, dict):
+            return str(detail.get("message") or detail)
+        return str(detail)
+    return str(exc)
+
+
+def _auth_record_by_email() -> dict[str, dict]:
+    scan = _scan_auths_files()
+    return {
+        (record.get("email") or "").lower(): record
+        for record in (_bucket_to_record(bucket) for bucket in scan["by_email"].values())
+        if record.get("email")
+    }
+
+
+def _bulk_item_plan_type(item: BulkActionItem, auth_records: dict[str, dict]) -> str:
+    email = _normalized_email(item.email)
+    record = auth_records.get(email)
+    if record:
+        return _normalize_plan_type(record.get("plan_type"))
+    if item.plan_type:
+        return _normalize_plan_type(item.plan_type)
+    if item.is_team_plan is False:
+        return "unknown"
+    if item.is_team_plan is True:
+        return "team"
+    return "team"
+
+
+def _bulk_validate_common(
+    item: BulkActionItem,
+    action: str,
+    accounts_by_email: dict[str, dict],
+    auth_records: dict[str, dict],
+) -> dict | None:
+    email = _normalized_email(item.email)
+    if not email:
+        return _bulk_result("", ok=False, status="skipped", skipped_reason="missing_email", message="缺少邮箱")
+    if _is_main_account_email(email):
+        return _bulk_result(email, ok=False, status="skipped", skipped_reason="main_account", message="主号不允许批量操作")
+    if _bulk_item_plan_type(item, auth_records) != "team":
+        return _bulk_result(
+            email,
+            ok=False,
+            status="skipped",
+            skipped_reason="non_team_plan",
+            message="非 Team plan 账号只允许只读展示",
+        )
+    if action in {"mark-invalid", "sell", "delete"} and email not in accounts_by_email:
+        return _bulk_result(email, ok=False, status="skipped", skipped_reason="missing_account", message="账号不存在")
+    return None
+
+
+def _bulk_preview_item(
+    item: BulkActionItem,
+    action: str,
+    accounts_by_email: dict[str, dict],
+    auth_records: dict[str, dict],
+) -> dict:
+    skipped = _bulk_validate_common(item, action, accounts_by_email, auth_records)
+    if skipped:
+        return skipped
+    email = _normalized_email(item.email)
+    acc = accounts_by_email.get(email)
+    member_type = (item.type or "").strip().lower()
+    if action == "sell":
+        from autoteam.accounts import STATUS_ACTIVE
+        from autoteam.codex_auth import is_uploadable_oauth_rt_file
+
+        if not acc or acc.get("status") != STATUS_ACTIVE:
+            return _bulk_result(
+                email,
+                ok=False,
+                status="skipped",
+                skipped_reason="not_active",
+                message=f"账号状态为 {acc.get('status') if acc else '-'}，不是 active",
+            )
+        auth_file = acc.get("rt_auth_file") or acc.get("auth_file") or ""
+        if not auth_file or not is_uploadable_oauth_rt_file(auth_file):
+            return _bulk_result(
+                email,
+                ok=False,
+                status="skipped",
+                skipped_reason="missing_oauth_rt",
+                message="账号缺少本地 OAuth RT 文件",
+            )
+    elif action == "remove-team" and member_type != "member":
+        return _bulk_result(email, ok=False, status="skipped", skipped_reason="invalid_type", message="只允许移出 member")
+    elif action == "cancel-invite" and member_type != "invite":
+        return _bulk_result(email, ok=False, status="skipped", skipped_reason="invalid_type", message="只允许取消 invite")
+    if action in {"remove-team", "cancel-invite"} and not (item.user_id or "").strip():
+        return _bulk_result(email, ok=False, status="skipped", skipped_reason="missing_user_id", message="缺少 user_id")
+    return _bulk_result(email, ok=True, status="preview", message="等待确认")
+
+
+def _bulk_execute_mark_invalid(email: str, options: dict) -> dict:
+    from autoteam import account_health, accounts
+
+    reason = str(options.get("reason") or account_health.INVALID_REASON_AUTH_ERROR).strip().lower()
+    if reason not in account_health.ALL_INVALID_REASONS:
+        raise HTTPException(status_code=400, detail="reason 非法")
+    account_items = accounts.load_accounts()
+    acc = accounts.find_account(account_items, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    result = account_health.mark_invalid(
+        acc,
+        reason=reason,
+        last_error=str(options.get("last_error") or ""),
+        in_place=True,
+    )
+    accounts.save_accounts(account_items)
+    return result
+
+
+def _bulk_execute_sell(email: str, options: dict) -> dict:
+    from autoteam.accounts import STATUS_ACTIVE, find_account, load_accounts, mark_account_sold, update_account
+    from autoteam.auth_archive import archive_account_auth_file
+    from autoteam.codex_auth import is_uploadable_oauth_rt_file
+    from autoteam.sync_targets import delete_account_from_configured_targets
+
+    accounts = load_accounts()
+    acc = find_account(accounts, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if acc.get("status") != STATUS_ACTIVE:
+        raise HTTPException(status_code=400, detail=f"账号状态为 {acc.get('status')}，不是 active")
+    auth_file = acc.get("rt_auth_file") or acc.get("auth_file") or ""
+    if not auth_file or not is_uploadable_oauth_rt_file(auth_file):
+        raise HTTPException(status_code=400, detail="账号缺少本地 OAuth RT 文件，不能标记为合格已售账号")
+
+    auth_names = _existing_auth_names_for_account(acc)
+    archive_path = acc.get("cpa_archive_file") or ""
+    if not archive_path or not Path(archive_path).exists():
+        archive_path = archive_account_auth_file(email, auth_file)
+        update_account(email, cpa_archive_file=archive_path)
+
+    remote_cleanup = delete_account_from_configured_targets(email, auth_names=auth_names)
+    updates = mark_account_sold(email, remote_cleanup=remote_cleanup)
+    note = str(options.get("note") or "").strip()
+    if note:
+        updates = update_account(email, sale_note=note)
+    return {
+        "status": "sold",
+        "auth_file": auth_file,
+        "cpa_archive_file": (updates or {}).get("cpa_archive_file") or archive_path,
+        "remote_cleanup": remote_cleanup,
+    }
+
+
+def _bulk_execute_delete(email: str, options: dict) -> dict:
+    from autoteam.account_ops import delete_managed_account
+
+    sync_cpa_after = bool(options.get("sync_cpa_after", True))
+    return _pw_executor.run(delete_managed_account, email, sync_cpa_after=sync_cpa_after)
+
+
+def _bulk_execute_team_action(item: BulkActionItem, action: str) -> dict:
+    from autoteam.accounts import find_account, load_accounts, update_account
+    from autoteam.admin_state import get_admin_session_token, get_chatgpt_account_id
+
+    account_id = get_chatgpt_account_id()
+    if not get_admin_session_token() or not account_id:
+        raise HTTPException(status_code=400, detail="请先完成管理员登录")
+
+    email = _normalized_email(item.email)
+    user_id = (item.user_id or "").strip()
+    member_type = (item.type or "").strip().lower()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="缺少 user_id")
+    if action == "remove-team" and member_type != "member":
+        raise HTTPException(status_code=400, detail="只允许移出 member")
+    if action == "cancel-invite" and member_type != "invite":
+        raise HTTPException(status_code=400, detail="只允许取消 invite")
+
+    path = (
+        f"/backend-api/accounts/{account_id}/invites/{user_id}"
+        if action == "cancel-invite"
+        else f"/backend-api/accounts/{account_id}/users/{user_id}"
+    )
+    action_text = "取消邀请" if action == "cancel-invite" else "移出 Team"
+
+    def _do_action():
+        def _remove(chatgpt):
+            result = chatgpt._api_fetch("DELETE", path)
+            return result
+
+        return _run_with_chatgpt_session(_remove)
+
+    result = _pw_executor.run(_do_action)
+    if result["status"] not in (200, 204):
+        raise HTTPException(status_code=500, detail=f"{action_text}失败: HTTP {result['status']}")
+
+    acc = find_account(load_accounts(), email)
+    if acc:
+        update_account(email, status="standby")
+    return {"message": f"已{action_text}: {email}", "type": member_type, "remote_status": result["status"]}
+
+
+def _bulk_execute_item(item: BulkActionItem, action: str, options: dict) -> dict:
+    email = _normalized_email(item.email)
+    if action == "mark-invalid":
+        data = _bulk_execute_mark_invalid(email, options)
+        return _bulk_result(email, ok=True, status="done", message="已标记失效", data=data)
+    if action == "sell":
+        data = _bulk_execute_sell(email, options)
+        return _bulk_result(email, ok=True, status="done", message="已标记已售并清理远端", data=data)
+    if action == "delete":
+        data = _bulk_execute_delete(email, options)
+        return _bulk_result(email, ok=True, status="done", message="已删除账号", data=data)
+    if action in {"remove-team", "cancel-invite"}:
+        data = _bulk_execute_team_action(item, action)
+        message = "已移出 Team" if action == "remove-team" else "已取消邀请"
+        return _bulk_result(email, ok=True, status="done", message=message, data=data)
+    return _bulk_result(email, ok=False, status="failed", skipped_reason="invalid_action", message="action 非法")
+
+
+@app.post("/api/accounts/bulk-action")
+def post_accounts_bulk_action(params: BulkActionParams):
+    """统一处理账号批量操作。单项失败不会中断后续项。"""
+    from autoteam.accounts import load_accounts
+
+    action = (params.action or "").strip().lower()
+    if action not in _BULK_ACTIONS:
+        raise HTTPException(status_code=400, detail="action 非法")
+    if not params.items:
+        raise HTTPException(status_code=400, detail="items 不能为空")
+
+    options = params.options or {}
+    accounts = load_accounts()
+    accounts_by_email = {(a.get("email") or "").strip().lower(): a for a in accounts if a.get("email")}
+    auth_records = _auth_record_by_email()
+    preview_results = [
+        _bulk_preview_item(item, action, accounts_by_email, auth_records)
+        for item in params.items
+    ]
+
+    if not params.confirm:
+        return {
+            "action": action,
+            "confirm": False,
+            "preview": True,
+            "results": preview_results,
+        }
+
+    acquired = False
+    if action in _BULK_LOCK_ACTIONS:
+        if not _playwright_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail=_current_busy_detail("有任务正在执行，请等待完成后再批量操作"))
+        acquired = True
+
+    try:
+        results = []
+        for item, preview in zip(params.items, preview_results, strict=False):
+            if not preview.get("ok"):
+                results.append(preview)
+                continue
+            try:
+                results.append(_bulk_execute_item(item, action, options))
+            except Exception as exc:
+                logger.exception("[API] 批量操作单项失败 action=%s email=%s", action, item.email)
+                results.append(
+                    _bulk_result(
+                        _normalized_email(item.email),
+                        ok=False,
+                        status="failed",
+                        message=_exception_message(exc),
+                        skipped_reason="error",
+                    )
+                )
+        return {
+            "action": action,
+            "confirm": bool(params.confirm),
+            "preview": False,
+            "results": results,
+        }
+    finally:
+        if acquired:
+            _playwright_lock.release()
 
 
 @app.get("/api/accounts")
@@ -2377,8 +2756,8 @@ def get_accounts(
     """获取所有账号列表"""
     from autoteam.account_classifier import (
         CATEGORY_IN_USE,
-        CATEGORY_INVENTORY,
         CATEGORY_INVALID,
+        CATEGORY_INVENTORY,
         CATEGORY_NOT_REGISTERED,
         CATEGORY_REGISTERED,
         CATEGORY_SOLD,
@@ -2735,6 +3114,7 @@ def post_sell_account(email: str, params: SellAccountParams = SellAccountParams(
     """标记账号已售出：保留 Team 席位，删除 CPA/Sub2API 远端记录，并停止后续同步。"""
     from autoteam.accounts import STATUS_ACTIVE, find_account, load_accounts, mark_account_sold, update_account
     from autoteam.auth_archive import archive_account_auth_file
+    from autoteam.codex_auth import is_uploadable_oauth_rt_file
     from autoteam.sync_targets import delete_account_from_configured_targets
 
     email = email.strip().lower()
@@ -2749,8 +3129,8 @@ def post_sell_account(email: str, params: SellAccountParams = SellAccountParams(
         raise HTTPException(status_code=400, detail=f"账号状态为 {acc.get('status')}，不是 active")
 
     auth_file = acc.get("rt_auth_file") or acc.get("auth_file") or ""
-    if not auth_file or not Path(auth_file).exists():
-        raise HTTPException(status_code=400, detail="账号缺少本地 CPA 认证文件，不能标记为合格已售账号")
+    if not auth_file or not is_uploadable_oauth_rt_file(auth_file):
+        raise HTTPException(status_code=400, detail="账号缺少本地 OAuth RT 文件，不能标记为合格已售账号")
 
     auth_names = _existing_auth_names_for_account(acc)
     archive_path = acc.get("cpa_archive_file") or ""

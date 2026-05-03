@@ -6,7 +6,7 @@
           <div class="text-lg font-semibold text-white">账号管理</div>
           <p class="text-sm text-gray-400 max-w-2xl">
             本地账号表来自 <code class="text-xs px-1 bg-gray-800 rounded">accounts.json</code>，用于登录、移出、已售、删除、导出和详情操作。
-            下方认证文件盘点只扫描 <code class="text-xs px-1 bg-gray-800 rounded">auths/</code>，用于核对文件，不直接执行账号操作。
+            下方认证文件盘点扫描 <code class="text-xs px-1 bg-gray-800 rounded">auths/</code>，用于核对文件和批量处理 Team 认证记录。
           </p>
         </div>
         <button
@@ -59,6 +59,7 @@
 
     <AuthsTable
       :refresh-key="refreshKey"
+      @bulk-complete="handleBulkComplete"
     />
 
     <AccountDrawer
@@ -111,6 +112,14 @@ function setAccountCategory(category) {
 
 function handleDrawerActionDone() {
   bumpRefresh()
+}
+
+function handleBulkComplete() {
+  bumpRefresh()
+  if (drawerOpen.value) {
+    drawerOpen.value = false
+    drawerEmail.value = ''
+  }
 }
 
 function handleRefresh() {

@@ -144,7 +144,7 @@ def test_get_status_includes_unavailable_summary(tmp_path, monkeypatch):
 
 def test_post_sell_account_marks_sold_and_deletes_configured_targets(tmp_path, monkeypatch):
     auth_file = tmp_path / "codex-sold@example.com-team.json"
-    auth_file.write_text("{}", encoding="utf-8")
+    auth_file.write_text(json.dumps({"refresh_token": "rt"}), encoding="utf-8")
     archive_file = tmp_path / "archive" / auth_file.name
     accounts_data = [
         {

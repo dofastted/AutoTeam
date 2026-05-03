@@ -208,36 +208,39 @@ V2 凭证结构：
 
 | 页面键 | 组件 | 作用 |
 |--------|------|------|
-| `accounts` | `web/src/components/AccountManagement.vue` | 本地账号操作表、详情抽屉和 auth 文件盘点 |
+| `accounts` | `web/src/components/AccountManagement.vue` | 本地账号表、Auth 文件盘点和详情抽屉入口 |
 | `account-clean` | `web/src/components/AccountCleanPage.vue` | 扫描、预览、应用三步清理 |
 
 ### 账号管理中心
 
-`web/src/components/AccountManagement.vue` 当前把账号生命周期管理和 auth 文件盘点分开：
+`web/src/components/AccountManagement.vue` 已移除旧五 tab 账号视图。当前页面由三个子组件组成：
 
 - `AccountTable.vue`：从 `/api/accounts` 读取 `accounts.json` 生命周期模型，提供本地账号操作入口。操作列调用 `loginAccount`、`getCodexAuth`、`kickAccount`、`sellAccount`、`deleteAccount`。
+- `AuthsTable.vue`：从 `/api/auths/accounts` 读取 `auths/` 文件聚合结果，提供 category、plan_type、OAuth、Session、排序、邮箱搜索、分页和 Team 批量工具。
 - `AccountDrawer.vue`：详情抽屉与状态操作，只接收 `/api/accounts` 可解析的邮箱。
-- `AuthsTable.vue`：从 `/api/auths/accounts` 读取 `auths/` 文件聚合结果，提供 category、OAuth、Session、排序、邮箱搜索和分页，只作为文件盘点。
 
 `AuthsTable.vue` 不再触发行点击详情，避免 auth-only 邮箱调用 `/api/accounts/{email}` 后返回 404。
 
-### Auth 文件列表
+### 账号列表
 
 `web/src/components/AuthsTable.vue` 当前负责：
 
 - category 下拉：`active`、`sold`、`tradable`、`unusable`、`archive`、`all`
+- plan_type 下拉：`team`、`plus`、`free`、`unknown`
 - OAuth 三态筛选
 - Session 三态筛选
 - 邮箱搜索
-- 排序：`email_asc`、`email_desc`、`expired_asc`、`expired_desc`、`category_asc`
+- 排序：`email_asc`、`email_desc`、`expired_asc`、`expired_desc`、`category_asc`、`plan_asc`
 - 页大小：20、50、100、200
 - facets badge：显示按邮箱主分类聚合后的五个 bucket 计数
+- Team 行勾选和批量工具条：`mark-invalid`、`sell`、`delete`
 
-列表数据调用 `api.getAuthsAccounts`，也就是 `GET /api/auths/accounts`。默认 category 为空字符串，隐藏 `archive`。
+列表数据调用 `api.getAuthsAccounts`，也就是 `GET /api/auths/accounts`。默认 category 为空字符串，隐藏 `archive`，但不隐藏非 Team plan。非 Team 行只读，不打开详情抽屉，也不能进入危险批量选择。
 
 当前列表列包括：
 
 - 邮箱
+- plan
 - category
 - OAuth
 - Session

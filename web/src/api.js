@@ -102,6 +102,7 @@ export const api = {
   getCodexAuth: (email) => request('GET', `/accounts/${encodeURIComponent(email)}/codex-auth`),
   kickAccount: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/kick`),
   sellAccount: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/sell`),
+  bulkAccountAction: (payload) => request('POST', '/accounts/bulk-action', payload),
   listAccounts: ({ category, q, page, page_size, sort } = {}) => {
     const params = new URLSearchParams()
     if (category) params.set('category', category)
@@ -123,9 +124,10 @@ export const api = {
   startAccountCpaAuth: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/cpa-auth`),
 
   getAuthsStats: () => request('GET', '/auths/stats'),
-  getAuthsAccounts: ({ category, q, has_oauth, has_session, page, page_size, sort } = {}) => {
+  getAuthsAccounts: ({ category, plan_type, q, has_oauth, has_session, page, page_size, sort } = {}) => {
     const params = new URLSearchParams()
     if (category) params.set('category', category)
+    if (plan_type) params.set('plan_type', plan_type)
     if (q) params.set('q', q)
     if (has_oauth != null) params.set('has_oauth', has_oauth ? 'true' : 'false')
     if (has_session != null) params.set('has_session', has_session ? 'true' : 'false')
