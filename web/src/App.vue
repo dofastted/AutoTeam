@@ -180,6 +180,12 @@
           @refresh="refresh"
           @progress="onAdminProgress" />
 
+        <AccountManagement v-else-if="currentPage === 'accounts'"
+          :loading="loading" @refresh="refresh" />
+
+        <AccountCleanPage v-else-if="currentPage === 'account-clean'"
+          :loading="loading" @refresh="refresh" />
+
         <TaskHistoryPage v-else-if="currentPage === 'tasks'"
           :tasks="tasks" />
 
@@ -193,6 +199,8 @@
 import { computed, defineAsyncComponent, ref, onMounted, onUnmounted, watch } from 'vue'
 import { api, setApiKey, clearApiKey } from './api.js'
 import Sidebar from './components/Sidebar.vue'
+import AccountManagement from './components/AccountManagement.vue'
+import AccountCleanPage from './components/AccountCleanPage.vue'
 
 const SetupPage = defineAsyncComponent(() => import('./components/SetupPage.vue'))
 const Dashboard = defineAsyncComponent(() => import('./components/Dashboard.vue'))
@@ -230,6 +238,8 @@ const pageTitles = {
   pool: '账号池操作',
   sync: '同步中心',
   oauth: 'OAuth 登录',
+  accounts: '账号管理中心',
+  'account-clean': '账号清理',
   tasks: '任务历史',
   logs: '日志',
 }

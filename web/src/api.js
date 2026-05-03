@@ -100,6 +100,23 @@ export const api = {
   getCodexAuth: (email) => request('GET', `/accounts/${encodeURIComponent(email)}/codex-auth`),
   kickAccount: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/kick`),
   sellAccount: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/sell`),
+  listAccounts: ({ category, q, page, page_size, sort } = {}) => {
+    const params = new URLSearchParams()
+    if (category) params.set('category', category)
+    if (q) params.set('q', q)
+    if (page != null) params.set('page', String(page))
+    if (page_size != null) params.set('page_size', String(page_size))
+    if (sort) params.set('sort', sort)
+    const qs = params.toString()
+    return request('GET', `/accounts${qs ? '?' + qs : ''}`)
+  },
+  getAccountDetail: (email) => request('GET', `/accounts/${encodeURIComponent(email)}`),
+  postAccountsCleanDryRun: () => request('POST', '/accounts/clean/dry-run'),
+  postAccountsCleanApply: () => request('POST', '/accounts/clean/apply'),
+  allocateAccount: (email, body = {}) => request('POST', `/accounts/${encodeURIComponent(email)}/allocate`, body),
+  releaseAccount: (email, body = {}) => request('POST', `/accounts/${encodeURIComponent(email)}/release`, body),
+  markAccountInvalid: (email, body) => request('POST', `/accounts/${encodeURIComponent(email)}/mark-invalid`, body),
+  repairAccountOauth: (email, body = {}) => request('POST', `/accounts/${encodeURIComponent(email)}/repair-oauth`, body),
   getCpaFiles: () => request('GET', '/cpa/files'),
   startAccountCpaAuth: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/cpa-auth`),
 

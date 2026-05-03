@@ -87,6 +87,8 @@ const items = [
   { key: 'pool', icon: '🔁', label: '账号池操作', mobileLabel: '账号池', hint: '轮转、补位与清理' },
   { key: 'sync', icon: '🔄', label: '同步中心', mobileLabel: '同步', hint: '同步本地、远端与状态' },
   { key: 'oauth', icon: '🔐', label: 'OAuth 登录', mobileLabel: 'OAuth', hint: '手动接管 OAuth 流程' },
+  { key: 'accounts', icon: '🗂', label: '账号管理', mobileLabel: '账号', hint: '已注册/库存/使用中/失效/已售' },
+  { key: 'account-clean', icon: '🧹', label: '账号清理', mobileLabel: '清理', hint: '扫描重复/缺文件/错误 auth' },
   { key: 'tasks', icon: '📜', label: '任务历史', mobileLabel: '任务', hint: '追踪任务执行结果' },
   { key: 'logs', icon: '📋', label: '日志', mobileLabel: '日志', hint: '查看实时运行日志' },
 ]
