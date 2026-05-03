@@ -3,6 +3,7 @@ import random
 from autoteam.account_inventory import (
     ALLOCATION_STATUS_IN_USE,
     allocate_account,
+    release_account,
     _gen_allocation_id,
 )
 
@@ -194,3 +195,162 @@ def test_allocate_account_returns_copied_account_when_not_in_place():
     assert copied["allocation"]["allocation_id"] == "copy-1"
     assert original["usage_status"] == "inventory"
     assert "allocation" not in original
+
+
+def test_release_account_releases_in_use_account_back_to_inventory():
+    account = _inventory_account(
+        usage_status="in_use",
+        updated_at=1,
+        allocation={
+            "status": "in_use",
+            "allocation_id": "alloc_123",
+            "project": "proj-a",
+            "allocated_to": "worker-1",
+            "allocated_at": 100,
+        },
+    )
+
+    result = release_account(account, now=200)
+
+    assert result == {
+        "changed": True,
+        "applied": [
+            "usage_status",
+            "allocation.status",
+            "allocation.released_at",
+            "allocation.release_reason",
+            "updated_at",
+        ],
+        "reason": None,
+        "warning": None,
+        "account": account,
+    }
+    assert account["usage_status"] == "inventory"
+    assert account["updated_at"] == 200
+    assert account["allocation"] == {
+        "status": "released",
+        "allocation_id": "alloc_123",
+        "project": "proj-a",
+        "allocated_to": "worker-1",
+        "allocated_at": 100,
+        "released_at": 200,
+        "release_reason": "",
+    }
+
+
+def test_release_account_writes_release_reason():
+    account = _inventory_account(
+        usage_status="in_use",
+        allocation={
+            "status": "in_use",
+            "allocation_id": "alloc_123",
+            "project": "proj-a",
+            "allocated_to": "worker-1",
+            "allocated_at": 100,
+        },
+    )
+
+    result = release_account(account, reason="task_done", now=300)
+
+    assert result["changed"] is True
+    assert account["allocation"]["release_reason"] == "task_done"
+
+
+def test_release_account_rejects_account_not_in_use():
+    account = _inventory_account(usage_status="inventory")
+
+    result = release_account(account, now=12345)
+
+    assert result == {
+        "changed": False,
+        "applied": [],
+        "reason": "not_in_use",
+        "warning": None,
+        "account": account,
+    }
+
+
+def test_release_account_rejects_main_account():
+    account = _inventory_account(
+        role="main",
+        usage_status="in_use",
+        allocation={
+            "status": "in_use",
+            "allocation_id": "alloc_123",
+            "project": "proj-a",
+            "allocated_to": "worker-1",
+            "allocated_at": 100,
+        },
+    )
+
+    result = release_account(account, now=12345)
+
+    assert result == {
+        "changed": False,
+        "applied": [],
+        "reason": "main_account",
+        "warning": None,
+        "account": account,
+    }
+    assert account["usage_status"] == "in_use"
+    assert account["allocation"]["status"] == "in_use"
+
+
+def test_release_account_rejects_sold_account():
+    account = _inventory_account(usage_status="sold")
+
+    result = release_account(account, now=12345)
+
+    assert result == {
+        "changed": False,
+        "applied": [],
+        "reason": "sold",
+        "warning": None,
+        "account": account,
+    }
+
+
+def test_release_account_warns_when_health_is_not_valid():
+    account = _inventory_account(
+        usage_status="in_use",
+        health_status="invalid",
+        allocation={
+            "status": "in_use",
+            "allocation_id": "alloc_123",
+            "project": "proj-a",
+            "allocated_to": "worker-1",
+            "allocated_at": 100,
+        },
+    )
+
+    result = release_account(account, now=12345)
+
+    assert result["changed"] is True
+    assert result["reason"] is None
+    assert result["warning"] == "not_valid"
+    assert account["usage_status"] == "inventory"
+    assert account["allocation"]["status"] == "released"
+
+
+def test_release_account_returns_copied_account_when_not_in_place():
+    original = _inventory_account(
+        usage_status="in_use",
+        allocation={
+            "status": "in_use",
+            "allocation_id": "alloc_123",
+            "project": "proj-a",
+            "allocated_to": "worker-1",
+            "allocated_at": 100,
+        },
+    )
+
+    result = release_account(original, reason="task_done", now=555, in_place=False)
+
+    copied = result["account"]
+    assert copied is not original
+    assert copied["usage_status"] == "inventory"
+    assert copied["allocation"]["status"] == "released"
+    assert copied["allocation"]["release_reason"] == "task_done"
+    assert original["usage_status"] == "in_use"
+    assert original["allocation"]["status"] == "in_use"
+    assert "released_at" not in original["allocation"]

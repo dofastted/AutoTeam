@@ -8,7 +8,13 @@ from copy import deepcopy
 from typing import Any
 
 from autoteam import accounts as legacy_accounts
-from autoteam.account_models import HEALTH_VALID, USAGE_IN_USE, USAGE_INVENTORY, USAGE_SOLD
+from autoteam.account_models import (
+    HEALTH_QUOTA_EXHAUSTED,
+    HEALTH_VALID,
+    USAGE_IN_USE,
+    USAGE_INVENTORY,
+    USAGE_SOLD,
+)
 
 ALLOCATION_STATUS_INVENTORY = "inventory"
 ALLOCATION_STATUS_IN_USE = "in_use"
@@ -164,10 +170,95 @@ def allocate_account(
     return result
 
 
+def release_account(
+    account: dict,
+    *,
+    reason: str = "",
+    now: int | None = None,
+    in_place: bool = True,
+) -> dict:
+    target = _copy_account(account, in_place=in_place)
+    usage_status = _normalize_key(target.get("usage_status"))
+    role = _normalize_key(target.get("role"))
+    health_status = _normalize_key(target.get("health_status"))
+
+    if role == "main":
+        return {
+            "changed": False,
+            "applied": [],
+            "reason": "main_account",
+            "warning": None,
+            "account": target,
+        }
+
+    if usage_status == USAGE_SOLD:
+        return {
+            "changed": False,
+            "applied": [],
+            "reason": "sold",
+            "warning": None,
+            "account": target,
+        }
+
+    if usage_status != USAGE_IN_USE:
+        return {
+            "changed": False,
+            "applied": [],
+            "reason": "not_in_use",
+            "warning": None,
+            "account": target,
+        }
+
+    unix_ts = int(now if now is not None else time.time())
+    result: dict[str, Any] = {
+        "changed": False,
+        "applied": [],
+        "reason": None,
+        "warning": None,
+        "account": target,
+    }
+
+    if health_status not in {HEALTH_VALID, HEALTH_QUOTA_EXHAUSTED}:
+        result["warning"] = "not_valid"
+
+    _set_if_changed(target, "usage_status", USAGE_INVENTORY, result)
+
+    allocation = target.get("allocation")
+    if not isinstance(allocation, dict):
+        allocation = {}
+        target["allocation"] = allocation
+
+    _set_nested_if_changed(
+        allocation,
+        "status",
+        ALLOCATION_STATUS_RELEASED,
+        result,
+        applied_name="allocation.status",
+    )
+    _set_nested_if_changed(
+        allocation,
+        "released_at",
+        unix_ts,
+        result,
+        applied_name="allocation.released_at",
+    )
+    _set_nested_if_changed(
+        allocation,
+        "release_reason",
+        reason,
+        result,
+        applied_name="allocation.release_reason",
+    )
+
+    _set_if_changed(target, "updated_at", unix_ts, result)
+    return result
+
+
 __all__ = [
     "ALLOCATION_STATUS_INVENTORY",
     "ALLOCATION_STATUS_IN_USE",
     "ALLOCATION_STATUS_RELEASED",
     "ALLOCATION_STATUS_SOLD",
     "allocate_account",
+    "release_account",
 ]
