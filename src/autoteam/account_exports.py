@@ -79,6 +79,14 @@ def _credential_path(account: Mapping[str, Any], credential_key: str) -> str:
     return _mapping_value(credential if isinstance(credential, Mapping) else None, "path", "file")
 
 
+def _normalize_email(value: Any) -> str:
+    return _normalize_text(value).strip().lower()
+
+
+def _normalize_header(value: Any) -> str:
+    return _normalize_text(value).strip().lower()
+
+
 def _is_inventory_account(account: Mapping[str, Any]) -> bool:
     return account.get("category") == "inventory" and account.get("is_main_account") is not True
 
@@ -186,4 +194,108 @@ def export_sold_csv(accounts: list[dict], *, encoding: str = "utf-8-sig") -> str
     return csv_text
 
 
-__all__ = ["export_inventory_csv", "export_sold_csv"]
+def dry_run_import_csv(
+    csv_text: str,
+    existing_accounts: list[dict],
+    *,
+    required_columns: tuple[str, ...] = ("email",),
+) -> dict:
+    """解析 CSV 文本并返回导入预览报告。"""
+
+    normalized_required_columns = tuple(
+        column for column in (_normalize_header(name) for name in required_columns) if column
+    )
+    existing_emails = {
+        _normalize_email(account.get("email"))
+        for account in existing_accounts
+        if isinstance(account, Mapping) and _normalize_email(account.get("email"))
+    }
+    report = {
+        "headers": [],
+        "row_count": 0,
+        "to_add": [],
+        "conflicts": [],
+        "missing_fields": [],
+        "invalid_rows": [],
+        "summary": {
+            "total_rows": 0,
+            "to_add_count": 0,
+            "conflict_count": 0,
+            "missing_field_count": 0,
+            "invalid_row_count": 0,
+        },
+    }
+
+    if not csv_text:
+        return report
+
+    buffer = io.StringIO(csv_text.removeprefix("\ufeff"))
+
+    try:
+        reader = csv.DictReader(buffer)
+    except csv.Error as exc:
+        report["invalid_rows"].append({"row_index": 0, "reason": str(exc)})
+        report["summary"]["invalid_row_count"] = 1
+        return report
+
+    raw_headers = list(reader.fieldnames or [])
+    normalized_headers = [_normalize_header(header) for header in raw_headers]
+    report["headers"] = normalized_headers
+
+    seen_csv_emails: set[str] = set()
+    row_index = 0
+
+    try:
+        for raw_row in reader:
+            row_index += 1
+            report["row_count"] = row_index
+
+            if not isinstance(raw_row, dict):
+                report["invalid_rows"].append({"row_index": row_index, "reason": "invalid_row_type"})
+                continue
+
+            if None in raw_row:
+                report["invalid_rows"].append({"row_index": row_index, "reason": "extra_values"})
+                continue
+
+            row = {
+                normalized_headers[index]: _normalize_text(raw_row.get(header))
+                for index, header in enumerate(raw_headers)
+                if normalized_headers[index]
+            }
+            missing = [column for column in normalized_required_columns if not row.get(column, "").strip()]
+            if missing:
+                report["missing_fields"].append({"row_index": row_index, "missing": missing})
+                continue
+
+            email = _normalize_text(row.get("email")).strip()
+            normalized_email = email.lower()
+
+            if normalized_email in seen_csv_emails:
+                report["conflicts"].append(
+                    {"row_index": row_index, "email": email, "reason": "duplicate_in_csv"}
+                )
+                continue
+
+            seen_csv_emails.add(normalized_email)
+            if normalized_email in existing_emails:
+                report["conflicts"].append(
+                    {"row_index": row_index, "email": email, "reason": "duplicate_email"}
+                )
+                continue
+
+            report["to_add"].append(row)
+    except csv.Error as exc:
+        report["invalid_rows"].append({"row_index": row_index + 1, "reason": str(exc)})
+
+    report["summary"] = {
+        "total_rows": report["row_count"],
+        "to_add_count": len(report["to_add"]),
+        "conflict_count": len(report["conflicts"]),
+        "missing_field_count": len(report["missing_fields"]),
+        "invalid_row_count": len(report["invalid_rows"]),
+    }
+    return report
+
+
+__all__ = ["dry_run_import_csv", "export_inventory_csv", "export_sold_csv"]

@@ -1,7 +1,7 @@
 import csv
 import io
 
-from autoteam.account_exports import export_inventory_csv, export_sold_csv
+from autoteam.account_exports import dry_run_import_csv, export_inventory_csv, export_sold_csv
 
 
 def _read_rows(csv_text: str) -> list[list[str]]:
@@ -320,6 +320,102 @@ def test_export_sold_csv_legacy_status_field():
             "",
         ],
     ]
+
+
+def test_dry_run_import_csv_basic_add():
+    report = dry_run_import_csv(
+        "Email,Password\nalice@example.com,pw-a\nbob@example.com,pw-b\n",
+        [],
+    )
+
+    assert report["headers"] == ["email", "password"]
+    assert report["row_count"] == 2
+    assert report["to_add"] == [
+        {"email": "alice@example.com", "password": "pw-a"},
+        {"email": "bob@example.com", "password": "pw-b"},
+    ]
+    assert report["summary"]["to_add_count"] == 2
+
+
+def test_dry_run_import_csv_detects_existing_conflict():
+    report = dry_run_import_csv(
+        "email,password\nused@example.com,pw-used\nnew@example.com,pw-new\n",
+        [{"email": "used@example.com"}],
+    )
+
+    assert report["to_add"] == [{"email": "new@example.com", "password": "pw-new"}]
+    assert report["conflicts"] == [
+        {"row_index": 1, "email": "used@example.com", "reason": "duplicate_email"}
+    ]
+    assert report["summary"]["conflict_count"] == 1
+
+
+def test_dry_run_import_csv_case_insensitive_email_match():
+    report = dry_run_import_csv(
+        "email,password\nalice@x.com,pw\n",
+        [{"email": "Alice@x.com"}],
+    )
+
+    assert report["to_add"] == []
+    assert report["conflicts"] == [{"row_index": 1, "email": "alice@x.com", "reason": "duplicate_email"}]
+
+
+def test_dry_run_import_csv_detects_duplicate_in_csv():
+    report = dry_run_import_csv(
+        "email,password\nsame@example.com,pw-1\nsame@example.com,pw-2\n",
+        [],
+    )
+
+    assert report["to_add"] == [{"email": "same@example.com", "password": "pw-1"}]
+    assert report["conflicts"] == [{"row_index": 2, "email": "same@example.com", "reason": "duplicate_in_csv"}]
+
+
+def test_dry_run_import_csv_missing_email_column():
+    report = dry_run_import_csv(
+        "email,password\n,pw-empty\n",
+        [],
+    )
+
+    assert report["to_add"] == []
+    assert report["missing_fields"] == [{"row_index": 1, "missing": ["email"]}]
+    assert report["summary"]["missing_field_count"] == 1
+
+
+def test_dry_run_import_csv_handles_extra_columns():
+    report = dry_run_import_csv(
+        "EMAIL,password,cpa_json,remark\nextra@example.com,pw-extra,/tmp/a.json,keep\n",
+        [],
+    )
+
+    assert report["headers"] == ["email", "password", "cpa_json", "remark"]
+    assert report["to_add"] == [
+        {
+            "email": "extra@example.com",
+            "password": "pw-extra",
+            "cpa_json": "/tmp/a.json",
+            "remark": "keep",
+        }
+    ]
+
+
+def test_dry_run_import_csv_empty_input():
+    report = dry_run_import_csv("", [])
+
+    assert report == {
+        "headers": [],
+        "row_count": 0,
+        "to_add": [],
+        "conflicts": [],
+        "missing_fields": [],
+        "invalid_rows": [],
+        "summary": {
+            "total_rows": 0,
+            "to_add_count": 0,
+            "conflict_count": 0,
+            "missing_field_count": 0,
+            "invalid_row_count": 0,
+        },
+    }
 
 
 def test_export_sold_csv_empty_input():
