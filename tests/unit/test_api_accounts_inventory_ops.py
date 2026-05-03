@@ -11,6 +11,7 @@ from autoteam.account_models import (
     USAGE_IN_USE,
     USAGE_INVENTORY,
     USAGE_NORMAL,
+    USAGE_SOLD,
 )
 
 
@@ -81,6 +82,29 @@ def test_post_allocate_account_non_inventory_returns_reason(monkeypatch):
     assert data["warning"] is None
 
 
+def test_post_allocate_account_sold_returns_reason(monkeypatch):
+    store, saved = _patch_account_store(monkeypatch, [_make_account(usage_status=USAGE_SOLD)])
+
+    data = api.post_allocate_account("user@example.com", api.AllocateAccountParams())
+
+    assert data["changed"] is False
+    assert data["reason"] == "sold"
+    assert data["warning"] is None
+    assert data["account"]["usage_status"] == USAGE_SOLD
+    assert saved
+    assert store[0]["usage_status"] == USAGE_SOLD
+
+
+def test_post_allocate_account_invalid_returns_reason(monkeypatch):
+    _patch_account_store(monkeypatch, [_make_account(health_status=HEALTH_INVALID)])
+
+    data = api.post_allocate_account("user@example.com", api.AllocateAccountParams())
+
+    assert data["changed"] is False
+    assert data["reason"] == "not_valid"
+    assert data["warning"] is None
+
+
 def test_post_release_account_success(monkeypatch):
     store, saved = _patch_account_store(
         monkeypatch,
@@ -116,6 +140,44 @@ def test_post_release_account_not_in_use_returns_reason(monkeypatch):
 
     assert data["changed"] is False
     assert data["reason"] == "not_in_use"
+    assert data["warning"] is None
+
+
+def test_post_release_account_main_account_returns_reason(monkeypatch):
+    _patch_account_store(
+        monkeypatch,
+        [
+            _make_account(
+                email="main@example.com",
+                role="main",
+                usage_status=USAGE_IN_USE,
+                allocation={"status": "in_use", "allocation_id": "alloc_1"},
+            )
+        ],
+    )
+
+    data = api.post_release_account("main@example.com", api.ReleaseAccountParams())
+
+    assert data["changed"] is False
+    assert data["reason"] == "main_account"
+    assert data["warning"] is None
+
+
+def test_post_release_account_sold_returns_reason(monkeypatch):
+    _patch_account_store(
+        monkeypatch,
+        [
+            _make_account(
+                usage_status=USAGE_SOLD,
+                allocation={"status": "sold", "allocation_id": "alloc_sold"},
+            )
+        ],
+    )
+
+    data = api.post_release_account("user@example.com", api.ReleaseAccountParams())
+
+    assert data["changed"] is False
+    assert data["reason"] == "sold"
     assert data["warning"] is None
 
 
@@ -191,6 +253,16 @@ def test_post_repair_oauth_account_success(monkeypatch):
     assert isinstance(data["account"]["last_oauth_repair_at"], int)
     assert saved
     assert store[0]["health_status"] == HEALTH_VALID
+
+
+def test_post_sell_account_main_account_raises_400(monkeypatch):
+    monkeypatch.setattr(api, "_is_main_account_email", lambda email: email == "main@example.com")
+
+    with pytest.raises(HTTPException) as exc_info:
+        api.post_sell_account("main@example.com")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "主号不允许标记为已售"
 
 
 @pytest.mark.parametrize(

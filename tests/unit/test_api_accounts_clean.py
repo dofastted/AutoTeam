@@ -46,8 +46,9 @@ def test_post_accounts_clean_dry_run_raises_500_when_scan_fails(monkeypatch):
     assert exc_info.value.detail == "账号清理 dry-run 失败: scan exploded"
 
 
-def test_post_accounts_clean_apply_backs_up_cleans_saves_and_rescans(monkeypatch):
-    backup_path = Path("/tmp/accounts.json.bak-account-clean-20260503-123456")
+def test_post_accounts_clean_apply_backs_up_cleans_saves_and_rescans(tmp_path, monkeypatch):
+    backup_path = tmp_path / "accounts.json.bak-account-clean-20260503-123456"
+    backup_path.write_text("backup snapshot", encoding="utf-8")
     accounts_data = [{"email": "user@example.com", "category": "legacy"}]
     cleanup_result = {
         "migrated_count": 1,
@@ -93,6 +94,7 @@ def test_post_accounts_clean_apply_backs_up_cleans_saves_and_rescans(monkeypatch
         "result": cleanup_result,
         "report_after": report_after,
     }
+    assert Path(result["backup_path"]).exists() is True
     assert calls == [
         ("backup", None),
         ("load", None),
