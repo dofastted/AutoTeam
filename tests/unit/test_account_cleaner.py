@@ -538,3 +538,156 @@ def test_reclassify_accounts_accepts_empty_list():
     assert result["merge_count"] == 0
     assert result["category_counts"] == {}
     assert result["result_accounts"] == []
+
+
+def test_cleaner_duplicate_email_merge_and_auth_file_migration_apply(tmp_path):
+    oauth_file = tmp_path / "codex-dup@example.com-team-01-oauth.json"
+    oauth_file.write_text(json.dumps({"refresh_token": "rt-dup"}), encoding="utf-8")
+    accounts_file = tmp_path / "accounts.json"
+    accounts_data = [
+        {
+            "id": "dup-primary",
+            "email": "dup@example.com",
+            "status": "active",
+            "password": "pw-keep",
+            "auth_file": str(oauth_file),
+            "created_at": "2026-05-03T10:00:00+00:00",
+        },
+        {
+            "id": "dup-legacy",
+            "email": "DUP@example.com",
+            "status": "pending",
+            "password": "",
+            "created_at": "2026-05-03T09:00:00+00:00",
+        },
+    ]
+    accounts_file.write_text(f"{json.dumps(accounts_data, ensure_ascii=False, indent=2)}\n", encoding="utf-8")
+
+    report = account_cleaner.cleanup_accounts(accounts_file=accounts_file, apply=True)
+
+    assert report["applied"] is True
+    assert report["reclassify"]["merge_count"] == 1
+    assert report["backup_path"] is not None
+
+    written = json.loads(accounts_file.read_text(encoding="utf-8"))
+    assert len(written) == 1
+    merged = written[0]
+    assert merged["id"] == "dup-primary"
+    assert merged["password"] == "pw-keep"
+    assert merged.get("rt_auth_file") in ("", None, str(oauth_file))
+    assert merged["auth_file"] == str(oauth_file)
+    assert merged["credentials"]["oauth_rt"]["file"] == str(oauth_file)
+    assert merged["credentials"]["oauth_rt"]["present"] is True
+    assert merged["merged_from"] == ["dup-legacy"]
+
+
+def test_cleaner_dry_run_reports_missing_password_missing_rt_and_session_auth_file(tmp_path):
+    session_file = tmp_path / "codex-session-only@example.com-team-01-session.json"
+    session_file.write_text(json.dumps({"credential_source": "chatgpt_session"}), encoding="utf-8")
+    oauth_file = tmp_path / "codex-missing-password@example.com-team-01-oauth.json"
+    oauth_file.write_text(json.dumps({"refresh_token": "rt-pw"}), encoding="utf-8")
+
+    report = account_cleaner.cleanup_accounts(
+        accounts=[
+            {
+                "id": "missing-password",
+                "email": "missing-password@example.com",
+                "registration_status": "registered",
+                "health_status": "valid",
+                "usage_status": "normal",
+                "auth_file": str(oauth_file),
+            },
+            {
+                "id": "session-only",
+                "email": "session-only@example.com",
+                "registration_status": "registered",
+                "health_status": "valid",
+                "usage_status": "inventory",
+                "password": "pw-session",
+                "auth_file": str(session_file),
+            },
+        ],
+        apply=False,
+    )
+
+    scan = report["scan"]
+    assert scan["summary"]["missing_password"] == 1
+    assert scan["summary"]["missing_rt_auth_file"] == 1
+    assert scan["summary"]["session_used_as_auth_file"] == 1
+    assert scan["issues"]["missing_password"][0]["email"] == "missing-password@example.com"
+    assert scan["issues"]["missing_rt_auth_file"][0]["email"] == "session-only@example.com"
+    assert scan["issues"]["session_used_as_auth_file"][0]["credential_field"] == "auth_file"
+
+
+def test_cleaner_sold_sync_enabled_dry_run_and_apply_fix(tmp_path):
+    oauth_file = tmp_path / "codex-sold@example.com-team-01-oauth.json"
+    oauth_file.write_text(json.dumps({"refresh_token": "rt-sold"}), encoding="utf-8")
+    session_file = tmp_path / "codex-session-fix@example.com-team-01-session.json"
+    session_file.write_text(json.dumps({"credential_source": "chatgpt_session"}), encoding="utf-8")
+
+    accounts_data = [
+        {
+            "id": "sold-1",
+            "email": "sold@example.com",
+            "status": "sold",
+            "password": "pw-sold",
+            "sync_disabled": False,
+            "auth_file": str(oauth_file),
+        },
+        {
+            "id": "session-fix",
+            "email": "session-fix@example.com",
+            "status": "active",
+            "password": "pw-session",
+            "auth_file": str(session_file),
+        },
+    ]
+    scan_report = account_cleaner.scan_accounts(deepcopy(accounts_data))
+
+    assert scan_report["summary"]["sold_sync_enabled"] == 1
+    assert scan_report["summary"]["session_used_as_auth_file"] == 1
+
+    accounts_file = tmp_path / "accounts.json"
+    accounts_file.write_text(f"{json.dumps(accounts_data, ensure_ascii=False, indent=2)}\n", encoding="utf-8")
+
+    apply_report = account_cleaner.cleanup_accounts(accounts_file=accounts_file, apply=True)
+
+    written = json.loads(accounts_file.read_text(encoding="utf-8"))
+    written_by_id = {account["id"]: account for account in written}
+
+    assert apply_report["scan"]["summary"]["sold_sync_enabled"] == 0
+    assert written_by_id["sold-1"]["usage_status"] == "sold"
+    assert written_by_id["sold-1"]["sync_disabled"] is True
+    assert written_by_id["session-fix"].get("session_auth_file") in ("", None, str(session_file))
+    assert written_by_id["session-fix"]["auth_file"] == str(session_file)
+    assert written_by_id["session-fix"]["credentials"]["session"]["file"] == str(session_file)
+    assert written_by_id["session-fix"]["credentials"]["session"]["present"] is True
+
+
+def test_cleaner_idempotent_second_apply_reports_zero_changes(tmp_path):
+    oauth_file = tmp_path / "codex-stable@example.com-team-01-oauth.json"
+    oauth_file.write_text(json.dumps({"refresh_token": "rt-stable"}), encoding="utf-8")
+    accounts_file = tmp_path / "accounts.json"
+    accounts_data = [
+        {
+            "id": "stable-1",
+            "email": "stable@example.com",
+            "status": "active",
+            "password": "pw-stable",
+            "auth_file": str(oauth_file),
+        }
+    ]
+    accounts_file.write_text(f"{json.dumps(accounts_data, ensure_ascii=False, indent=2)}\n", encoding="utf-8")
+
+    first_report = account_cleaner.cleanup_accounts(accounts_file=accounts_file, apply=True)
+    first_written = accounts_file.read_text(encoding="utf-8")
+    second_report = account_cleaner.cleanup_accounts(accounts_file=accounts_file, apply=True)
+    second_written = accounts_file.read_text(encoding="utf-8")
+
+    assert first_report["reclassify"]["changed"] is True
+    assert second_report["reclassify"]["changed"] is False
+    assert second_report["reclassify"]["schema_changes"] == 0
+    assert second_report["reclassify"]["credential_changes"] == 0
+    assert second_report["reclassify"]["merge_count"] == 0
+    assert second_report["scan"]["summary"]["duplicate_emails"] == 0
+    assert first_written == second_written
