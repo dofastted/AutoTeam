@@ -262,7 +262,8 @@ const props = defineProps({
   category: {
     type: String,
     default: 'all',
-    validator: (value) => VALID_CATEGORIES.has(value),
+    validator: (value) =>
+      ['registered', 'inventory', 'in_use', 'invalid', 'sold', 'not_registered', 'all'].includes(value),
   },
   refreshKey: {
     type: Number,
