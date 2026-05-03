@@ -2021,6 +2021,77 @@ def get_accounts(
     }
 
 
+@app.get("/api/accounts/{email}")
+def get_account_detail(email: str):
+    """获取单个账号的聚合详情"""
+    from autoteam.account_classifier import derive_category
+    from autoteam.account_credentials import identify_credential_file
+    from autoteam.account_health import is_invalid, is_quota_exhausted
+    from autoteam.account_remote import default_remote_block, summarize_remote
+    from autoteam.accounts import find_account, load_accounts
+
+    normalized_email = email.strip().lower()
+    accounts = load_accounts()
+    acc = find_account(accounts, normalized_email)
+    is_main = _is_main_account_email(normalized_email)
+
+    if not acc and is_main:
+        acc = {"email": normalized_email}
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    def build_credential(path_value: str | None) -> dict:
+        path_str = str(path_value or "").strip()
+        if not path_str:
+            return {"path": "", "exists": False, "type": "missing"}
+
+        identified = identify_credential_file(path_str)
+        return {
+            "path": path_str,
+            "exists": Path(path_str).exists(),
+            "type": identified.get("type") or "missing",
+        }
+
+    remote = default_remote_block()
+    account_remote = acc.get("remote")
+    if isinstance(account_remote, dict):
+        for kind, fallback in remote.items():
+            item = account_remote.get(kind)
+            if isinstance(item, dict):
+                remote[kind] = dict(item)
+            else:
+                remote[kind] = dict(fallback)
+
+    # 兼容当前 summarize_remote 的列表汇总签名，至少让缺失状态走统一的 unknown/present 判定。
+    remote_summary = summarize_remote([acc])
+    for kind, statuses in remote_summary.items():
+        if remote[kind].get("status"):
+            continue
+        matched_status = next((status for status, count in statuses.items() if count), None)
+        if matched_status:
+            remote[kind]["status"] = matched_status
+
+    return {
+        "account": _sanitize_account(acc),
+        "category": "main" if is_main else derive_category(acc),
+        "credentials": {
+            "rt_auth_file": build_credential(acc.get("rt_auth_file")),
+            "session_auth_file": build_credential(acc.get("session_auth_file")),
+            "auth_file": build_credential(acc.get("auth_file")),
+        },
+        "remote": remote,
+        "allocation": {} if is_main else dict(acc.get("allocation") or {}),
+        "sale": {} if is_main else dict(acc.get("sale") or {}),
+        "health": {
+            "health_status": acc.get("health_status", ""),
+            "invalid_reason": acc.get("invalid_reason", ""),
+            "is_invalid": is_invalid(acc),
+            "is_quota_exhausted": is_quota_exhausted(acc),
+        },
+        "events": [],
+    }
+
+
 @app.get("/api/accounts/{email}/codex-auth")
 def get_codex_auth(email: str):
     """导出账号的 Codex CLI 格式认证文件（~/.codex/auth.json）"""
