@@ -1256,6 +1256,25 @@ class AuthMetadataMigrationParams(BaseModel):
     apply: bool = False
 
 
+class AllocateAccountParams(BaseModel):
+    project: str = ""
+    allocated_to: str = ""
+    force: bool = False
+
+
+class ReleaseAccountParams(BaseModel):
+    reason: str = ""
+
+
+class MarkInvalidParams(BaseModel):
+    reason: str
+    last_error: str = ""
+
+
+class RepairOauthParams(BaseModel):
+    note: str = ""
+
+
 def _normalized_email(value: str | None) -> str:
     return (value or "").strip().lower()
 
@@ -2392,6 +2411,175 @@ def post_account_usage_status(email: str, params: UsageStatusParams):
         raise HTTPException(status_code=400, detail="usage_status 只允许 normal 或 inventory")
     updated = mark_account_usage_status(email, usage_status)
     return {"email": email, "usage_status": updated.get("usage_status")}
+
+
+@app.post("/api/accounts/{email}/allocate")
+def post_allocate_account(email: str, params: AllocateAccountParams = AllocateAccountParams()):
+    """将库存账号分配为 in_use。"""
+    from autoteam import account_inventory, accounts
+
+    email = email.strip().lower()
+    try:
+        account_items = accounts.load_accounts()
+    except Exception as exc:
+        logger.exception("[API] 加载账号失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"加载账号失败: {exc}") from exc
+
+    acc = accounts.find_account(account_items, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    result = account_inventory.allocate_account(
+        acc,
+        project=params.project,
+        allocated_to=params.allocated_to,
+        force=params.force,
+        in_place=True,
+    )
+
+    try:
+        accounts.save_accounts(account_items)
+    except Exception as exc:
+        logger.exception("[API] 分配库存账号保存失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"保存账号失败: {exc}") from exc
+
+    return {
+        "changed": bool(result.get("changed")),
+        "applied": list(result.get("applied") or []),
+        "reason": result.get("reason"),
+        "warning": result.get("warning"),
+        "account": _sanitize_account(result.get("account") or acc),
+    }
+
+
+@app.post("/api/accounts/{email}/release")
+def post_release_account(email: str, params: ReleaseAccountParams = ReleaseAccountParams()):
+    """释放 in_use 账号回库存。"""
+    from autoteam import account_inventory, accounts
+
+    email = email.strip().lower()
+    try:
+        account_items = accounts.load_accounts()
+    except Exception as exc:
+        logger.exception("[API] 加载账号失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"加载账号失败: {exc}") from exc
+
+    acc = accounts.find_account(account_items, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    result = account_inventory.release_account(
+        acc,
+        reason=params.reason,
+        in_place=True,
+    )
+
+    try:
+        accounts.save_accounts(account_items)
+    except Exception as exc:
+        logger.exception("[API] 释放库存账号保存失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"保存账号失败: {exc}") from exc
+
+    return {
+        "changed": bool(result.get("changed")),
+        "applied": list(result.get("applied") or []),
+        "reason": result.get("reason"),
+        "warning": result.get("warning"),
+        "account": _sanitize_account(result.get("account") or acc),
+    }
+
+
+@app.post("/api/accounts/{email}/mark-invalid")
+def post_mark_invalid_account(email: str, params: MarkInvalidParams):
+    """将账号标记为 invalid。"""
+    from autoteam import account_health, accounts
+
+    email = email.strip().lower()
+    reason = (params.reason or "").strip().lower()
+    if reason not in account_health.ALL_INVALID_REASONS:
+        raise HTTPException(status_code=400, detail="reason 非法")
+
+    try:
+        account_items = accounts.load_accounts()
+    except Exception as exc:
+        logger.exception("[API] 加载账号失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"加载账号失败: {exc}") from exc
+
+    acc = accounts.find_account(account_items, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    result = account_health.mark_invalid(
+        acc,
+        reason=reason,
+        last_error=params.last_error,
+        in_place=True,
+    )
+
+    try:
+        accounts.save_accounts(account_items)
+    except Exception as exc:
+        logger.exception("[API] 标记失效账号保存失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"保存账号失败: {exc}") from exc
+
+    return {
+        "changed": bool(result.get("changed")),
+        "applied": list(result.get("applied") or []),
+        "reason": result.get("reason"),
+        "warning": result.get("warning"),
+        "account": _sanitize_account(result.get("account") or acc),
+    }
+
+
+@app.post("/api/accounts/{email}/repair-oauth")
+def post_repair_oauth_account(email: str, params: RepairOauthParams = RepairOauthParams()):
+    """只回写 OAuth 修复元数据，不触发浏览器流程。"""
+    from autoteam import accounts
+    from autoteam.account_models import HEALTH_VALID
+
+    email = email.strip().lower()
+    try:
+        account_items = accounts.load_accounts()
+    except Exception as exc:
+        logger.exception("[API] 加载账号失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"加载账号失败: {exc}") from exc
+
+    acc = accounts.find_account(account_items, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    now = int(time.time())
+    changed = False
+    applied: list[str] = []
+
+    def _set_field(field: str, value):
+        nonlocal changed
+        if acc.get(field) == value:
+            return
+        acc[field] = value
+        changed = True
+        applied.append(field)
+
+    _set_field("health_status", HEALTH_VALID)
+    _set_field("invalid_reason", None)
+    _set_field("last_error", "")
+    _set_field("last_oauth_repair_at", now)
+    _set_field("last_oauth_repair_note", params.note)
+    _set_field("updated_at", now)
+
+    try:
+        accounts.save_accounts(account_items)
+    except Exception as exc:
+        logger.exception("[API] OAuth 修复元数据保存失败: %s", email)
+        raise HTTPException(status_code=500, detail=f"保存账号失败: {exc}") from exc
+
+    return {
+        "changed": changed,
+        "applied": applied,
+        "reason": None,
+        "warning": None,
+        "account": _sanitize_account(acc),
+    }
 
 
 class LoginAccountParams(BaseModel):
