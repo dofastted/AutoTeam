@@ -2092,6 +2092,67 @@ def get_account_detail(email: str):
     }
 
 
+@app.post("/api/accounts/clean/dry-run")
+def post_accounts_clean_dry_run():
+    """扫描账号池清理问题，返回报告和 CSV，不写文件。"""
+    from autoteam import account_cleaner
+
+    try:
+        report = account_cleaner.scan_accounts(accounts=None)
+        csv_text = account_cleaner.format_scan_report_csv(report)
+    except Exception as exc:
+        logger.exception("[API] 账号清理 dry-run 失败")
+        raise HTTPException(status_code=500, detail=f"账号清理 dry-run 失败: {exc}") from exc
+
+    return {
+        "report": report,
+        "csv": csv_text,
+    }
+
+
+@app.post("/api/accounts/clean/apply")
+def post_accounts_clean_apply():
+    """备份并应用账号池清理，然后返回清理结果和清理后扫描报告。"""
+    from autoteam import account_cleaner
+    from autoteam.accounts import load_accounts, save_accounts
+
+    try:
+        backup_path = account_cleaner.backup_accounts_file()
+    except Exception as exc:
+        logger.exception("[API] 账号清理备份失败")
+        raise HTTPException(status_code=500, detail=f"账号清理备份失败: {exc}") from exc
+
+    try:
+        accounts = load_accounts()
+    except Exception as exc:
+        logger.exception("[API] 账号清理加载账号失败")
+        raise HTTPException(status_code=500, detail=f"账号清理加载账号失败: {exc}") from exc
+
+    try:
+        result = account_cleaner.cleanup_accounts(accounts=accounts)
+    except Exception as exc:
+        logger.exception("[API] 账号清理执行失败")
+        raise HTTPException(status_code=500, detail=f"账号清理执行失败: {exc}") from exc
+
+    try:
+        save_accounts(accounts)
+    except Exception as exc:
+        logger.exception("[API] 账号清理保存失败")
+        raise HTTPException(status_code=500, detail=f"账号清理保存失败: {exc}") from exc
+
+    try:
+        report_after = account_cleaner.scan_accounts(accounts=accounts)
+    except Exception as exc:
+        logger.exception("[API] 账号清理重扫失败")
+        raise HTTPException(status_code=500, detail=f"账号清理重扫失败: {exc}") from exc
+
+    return {
+        "backup_path": str(backup_path) if backup_path else None,
+        "result": result,
+        "report_after": report_after,
+    }
+
+
 @app.get("/api/accounts/{email}/codex-auth")
 def get_codex_auth(email: str):
     """导出账号的 Codex CLI 格式认证文件（~/.codex/auth.json）"""
