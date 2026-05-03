@@ -9,7 +9,9 @@ from typing import Any
 from autoteam.account_models import (
     HEALTH_DEACTIVATED,
     HEALTH_INVALID,
+    HEALTH_QUOTA_EXHAUSTED,
     HEALTH_UNKNOWN,
+    TEAM_ACTIVE,
     USAGE_INVENTORY,
     USAGE_NORMAL,
 )
@@ -113,8 +115,43 @@ def mark_deactivated(
     return result
 
 
+def mark_quota_exhausted(
+    account: dict,
+    *,
+    last_error: str = "",
+    now: int | None = None,
+    in_place: bool = True,
+) -> dict:
+    target = _copy_account(account, in_place=in_place)
+    if _normalize_key(target.get("health_status")) == HEALTH_QUOTA_EXHAUSTED:
+        return {
+            "changed": False,
+            "applied": [],
+            "account": target,
+        }
+
+    unix_ts = int(now if now is not None else time.time())
+    result: dict[str, Any] = {
+        "changed": False,
+        "applied": [],
+        "account": target,
+    }
+
+    _set_if_changed(target, "health_status", HEALTH_QUOTA_EXHAUSTED, result)
+    _set_if_changed(target, "team_status", TEAM_ACTIVE, result)
+    _set_if_changed(target, "invalid_reason", INVALID_REASON_QUOTA, result)
+    _set_if_changed(target, "last_quota_exhausted_at", unix_ts, result)
+    _set_if_changed(target, "last_error", last_error, result)
+    _set_if_changed(target, "updated_at", unix_ts, result)
+    return result
+
+
 def is_invalid(account: dict) -> bool:
     return _normalize_key(account.get("health_status")) in _INVALID_HEALTH_STATUSES
+
+
+def is_quota_exhausted(account: dict) -> bool:
+    return _normalize_key(account.get("health_status")) == HEALTH_QUOTA_EXHAUSTED
 
 
 def summarize_health(accounts: list[dict]) -> dict[str, int]:
@@ -132,7 +169,9 @@ __all__ = [
     "INVALID_REASON_QUOTA",
     "INVALID_REASON_TOKEN_REVOKED",
     "is_invalid",
+    "is_quota_exhausted",
     "mark_deactivated",
     "mark_invalid",
+    "mark_quota_exhausted",
     "summarize_health",
 ]
