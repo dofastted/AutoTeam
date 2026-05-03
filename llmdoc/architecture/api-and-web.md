@@ -12,6 +12,16 @@
 - Playwright 同步 API 通过 `_PlaywrightExecutor` 在固定线程执行。
 - 自动巡检线程由 `_auto_check_loop` 执行。
 - 日志接口由 `_LogCollector` 写入内存缓冲。
+- Team 成员 payload 通过 `_pick_joined_at(raw)` 从 `joined_at` / `created_at` / `member_since` / `join_date` / `added_at` 取入队时间；`_format_team_payload` 和 `_local_snapshot` 会把 `joined_at` 传给前端。
+- Auth 文件盘点由 `_AUTHS_FILE_PATTERN`、`_AUTHS_KNOWN_SUBDIRS`、`_parse_auth_filename`、`_scan_auths_files`、`_bucket_primary_category`、`_bucket_to_record` 负责。已知 bucket 是 `active`、`sold`、`tradable`、`unusable`、`archive`。
+- `_bucket_primary_category(categories)` 决定同一邮箱跨目录时的主分类，优先级是 `sold` > `tradable` > `unusable` > `archive` > `active`；空集合返回 `unknown`。因此根目录 active 文件不会覆盖 `sold/` 等分类目录。
+
+新增 auth 文件只读接口：
+
+- `GET /api/auths/stats`: 返回 auth 文件总数、OAuth 文件数、session 文件数、五类文件数、按邮箱主分类计数和唯一邮箱数。`*_files` 是文件口径，`accounts_*` 是账号口径。
+- `GET /api/auths/accounts`: 返回按邮箱聚合的 auth 文件列表，支持 category、邮箱搜索、OAuth/session 三态筛选、排序和分页。默认隐藏 `archive`，`sold` / `tradable` / `unusable` 可通过 category 下拉查看。
+
+接口字段见 `llmdoc/reference/auths-api.md`。
 
 ## 前端
 
@@ -21,14 +31,18 @@
 
 主要页面：
 
-- `web/src/components/Dashboard.vue`: 账号统计、账号列表、登录、移出、卖出、删除、导出。
-- `web/src/components/TeamMembers.vue`: Team 成员和邀请，并显示 Session、OAuth RT、CPA、Sub2API 状态。
+- `web/src/components/Dashboard.vue`: 只显示卡片统计，不再放账号操作表。当前分三组：Account Status 5 项、Team 3 项、Auth files 5+3 项；组件自己在 `onMounted` 调 `getTeamMembers` 和 `getAuthsStats`。Team 统计优先读取后端 `total` / `invites` 整数字段，失败时才按 `members[].type` 过滤；Auth files 卡片主数字读取 `accounts_*`，次行显示 `unique_emails` 和 `total_files`。
+- `web/src/components/TeamMembers.vue`: 显示真实 ChatGPT Team 成员和 pending invites。成员表分页 20 条一页；邀请表单独展示，取消邀请和移出成员都调用 `removeTeamMember`，payload 用 `type` 区分。
+- `web/src/components/AccountManagement.vue`: 账号管理页分成本地账号表和认证文件盘点。本地账号表使用 `AccountTable` + `AccountDrawer`，数据来自 `/api/accounts`，提供登录、导出 Codex auth、移出 Team、标记已售、删除和详情操作。
+- `web/src/components/AuthsTable.vue`: 扁平 auth 文件表，数据来自 `/api/auths/accounts`。支持 category 下拉、OAuth 三态、Session 三态、排序、邮箱搜索、facets badge、20/50/100/200 分页；现在只作为文件盘点，不直接打开账号详情。
 - `web/src/components/PoolPage.vue`: 账号池操作入口，包含批量 CPA JSON 启动、运行记录和账号明细。
 - `web/src/components/SyncPage.vue`: 同步操作入口。
 - `web/src/components/OAuthPage.vue`: 手动 OAuth 登录和 CPA 凭证检查，区分 Session 备份、OAuth RT、CPA、Sub2API 状态。
 - `web/src/components/TaskHistory.vue`: 后台任务状态。
 - `web/src/components/LogViewer.vue`: 日志查看。
 - `web/src/components/ConfigPage.vue`: 运行配置。
+
+`web/src/api.js` 现在包含 `getAuthsStats()` 和 `getAuthsAccounts(params)`，分别对应 `/api/auths/stats` 和 `/api/auths/accounts`。
 
 ## 构建产物
 

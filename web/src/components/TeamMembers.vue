@@ -1,7 +1,10 @@
 <template>
   <div>
     <div class="flex items-center justify-between mb-6">
-      <h2 class="text-xl font-bold text-white">Team 成员</h2>
+      <div>
+        <h2 class="text-xl font-bold text-white">Team 成员</h2>
+        <p class="text-xs text-gray-500 mt-1">仅显示母号 ChatGPT Team 实际加入成员</p>
+      </div>
       <button @click="fetchMembers({ refresh: true })" :disabled="loading"
         class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-sm rounded-lg border border-gray-700 transition disabled:opacity-50">
         {{ loading ? '验证中...' : '验证刷新' }}
@@ -24,9 +27,19 @@
 
     <div v-if="data" class="space-y-4">
       <!-- 统计 -->
-      <div class="flex gap-4 text-sm">
-        <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">成员: <span class="text-white font-medium">{{ data.total }}</span></span>
-        <span v-if="data.invites > 0" class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">待接受邀请: <span class="text-yellow-400 font-medium">{{ data.invites }}</span></span>
+      <div class="flex flex-wrap gap-3 text-sm">
+        <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">
+          实际成员: <span class="text-white font-medium">{{ membersOnly.length }}</span>
+        </span>
+        <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">
+          待接受邀请: <span class="text-white font-medium">{{ invitesOnly.length }}</span>
+        </span>
+        <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">
+          每页: <span class="text-white font-medium">{{ pageSize }}</span>
+        </span>
+        <span class="px-3 py-1.5 bg-gray-800 rounded-lg text-gray-300">
+          第 {{ currentPage }} / {{ totalPages }} 页
+        </span>
       </div>
 
       <!-- 成员表格 -->
@@ -35,21 +48,18 @@
           <table class="w-full text-sm">
             <thead>
               <tr class="text-gray-400 text-left border-b border-gray-800">
-                <th class="px-4 py-3 font-medium">#</th>
+                <th class="px-4 py-3 font-medium w-12">#</th>
                 <th class="px-4 py-3 font-medium">邮箱</th>
-                <th class="px-4 py-3 font-medium">角色</th>
-                <th class="px-4 py-3 font-medium">类型</th>
-                <th class="px-4 py-3 font-medium">账号状态</th>
-                <th class="px-4 py-3 font-medium">认证</th>
-                <th class="px-4 py-3 font-medium">来源</th>
-                <th class="px-4 py-3 font-medium text-right">操作</th>
+                <th class="px-4 py-3 font-medium w-40">角色</th>
+                <th class="px-4 py-3 font-medium w-48">加入时间</th>
+                <th class="px-4 py-3 font-medium w-32 text-right">操作</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(m, i) in data.members" :key="m.email + m.type"
+              <tr v-for="(m, i) in pagedMembers" :key="memberKey(m)"
                 class="border-b border-gray-800/50 hover:bg-gray-800/30 transition">
-                <td class="px-4 py-3 text-gray-500">{{ i + 1 }}</td>
-                <td class="px-4 py-3 font-mono text-xs">{{ m.email }}</td>
+                <td class="px-4 py-3 text-gray-500">{{ pageStart + i + 1 }}</td>
+                <td class="px-4 py-3 font-mono text-xs text-gray-200">{{ m.email }}</td>
                 <td class="px-4 py-3">
                   <span class="px-2 py-0.5 rounded text-xs font-medium"
                     :class="{
@@ -60,65 +70,8 @@
                     {{ m.role || 'member' }}
                   </span>
                 </td>
-                <td class="px-4 py-3">
-                  <span class="px-2 py-0.5 rounded text-xs font-medium"
-                    :class="m.type === 'invite' ? 'bg-yellow-500/10 text-yellow-400' : 'bg-green-500/10 text-green-400'">
-                    {{ m.type === 'invite' ? '待接受' : '已加入' }}
-                  </span>
-                </td>
-                <td class="px-4 py-3">
-                  <div v-if="m.is_local" class="flex flex-wrap items-center gap-2">
-                    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium"
-                      :class="statusClass(m.status)">
-                      <span class="w-1.5 h-1.5 rounded-full" :class="dotClass(m.status)"></span>
-                      {{ statusLabel(m.status) }}
-                    </span>
-                    <span v-if="m.sync_disabled"
-                      class="px-2 py-0.5 rounded-full text-xs font-medium bg-cyan-500/10 text-cyan-300">
-                      停止同步
-                    </span>
-                    <span v-if="m.has_cpa_archive_file"
-                      class="px-2 py-0.5 rounded-full text-xs font-medium bg-gray-700 text-gray-300">
-                      已归档
-                    </span>
-                  </div>
-                  <span v-else class="text-xs text-gray-500">-</span>
-                </td>
-                <td class="px-4 py-3">
-                  <div v-if="m.is_local" class="flex flex-wrap gap-1.5">
-                    <span class="px-2 py-0.5 rounded-full text-xs font-medium" :class="authBadgeClass(m.has_session_auth_file, 'session')">
-                      Session
-                    </span>
-                    <span class="px-2 py-0.5 rounded-full text-xs font-medium" :class="authBadgeClass(m.has_rt_auth_file, 'rt')">
-                      RT
-                    </span>
-                    <span class="px-2 py-0.5 rounded-full text-xs font-medium" :class="authBadgeClass(m.has_cpa_uploaded, 'cpa')">
-                      CPA
-                    </span>
-                    <span class="px-2 py-0.5 rounded-full text-xs font-medium" :class="authBadgeClass(m.has_sub2api_sync, 'sub2api')">
-                      Sub2API
-                    </span>
-                  </div>
-                  <span v-else class="text-xs text-gray-500">-</span>
-                </td>
-                <td class="px-4 py-3">
-                  <span class="text-xs" :class="m.is_local ? 'text-blue-400' : 'text-gray-500'">
-                    {{ sourceLabel(m) }}
-                  </span>
-                </td>
+                <td class="px-4 py-3 text-xs text-gray-400">{{ formatJoinedAt(m.joined_at) }}</td>
                 <td class="px-4 py-3 text-right">
-                  <div class="flex flex-wrap justify-end gap-2">
-                  <button
-                    v-if="canSell(m)"
-                    @click="sellMember(m)"
-                    :disabled="actionId === memberKey(m)"
-                    class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
-                    :class="actionId === memberKey(m)
-                      ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
-                      : 'bg-cyan-600/10 text-cyan-300 border-cyan-500/30 hover:bg-cyan-600/20'"
-                  >
-                    {{ actionId === memberKey(m) && actionType === 'sell' ? '处理中...' : '卖出' }}
-                  </button>
                   <button
                     v-if="canRemove(m)"
                     @click="removeMember(m)"
@@ -128,21 +81,98 @@
                       ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
                       : 'bg-amber-600/10 text-amber-400 border-amber-500/30 hover:bg-amber-600/20'"
                   >
-                    {{ actionId === memberKey(m) && actionType === 'remove' ? '处理中...' : removeLabel(m) }}
+                    {{ actionId === memberKey(m) && actionType === 'remove' ? '处理中...' : '移出' }}
                   </button>
+                  <span v-else class="text-xs text-gray-600">-</span>
+                </td>
+              </tr>
+              <tr v-if="!pagedMembers.length">
+                <td colspan="5" class="px-4 py-12 text-center text-gray-500 text-sm">
+                  暂无成员
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 翻页 -->
+        <div v-if="totalPages > 1" class="px-4 py-3 border-t border-gray-800 flex items-center justify-between">
+          <div class="text-xs text-gray-500">
+            显示 {{ pageStart + 1 }} - {{ pageEnd }} / {{ membersOnly.length }}
+          </div>
+          <div class="flex items-center gap-2">
+            <button @click="goToPage(1)" :disabled="currentPage === 1"
+              class="px-2 py-1 text-xs rounded border border-gray-700 bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed">
+              首页
+            </button>
+            <button @click="goToPage(currentPage - 1)" :disabled="currentPage === 1"
+              class="px-2 py-1 text-xs rounded border border-gray-700 bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed">
+              上一页
+            </button>
+            <span class="text-xs text-gray-400 px-2">{{ currentPage }} / {{ totalPages }}</span>
+            <button @click="goToPage(currentPage + 1)" :disabled="currentPage >= totalPages"
+              class="px-2 py-1 text-xs rounded border border-gray-700 bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed">
+              下一页
+            </button>
+            <button @click="goToPage(totalPages)" :disabled="currentPage >= totalPages"
+              class="px-2 py-1 text-xs rounded border border-gray-700 bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed">
+              末页
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 待接受邀请 -->
+      <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+          <div>
+            <div class="text-sm font-medium text-gray-200">待接受邀请</div>
+            <div class="text-xs text-gray-500 mt-0.5">可取消误发或过期的邀请</div>
+          </div>
+          <div class="text-sm text-gray-400">
+            共 <span class="text-white font-medium">{{ invitesOnly.length }}</span> 个邀请
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-gray-400 text-left border-b border-gray-800">
+                <th class="px-4 py-3 font-medium w-12">#</th>
+                <th class="px-4 py-3 font-medium">邮箱</th>
+                <th class="px-4 py-3 font-medium w-40">角色</th>
+                <th class="px-4 py-3 font-medium w-48">邀请时间</th>
+                <th class="px-4 py-3 font-medium w-32 text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(m, i) in invitesOnly" :key="memberKey(m)"
+                class="border-b border-gray-800/50 hover:bg-gray-800/30 transition">
+                <td class="px-4 py-3 text-gray-500">{{ i + 1 }}</td>
+                <td class="px-4 py-3 font-mono text-xs text-gray-200">{{ m.email }}</td>
+                <td class="px-4 py-3">
+                  <span class="px-2 py-0.5 rounded text-xs font-medium bg-amber-500/10 text-amber-300">
+                    {{ m.role || 'invite' }}
+                  </span>
+                </td>
+                <td class="px-4 py-3 text-xs text-gray-400">{{ formatJoinedAt(m.joined_at) }}</td>
+                <td class="px-4 py-3 text-right">
                   <button
-                    v-if="canDelete(m)"
-                    @click="deleteMember(m)"
+                    v-if="canRemove(m)"
+                    @click="removeMember(m)"
                     :disabled="actionId === memberKey(m)"
                     class="px-3 py-1.5 rounded-lg text-xs font-medium border transition"
                     :class="actionId === memberKey(m)
                       ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
-                      : 'bg-rose-600/10 text-rose-400 border-rose-500/30 hover:bg-rose-600/20'"
+                      : 'bg-amber-600/10 text-amber-400 border-amber-500/30 hover:bg-amber-600/20'"
                   >
-                    {{ actionId === memberKey(m) && actionType === 'delete' ? '删除中...' : '删除' }}
+                    {{ actionId === memberKey(m) && actionType === 'remove' ? '处理中...' : '取消邀请' }}
                   </button>
-                  <span v-if="!hasActions(m)" class="text-xs text-gray-600">-</span>
-                  </div>
+                  <span v-else class="text-xs text-gray-600">-</span>
+                </td>
+              </tr>
+              <tr v-if="!invitesOnly.length">
+                <td colspan="5" class="px-4 py-10 text-center text-gray-500 text-sm">
+                  暂无待接受邀请
                 </td>
               </tr>
             </tbody>
@@ -162,7 +192,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { api } from '../api.js'
 
 const data = ref(null)
@@ -172,15 +202,36 @@ const message = ref('')
 const messageClass = ref('')
 const actionId = ref('')
 const actionType = ref('')
+const currentPage = ref(1)
+const pageSize = ref(20)
 
 const CACHE_KEY = 'autoteam_team_members'
+
+const membersOnly = computed(() => {
+  if (!data.value || !Array.isArray(data.value.members)) return []
+  return data.value.members.filter((m) => m.type === 'member')
+})
+
+const invitesOnly = computed(() => {
+  if (!data.value || !Array.isArray(data.value.members)) return []
+  return data.value.members.filter((m) => m.type === 'invite')
+})
+
+const totalPages = computed(() => Math.max(1, Math.ceil(membersOnly.value.length / pageSize.value)))
+const pageStart = computed(() => (currentPage.value - 1) * pageSize.value)
+const pageEnd = computed(() => Math.min(membersOnly.value.length, pageStart.value + pageSize.value))
+const pagedMembers = computed(() => membersOnly.value.slice(pageStart.value, pageEnd.value))
+
+watch(membersOnly, () => {
+  if (currentPage.value > totalPages.value) currentPage.value = totalPages.value
+  if (currentPage.value < 1) currentPage.value = 1
+})
 
 function loadCache() {
   try {
     const raw = localStorage.getItem(CACHE_KEY)
     if (raw) {
       const cached = JSON.parse(raw)
-      // 缓存 10 分钟有效
       if (cached.time && Date.now() - cached.time < 600000) {
         return cached.data
       }
@@ -196,7 +247,7 @@ function saveCache(d) {
 }
 
 function memberKey(member) {
-  return `${member.type}:${member.user_id}:${member.email}`
+  return `${member.type || 'member'}:${member.user_id || ''}:${member.email}`
 }
 
 function clearTeamCache() {
@@ -211,6 +262,7 @@ async function fetchMembers({ refresh = false } = {}) {
   try {
     data.value = await api.getTeamMembers({ refresh })
     saveCache(data.value)
+    if (currentPage.value > totalPages.value) currentPage.value = 1
   } catch (e) {
     error.value = e.message
   } finally {
@@ -218,9 +270,40 @@ async function fetchMembers({ refresh = false } = {}) {
   }
 }
 
+function goToPage(p) {
+  if (p < 1 || p > totalPages.value) return
+  currentPage.value = p
+}
+
 function formatCacheTime(ts) {
   const d = new Date(Number(ts) * 1000)
   return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+function formatJoinedAt(value) {
+  if (!value) return '-'
+  let d
+  if (typeof value === 'number') {
+    // 秒/毫秒
+    d = new Date(value < 1e12 ? value * 1000 : value)
+  } else if (typeof value === 'string') {
+    // ISO 或者数字串
+    if (/^\d+$/.test(value)) {
+      const num = Number(value)
+      d = new Date(num < 1e12 ? num * 1000 : num)
+    } else {
+      d = new Date(value)
+    }
+  } else {
+    return '-'
+  }
+  if (Number.isNaN(d.getTime())) return '-'
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mi = String(d.getMinutes()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}`
 }
 
 function formatRefreshError(value) {
@@ -228,72 +311,13 @@ function formatRefreshError(value) {
   return value?.message || JSON.stringify(value)
 }
 
-function sourceLabel(member) {
-  if (!member.is_local) return '外部'
-  return member.status ? `本地管理/${statusLabel(member.status)}` : '本地管理'
-}
-
-function statusClass(s) {
-  return {
-    active: 'bg-green-500/10 text-green-400',
-    exhausted: 'bg-red-500/10 text-red-400',
-    standby: 'bg-yellow-500/10 text-yellow-400',
-    pending: 'bg-gray-500/10 text-gray-400',
-    sold: 'bg-cyan-500/10 text-cyan-300',
-  }[s] || 'bg-gray-500/10 text-gray-400'
-}
-
-function dotClass(s) {
-  return {
-    active: 'bg-green-400',
-    exhausted: 'bg-red-400',
-    standby: 'bg-yellow-400',
-    pending: 'bg-gray-400',
-    sold: 'bg-cyan-300',
-  }[s] || 'bg-gray-400'
-}
-
-function statusLabel(s) {
-  return { active: 'Active', exhausted: 'Used up', standby: 'Standby', pending: 'Pending', sold: 'Sold' }[s] || s || 'Unknown'
-}
-
-function authBadgeClass(enabled, type) {
-  if (!enabled) return 'bg-gray-700/70 text-gray-400'
-  return {
-    session: 'bg-sky-500/10 text-sky-300',
-    rt: 'bg-emerald-500/10 text-emerald-300',
-    cpa: 'bg-cyan-500/10 text-cyan-300',
-    sub2api: 'bg-indigo-500/10 text-indigo-300',
-  }[type] || 'bg-gray-700/70 text-gray-300'
-}
-
 function isOwner(member) {
   return member.role === 'account-owner' || member.is_main_account
 }
 
-function isSold(member) {
-  return member.status === 'sold' || member.sync_disabled
-}
-
-function canSell(member) {
-  return member.type === 'member' && member.is_local && member.status === 'active' && !member.sync_disabled && !isOwner(member)
-}
-
 function canRemove(member) {
-  if (isOwner(member) || isSold(member)) return false
-  return member.type === 'invite' || member.type === 'member'
-}
-
-function canDelete(member) {
-  return member.type === 'member' && member.is_local && !isOwner(member) && !isSold(member)
-}
-
-function hasActions(member) {
-  return canSell(member) || canRemove(member) || canDelete(member)
-}
-
-function removeLabel(member) {
-  return member.type === 'invite' ? '取消邀请' : '移出'
+  if (isOwner(member)) return false
+  return true
 }
 
 function showMessage(text, kind = 'success') {
@@ -305,8 +329,9 @@ function showMessage(text, kind = 'success') {
 }
 
 async function removeMember(member) {
-  const actionText = member.type === 'invite' ? '取消邀请' : '移出 Team'
-  const ok = window.confirm(`确认${actionText} ${member.email}？`)
+  const isInvite = member.type === 'invite'
+  const actionLabel = isInvite ? '取消邀请' : '移出 Team'
+  const ok = window.confirm(`确认${actionLabel} ${member.email}？`)
   if (!ok) return
 
   actionId.value = memberKey(member)
@@ -316,50 +341,9 @@ async function removeMember(member) {
     const result = await api.removeTeamMember({
       email: member.email,
       user_id: member.user_id,
-      type: member.type,
+      type: member.type || 'member',
     })
-    showMessage(result.message || `已${actionText}: ${member.email}`)
-    clearTeamCache()
-    await fetchMembers()
-  } catch (e) {
-    error.value = e.message
-  } finally {
-    actionId.value = ''
-    actionType.value = ''
-  }
-}
-
-async function sellMember(member) {
-  const ok = window.confirm(`确认卖出账号 ${member.email}？\n系统会保留 Team 席位，但会删除 CPA/Sub2API 远端记录，并停止后续同步。`)
-  if (!ok) return
-
-  actionId.value = memberKey(member)
-  actionType.value = 'sell'
-  error.value = ''
-  try {
-    const result = await api.sellAccount(member.email)
-    const archive = result.cpa_archive_file ? `，归档: ${result.cpa_archive_file}` : ''
-    showMessage((result.message || `已标记为已售: ${member.email}`) + archive)
-    clearTeamCache()
-    await fetchMembers({ refresh: true })
-  } catch (e) {
-    error.value = e.message
-  } finally {
-    actionId.value = ''
-    actionType.value = ''
-  }
-}
-
-async function deleteMember(member) {
-  const ok = window.confirm(`确认删除账号 ${member.email}？\n这会同时清理本地记录、已配置远端、Team/Invite 和邮箱服务账号。`)
-  if (!ok) return
-
-  actionId.value = memberKey(member)
-  actionType.value = 'delete'
-  error.value = ''
-  try {
-    const result = await api.deleteAccount(member.email)
-    showMessage(result.message || `已删除 ${member.email}`)
+    showMessage(result.message || `${actionLabel}完成: ${member.email}`)
     clearTeamCache()
     await fetchMembers({ refresh: true })
   } catch (e) {

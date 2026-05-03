@@ -183,6 +183,46 @@
                   >
                     查看详情
                   </button>
+                  <button
+                    type="button"
+                    class="btn-secondary px-3 py-1.5 text-xs"
+                    :disabled="isActionRunning(account, 'login') || isMainAccount(account) || isSold(account)"
+                    @click.stop="loginAccount(account)"
+                  >
+                    {{ isActionRunning(account, 'login') ? '登录中...' : '登录' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-secondary px-3 py-1.5 text-xs"
+                    :disabled="isActionRunning(account, 'export')"
+                    @click.stop="exportCodexAuth(account)"
+                  >
+                    {{ isActionRunning(account, 'export') ? '导出中...' : '导出 Auth' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-secondary px-3 py-1.5 text-xs"
+                    :disabled="isActionRunning(account, 'kick') || isMainAccount(account) || !isActive(account)"
+                    @click.stop="kickAccount(account)"
+                  >
+                    {{ isActionRunning(account, 'kick') ? '移出中...' : '移出 Team' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-secondary px-3 py-1.5 text-xs"
+                    :disabled="isActionRunning(account, 'sell') || isMainAccount(account) || !isActive(account)"
+                    @click.stop="sellAccount(account)"
+                  >
+                    {{ isActionRunning(account, 'sell') ? '处理中...' : '已售' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-danger px-3 py-1.5 text-xs"
+                    :disabled="isActionRunning(account, 'delete') || isMainAccount(account)"
+                    @click.stop="deleteAccount(account)"
+                  >
+                    {{ isActionRunning(account, 'delete') ? '删除中...' : '删除' }}
+                  </button>
                 </div>
               </td>
             </tr>
@@ -241,6 +281,39 @@
         </div>
       </div>
     </div>
+
+    <div
+      v-if="authDialog.visible"
+      class="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/75 p-4"
+      @click.self="closeAuthDialog"
+    >
+      <div class="glass-card w-full max-w-3xl overflow-hidden">
+        <div class="flex items-center justify-between border-b border-white/10 px-5 py-4">
+          <div>
+            <h3 class="text-base font-semibold text-white">Codex auth.json</h3>
+            <p class="mt-1 text-sm text-slate-400">{{ authDialog.email }}</p>
+          </div>
+          <button type="button" class="btn-secondary h-10 w-10 shrink-0 px-0 text-lg" @click="closeAuthDialog">
+            ×
+          </button>
+        </div>
+        <div class="space-y-4 px-5 py-4">
+          <textarea
+            class="textarea-dark h-80 font-mono text-xs"
+            readonly
+            :value="authDialog.content"
+          />
+          <div class="flex justify-end gap-3">
+            <button type="button" class="btn-secondary" @click="copyAuthDialogContent">
+              复制内容
+            </button>
+            <button type="button" class="btn-primary" @click="closeAuthDialog">
+              关闭
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -284,10 +357,16 @@ const query = ref('')
 const searchInput = ref('')
 const pageInput = ref('1')
 const selectedEmails = ref([])
+const rowActionKey = ref('')
 const toast = ref({
   visible: false,
   message: '',
   type: 'success',
+})
+const authDialog = ref({
+  visible: false,
+  email: '',
+  content: '',
 })
 
 let searchTimer = null
@@ -409,6 +488,103 @@ watch(
 
 function selectAccount(account) {
   emit('select-account', account)
+}
+
+function accountKey(account, action) {
+  return `${account?.email || ''}:${action}`
+}
+
+function isActionRunning(account, action) {
+  return rowActionKey.value === accountKey(account, action)
+}
+
+function isMainAccount(account) {
+  return Boolean(account?.is_main_account || account?.role === 'main')
+}
+
+function isSold(account) {
+  return account?.status === 'sold' || account?.usage_status === 'sold' || account?.category === 'sold'
+}
+
+function isActive(account) {
+  return account?.status === 'active'
+}
+
+async function runRowAction(account, action, callback) {
+  if (!account?.email || rowActionKey.value) return
+  rowActionKey.value = accountKey(account, action)
+  try {
+    await callback()
+  } catch (err) {
+    showToast(err?.message || '操作失败', 'error')
+  } finally {
+    rowActionKey.value = ''
+  }
+}
+
+async function loginAccount(account) {
+  await runRowAction(account, 'login', async () => {
+    const result = await api.loginAccount(account.email)
+    showToast(result?.message || `已启动登录任务: ${account.email}`)
+    emit('refresh-needed')
+  })
+}
+
+async function kickAccount(account) {
+  const ok = window.confirm(`确认将 ${account.email} 移出 Team？`)
+  if (!ok) return
+  await runRowAction(account, 'kick', async () => {
+    const result = await api.kickAccount(account.email)
+    showToast(result?.message || `已移出 Team: ${account.email}`)
+    emit('refresh-needed')
+    await fetchAccounts()
+  })
+}
+
+async function sellAccount(account) {
+  const ok = window.confirm(`确认将 ${account.email} 标记为已售？此操作会删除已启用远端中的对应账号。`)
+  if (!ok) return
+  await runRowAction(account, 'sell', async () => {
+    const result = await api.sellAccount(account.email)
+    showToast(result?.message || `已标记为已售: ${account.email}`)
+    emit('refresh-needed')
+    await fetchAccounts()
+  })
+}
+
+async function deleteAccount(account) {
+  const ok = window.confirm(`确认删除 ${account.email}？此操作会清理本地管理账号及关联资源。`)
+  if (!ok) return
+  await runRowAction(account, 'delete', async () => {
+    const result = await api.deleteAccount(account.email)
+    showToast(result?.message || `已删除: ${account.email}`)
+    emit('refresh-needed')
+    await fetchAccounts()
+  })
+}
+
+async function exportCodexAuth(account) {
+  await runRowAction(account, 'export', async () => {
+    const result = await api.getCodexAuth(account.email)
+    authDialog.value = {
+      visible: true,
+      email: result.email || account.email,
+      content: JSON.stringify(result.codex_auth || {}, null, 2),
+    }
+  })
+}
+
+function closeAuthDialog() {
+  authDialog.value.visible = false
+}
+
+async function copyAuthDialogContent() {
+  try {
+    await copyText(authDialog.value.content)
+    showToast('已复制 auth.json 内容')
+  } catch (err) {
+    showToast(err?.message || '复制失败', 'error')
+  }
 }
 
 function isSelected(email) {

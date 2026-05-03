@@ -8,11 +8,29 @@
 
 - HTTP 列表接口：`src/autoteam/api.py:1949` 的 `GET /api/accounts`
 - HTTP 详情接口：`src/autoteam/api.py:2043` 的 `GET /api/accounts/{email}`
+- Auth 文件列表接口：`GET /api/auths/accounts`
 - 前端入口：`web/src/components/AccountManagement.vue`
-- 列表组件：`web/src/components/AccountTable.vue`
+- 本地账号列表组件：`web/src/components/AccountTable.vue`
+- Auth 文件盘点组件：`web/src/components/AuthsTable.vue`
 - 详情抽屉：`web/src/components/AccountDrawer.vue`
 
-列表筛选用的是 `category`，不是单个状态轴。当前可见分类包括 `registered`、`inventory`、`in_use`、`invalid`、`sold`、`not_registered`，定义见 `web/src/components/AccountTable.vue:251`。
+账号管理页当前分两块：
+
+- 本地账号表来自 `/api/accounts`，用于账号生命周期查询、详情抽屉和操作按钮。
+- Auth 文件盘点来自 `/api/auths/accounts`，只核对 `auths/` 文件，不直接打开详情抽屉。
+
+Auth 文件盘点筛选参数：
+
+- `category`: `active`、`sold`、`tradable`、`unusable`、`archive`、`all`
+- `q`: 邮箱子串
+- `has_oauth`: OAuth 三态
+- `has_session`: Session 三态
+- `page_size`: 20、50、100、200
+- `sort`: `email_asc`、`email_desc`、`expired_asc`、`expired_desc`、`category_asc`
+
+默认 category 为空字符串，隐藏 `archive`。接口字段见 `llmdoc/reference/auths-api.md`。
+
+`GET /api/accounts` 用于生命周期模型查询，筛选用的是四轴聚合 `category`，不是 auth 文件 bucket。它和 `/api/auths/accounts` 不要混用。
 
 要看单个账号的四轴状态、远端状态、凭证状态和分配信息，用详情接口或打开详情抽屉。详情接口当前返回：
 
@@ -36,6 +54,10 @@
 - 标记失效：`POST /api/accounts/{email}/mark-invalid`，`src/autoteam/api.py:2493`
 - 修复 OAuth 元数据：`POST /api/accounts/{email}/repair-oauth`，`src/autoteam/api.py:2535`
 - 售卖并做远端清理：`POST /api/accounts/{email}/sell`，`src/autoteam/api.py:2305`
+- 本地 Codex OAuth 登录：`POST /api/accounts/login`
+- 移出 Team：`POST /api/accounts/{email}/kick`
+- 删除本地管理账号：`DELETE /api/accounts/{email}`
+- 导出 Codex CLI auth：`GET /api/accounts/{email}/codex-auth`
 
 对应纯函数在：
 
@@ -108,4 +130,4 @@ apply 前一定先备份 `accounts.json`。API 入口会先调 `backup_accounts_
 
 账号管理页没有 `vue-router`。顶层切页靠 `web/src/App.vue:221` 的 `currentPage`，模板用 `v-if` / `v-else-if`，见 `web/src/App.vue:156-192`。
 
-新组件如果需要 `defineProps` 的 `validator`，不要引用 `<script setup>` 里的局部变量。`AT-029` 之后这里专门留过一次 hotfix，记录在 `docs/AutoTeam-账号管理重构文档包/04-AutoTeam-账号管理重构-TODO.csv:30`，当前实现直接把允许值写进 `validator`，见 `web/src/components/AccountTable.vue:261`。
+新组件如果需要 `defineProps` 的 `validator`，不要引用 `<script setup>` 里的局部变量。旧 `AccountTable.vue` 曾因这个问题 hotfix；后续若在 `AuthsTable.vue` 加 validator，也按同一规则处理。
