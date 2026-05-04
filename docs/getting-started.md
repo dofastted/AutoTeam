@@ -46,7 +46,7 @@
 参考 CPA 项目文档完成搭建：https://github.com/router-for-me/CLIProxyAPI
 
 搭建完成后你会得到：
-- CPA 地址（如 `http://127.0.0.1:8317`）
+- CPA 地址（如 `http://127.0.0.1:8317`；人工上传页面是 `http://127.0.0.1:8317/management.html#/auth-files`，AutoTeam 后端会归一化为 API 根地址）
 - 管理密钥（`secret-key`）
 
 ## 第一步：安装

@@ -28,7 +28,6 @@ from autoteam.account_lifecycle import (
 from autoteam.accounts import (
     CPA_STATUS_FAILED,
     CPA_STATUS_PENDING,
-    CPA_STATUS_SUCCESS,
     REGISTRATION_STATUS_FAILED,
     REGISTRATION_STATUS_PENDING,
     REGISTRATION_STATUS_SUCCESS,
@@ -47,6 +46,7 @@ from autoteam.browser_runtime import (
     acquire_browser_lease,
     browser_parallel_limit,
     force_release_persistent_browser,
+    playwright_user_data_dir_override,
 )
 from autoteam.chatgpt_api import ChatGPTTeamAPI
 from autoteam.codex_auth import (
@@ -56,7 +56,7 @@ from autoteam.codex_auth import (
     save_auth_file,
 )
 from autoteam.config import get_playwright_launch_options
-from autoteam.cpa_sync import upload_to_cpa
+from autoteam.cpa_sync import CpaUploadConfirmationUncertain, upload_to_cpa
 from autoteam.exceptions import OpenAiCreateAccountBlockedError, PhoneVerificationRequiredError
 from autoteam.flow_runs import (
     append_flow_event,
@@ -84,6 +84,9 @@ MAX_CONSECUTIVE_REGISTER_FAILURES = 2
 MAX_CONSECUTIVE_PHONE_BEFORE_PROXY_ROTATE = max(
     1, int(os.getenv("CPA_BATCH_PHONE_PROXY_ROTATE_THRESHOLD", "3") or 3)
 )
+DEFAULT_REGISTER_FAILURE_GUARD_GRACE_ATTEMPTS = max(
+    0, int(os.getenv("CPA_BATCH_REGISTER_FAILURE_GUARD_GRACE_ATTEMPTS", "0") or 0)
+)
 MIN_COMPLETED_SUCCESS_RATE = 95.0
 SUCCESS_RATE_SAFETY_MARGIN = 1.0
 MIN_COMPLETED_ACCOUNTS_FOR_SUCCESS_RATE_GUARD = DEFAULT_BATCH_SIZE
@@ -93,6 +96,7 @@ _DIRECT_REGISTER_WALL_CLOCK_TIMEOUT = max(
     60.0,
     float(os.getenv("CPA_BATCH_DIRECT_REGISTER_TIMEOUT_SECONDS", "240") or 240),
 )
+_DIRECT_REGISTER_BROWSER_OWNER_PREFIX = "cpa_batch.direct"
 JOIN_MODE_DIRECT = "direct"
 JOIN_MODE_INVITE = "invite"
 VALID_JOIN_MODES = {JOIN_MODE_DIRECT, JOIN_MODE_INVITE}
@@ -116,6 +120,45 @@ def _rotate_and_log_current_proxy() -> str:
     proxy_url = outbound_proxy.rotate_task_proxy()
     logger.info("[CPA批量] 当前出口 IP: %s", _proxy_host_label(proxy_url))
     return proxy_url
+
+
+def _direct_register_browser_owner(worker_index: int | None) -> str:
+    if worker_index is None:
+        return f"{_DIRECT_REGISTER_BROWSER_OWNER_PREFIX}.single"
+    return f"{_DIRECT_REGISTER_BROWSER_OWNER_PREFIX}.worker-{max(1, int(worker_index or 1))}"
+
+
+def _register_direct_account_once(
+    register_func,
+    mail_client,
+    email: str,
+    password: str,
+    mail_account_id: str,
+    session_bundle_callback,
+    oauth_bundle_callback,
+    browser_owner: str,
+) -> bool:
+    kwargs = {
+        "mail_account_id": mail_account_id,
+        "session_bundle_callback": session_bundle_callback,
+        "oauth_bundle_callback": oauth_bundle_callback,
+        "require_session_bundle": True,
+        "require_oauth_bundle": True,
+        "browser_owner": browser_owner,
+    }
+    with playwright_user_data_dir_override(""):
+        while True:
+            try:
+                return bool(register_func(mail_client, email, password, **kwargs))
+            except TypeError as exc:
+                text = str(exc)
+                removed = False
+                for key in ("browser_owner", "require_oauth_bundle", "oauth_bundle_callback", "require_session_bundle"):
+                    if key in text and key in kwargs:
+                        kwargs.pop(key, None)
+                        removed = True
+                if not removed:
+                    raise
 
 
 class AccountDeactivatedError(RuntimeError):
@@ -161,8 +204,9 @@ class CpaBatchHooks:
 
 
 class _CpaUploadWorker:
-    def __init__(self, hooks: CpaBatchHooks):
+    def __init__(self, hooks: CpaBatchHooks, *, remote_sync_enabled: bool = True):
         self.hooks = hooks
+        self.remote_sync_enabled = bool(remote_sync_enabled)
         self.jobs: queue.Queue[dict | None] = queue.Queue()
         self.results: queue.Queue[dict] = queue.Queue()
         self.thread: threading.Thread | None = None
@@ -238,7 +282,11 @@ class _CpaUploadWorker:
                 batch_index=batch_index,
                 worker_index=worker_index,
                 stage="cpa_auth",
-                message="开始 Codex 认证、额度检查和 CPA 上传",
+                message=(
+                    "开始 Codex 认证、额度检查和 CPA 上传"
+                    if self.remote_sync_enabled
+                    else "开始确认本地 Codex OAuth RT 文件"
+                ),
                 status="running",
             )
             result = _verify_and_upload_cpa(
@@ -247,13 +295,16 @@ class _CpaUploadWorker:
                 hooks=self.hooks,
                 batch_index=batch_index,
                 worker_index=worker_index,
+                remote_sync_enabled=self.remote_sync_enabled,
             )
-            sub2api_result = _sync_cpa_account_to_sub2api(
-                email,
-                hooks=self.hooks,
-                batch_index=batch_index,
-                worker_index=worker_index,
-            )
+            sub2api_result = None
+            if self.remote_sync_enabled:
+                sub2api_result = _sync_cpa_account_to_sub2api(
+                    email,
+                    hooks=self.hooks,
+                    batch_index=batch_index,
+                    worker_index=worker_index,
+                )
             account_updates = {
                 "flow_status": "success",
                 "flow_stage": "completed",
@@ -271,12 +322,16 @@ class _CpaUploadWorker:
                 batch_index=batch_index,
                 worker_index=worker_index,
                 stage="completed",
-                message="CPA JSON 已可用" + ("，Sub2API 已同步" if sub2api_result else ""),
+                message=(
+                    "CPA JSON 已可用" + ("，Sub2API 已同步" if sub2api_result else "")
+                    if self.remote_sync_enabled
+                    else "本地账号和 Codex OAuth RT 已保存"
+                ),
                 status="success",
                 plan_type=result["plan_type"],
                 auth_file=result["auth_file"],
                 auth_name=result["auth_name"],
-                cpa_uploaded=True,
+                cpa_uploaded=bool(result.get("cpa_uploaded")),
                 sub2api_synced=bool(sub2api_result),
                 finished_at=time.time(),
             )
@@ -313,11 +368,18 @@ class _CpaUploadWorker:
                 self.results.put({"ok": False, "email": email, "error": str(exc), "failure_count": failure_count})
                 return
             if failure_count < MAX_ACCOUNT_FAILURES:
-                retry_delay = RATE_LIMIT_RETRY_SECONDS if _is_temporary_rate_limit_error(exc) else 0
-                if retry_delay:
+                is_rate_limited = _is_temporary_rate_limit_error(exc)
+                is_upload_uncertain = _is_temporary_cpa_upload_uncertain_error(exc)
+                retry_delay = RATE_LIMIT_RETRY_SECONDS if is_rate_limited else 0
+                if is_rate_limited:
                     message = (
                         f"CPA 认证命中临时限流，第 {failure_count}/{MAX_ACCOUNT_FAILURES} 次，"
                         f"{retry_delay}s 后重试当前账号: {exc}"
+                    )
+                elif is_upload_uncertain:
+                    message = (
+                        f"CPA 上传结果暂时无法确认，第 {failure_count}/{MAX_ACCOUNT_FAILURES} 次，"
+                        f"稍后重试当前账号: {exc}"
                     )
                 else:
                     message = f"CPA 认证失败第 {failure_count}/{MAX_ACCOUNT_FAILURES} 次，继续重试当前账号: {exc}"
@@ -347,7 +409,37 @@ class _CpaUploadWorker:
                         next_proxy.split("@")[-1] if next_proxy else "direct",
                     )
                     time.sleep(retry_delay)
+                elif is_upload_uncertain:
+                    time.sleep(2)
                 self.jobs.put(job)
+                return
+
+            if _is_temporary_cpa_upload_uncertain_error(exc):
+                reason = f"CPA 上传超时且远端确认暂不可用，已暂停等待人工复查: {email}"
+                update_account(
+                    email,
+                    cpa_status=CPA_STATUS_PENDING,
+                    cpa_error_message=str(exc),
+                    flow_status="running",
+                    flow_stage="cpa_auth",
+                    flow_error_level="warn",
+                    flow_error_message=str(exc),
+                    flow_failure_count=failure_count,
+                )
+                self.hooks.account_event(
+                    email,
+                    batch_index=batch_index,
+                    worker_index=worker_index,
+                    stage="cpa_auth",
+                    message=reason,
+                    error_level="warn",
+                    status="running",
+                    finished_at=time.time(),
+                    failure_count=failure_count,
+                )
+                logger.warning("[CPA批量] %s", reason)
+                self.hooks.run_update(fatal_error=reason, pause_requested=True)
+                self.results.put({"ok": False, "email": email, "error": str(exc), "failure_count": failure_count})
                 return
 
             update_account(
@@ -411,6 +503,10 @@ def _is_temporary_rate_limit_error(exc: Exception) -> bool:
     return "http 429" in text or "rate limit" in text or "临时限流" in text
 
 
+def _is_temporary_cpa_upload_uncertain_error(exc: Exception) -> bool:
+    return isinstance(exc, CpaUploadConfirmationUncertain)
+
+
 def _delete_temp_mail_account(mail_client, account_id, email: str, *, reason: str = "失败") -> None:
     if account_id is None:
         return
@@ -425,6 +521,51 @@ def _is_non_ip_create_account_block(exc: OpenAiCreateAccountBlockedError) -> boo
     if reason:
         return reason == "about_you_timeout"
     return "about-you 超时" in str(exc)
+
+
+def _resolve_register_failure_guard_grace_attempts(value: int | None) -> int:
+    if value is None:
+        return DEFAULT_REGISTER_FAILURE_GUARD_GRACE_ATTEMPTS
+    try:
+        resolved = int(value)
+    except Exception:
+        return DEFAULT_REGISTER_FAILURE_GUARD_GRACE_ATTEMPTS
+    return max(0, resolved)
+
+
+def _recoverable_register_failure_kind(exc_or_message: Exception | str | None) -> str:
+    text = str(exc_or_message or "")
+    lowered = text.lower()
+    if "reason=session_ended" in lowered or "your session has ended" in lowered or "session has ended" in lowered:
+        return "session_ended"
+    if "邮箱步骤未推进" in text:
+        return "email_step_stuck"
+    return ""
+
+
+def _prepare_recoverable_register_retry(
+    exc_or_message: Exception | str | None,
+    *,
+    worker_index: int | None = None,
+) -> bool:
+    kind = _recoverable_register_failure_kind(exc_or_message)
+    if not kind:
+        return False
+    new_proxy = outbound_proxy.rotate_task_proxy()
+    if worker_index is None:
+        logger.warning(
+            "[CPA批量] 可恢复注册失败(%s)，切换到 IP %s 并刷新注册状态后继续采样",
+            kind,
+            _proxy_host_label(new_proxy),
+        )
+    else:
+        logger.warning(
+            "[CPA批量] 可恢复注册失败(%s)，worker %d 切换到 IP %s 并刷新注册状态后继续采样",
+            kind,
+            worker_index,
+            _proxy_host_label(new_proxy),
+        )
+    return True
 
 
 def _completed_success_rate(success_count: int, failed_count: int) -> float:
@@ -602,13 +743,13 @@ def _create_direct_account(
         session_bundle: dict[str, object] = {}
         oauth_bundle: dict[str, object] = {}
 
-        def capture_session_bundle(bundle: dict) -> None:
-            session_bundle.clear()
-            session_bundle.update(bundle or {})
+        def capture_session_bundle(bundle: dict, target=session_bundle) -> None:
+            target.clear()
+            target.update(bundle or {})
 
-        def capture_oauth_bundle(bundle: dict) -> None:
-            oauth_bundle.clear()
-            oauth_bundle.update(bundle or {})
+        def capture_oauth_bundle(bundle: dict, target=oauth_bundle) -> None:
+            target.clear()
+            target.update(bundle or {})
 
         add_account(
             email,
@@ -648,6 +789,7 @@ def _create_direct_account(
         logger.info("[直接注册] 开始注册: %s", email)
 
         session_bundle.clear()
+        browser_owner = _direct_register_browser_owner(worker_index)
         try:
             try:
                 _executor = concurrent.futures.ThreadPoolExecutor(
@@ -655,15 +797,15 @@ def _create_direct_account(
                 )
                 try:
                     _future = _executor.submit(
+                        _register_direct_account_once,
                         _register_direct_once,
                         mail_client,
                         email,
                         password,
-                        mail_account_id=account_id,
-                        session_bundle_callback=capture_session_bundle,
-                        oauth_bundle_callback=capture_oauth_bundle,
-                        require_session_bundle=True,
-                        require_oauth_bundle=True,
+                        account_id,
+                        capture_session_bundle,
+                        capture_oauth_bundle,
+                        browser_owner,
                     )
                     try:
                         success = _future.result(timeout=_DIRECT_REGISTER_WALL_CLOCK_TIMEOUT)
@@ -676,7 +818,7 @@ def _create_direct_account(
                         logger.error("[直接注册] %s", message)
                         try:
                             force_release_persistent_browser(
-                                owner="manager._register_direct_once",
+                                owner=browser_owner,
                                 reason=f"direct register timeout for {email}",
                             )
                         except Exception as kill_exc:
@@ -696,6 +838,7 @@ def _create_direct_account(
                     password,
                     mail_account_id=account_id,
                     session_bundle_callback=capture_session_bundle,
+                    browser_owner=browser_owner,
                 )
         except OpenAiCreateAccountBlockedError as exc:
             if _is_non_ip_create_account_block(exc):
@@ -935,6 +1078,7 @@ def _create_direct_accounts_parallel(
         attempted = 0
         succeeded = 0
         failed = 0
+        recoverable_failures = 0
         consecutive_phone_failures = 0
         reuse_current_proxy_once = False
         emails: list[dict[str, object]] = []
@@ -979,13 +1123,23 @@ def _create_direct_accounts_parallel(
                             reuse_current_proxy_once = True
                         continue
                     except AccountFlowError as exc:
-                        reuse_current_proxy_once = False
                         failed += 1
+                        if _prepare_recoverable_register_retry(exc, worker_index=worker_index):
+                            recoverable_failures += 1
+                            reuse_current_proxy_once = True
+                            consecutive_phone_failures = 0
+                        else:
+                            reuse_current_proxy_once = False
                         logger.warning("[CPA批量] 直注 worker %d 注册失败: %s", worker_index, exc)
                         continue
                     except Exception as exc:
-                        reuse_current_proxy_once = False
                         failed += 1
+                        if _prepare_recoverable_register_retry(exc, worker_index=worker_index):
+                            recoverable_failures += 1
+                            reuse_current_proxy_once = True
+                            consecutive_phone_failures = 0
+                        else:
+                            reuse_current_proxy_once = False
                         logger.warning("[CPA批量] 直注 worker %d 异常: %s", worker_index, exc)
                         continue
                     email = _normalized_email(email)
@@ -1009,6 +1163,7 @@ def _create_direct_accounts_parallel(
                     "attempted": attempted,
                     "succeeded": succeeded,
                     "failed": failed,
+                    "recoverable_failures": recoverable_failures,
                     "emails": emails,
                 }
             )
@@ -1042,6 +1197,7 @@ def _create_direct_accounts_parallel(
         "attempted": sum(int(item.get("attempted") or 0) for item in worker_reports),
         "succeeded": sum(int(item.get("succeeded") or 0) for item in worker_reports),
         "failed": sum(int(item.get("failed") or 0) for item in worker_reports),
+        "recoverable_failures": sum(int(item.get("recoverable_failures") or 0) for item in worker_reports),
         "emails": emails,
         "worker_reports": worker_reports,
         "parallel_workers": len(targets),
@@ -1226,6 +1382,7 @@ def _verify_and_upload_cpa(
     hooks: CpaBatchHooks | None = None,
     batch_index: int | None = None,
     worker_index: int | None = None,
+    remote_sync_enabled: bool = True,
 ) -> dict:
     auth_path, plan_type, auth_data = _ensure_team_auth(
         email,
@@ -1234,6 +1391,25 @@ def _verify_and_upload_cpa(
         batch_index=batch_index,
         worker_index=worker_index,
     )
+    if not remote_sync_enabled:
+        now = int(time.time())
+        update_account(
+            email,
+            cpa_status=CPA_STATUS_PENDING,
+            cpa_error_message="",
+            qualified_at=float(now),
+            usage_status=USAGE_INVENTORY,
+        )
+        return {
+            "email": email,
+            "plan_type": plan_type,
+            "auth_file": str(auth_path),
+            "auth_name": Path(auth_path).name,
+            "cpa_archive_file": "",
+            "quota": {},
+            "cpa_uploaded": False,
+        }
+
     token = auth_data.get("access_token")
     if not token:
         update_account(email, cpa_status=CPA_STATUS_FAILED, cpa_error_message="认证文件缺少 access_token")
@@ -1318,6 +1494,7 @@ def _verify_and_upload_cpa(
         "auth_name": Path(auth_path).name,
         "cpa_archive_file": archive_path,
         "quota": quota_info,
+        "cpa_uploaded": True,
     }
 
 
@@ -1376,6 +1553,8 @@ def run_cpa_batch(
     batch_size: int = DEFAULT_BATCH_SIZE,
     parallel_workers: int = 1,
     continue_on_error: bool = False,
+    register_failure_guard_grace_attempts: int | None = None,
+    remote_sync_enabled: bool = True,
     resume: bool = False,
 ) -> dict:
     existing_run = get_flow_run(run_id) if resume else None
@@ -1401,15 +1580,33 @@ def run_cpa_batch(
         parallel_workers = 1
     if existing_run and "continue_on_error" in existing_run:
         continue_on_error = bool(existing_run.get("continue_on_error"))
+    if existing_run and "register_failure_guard_grace_attempts" in existing_run:
+        register_failure_guard_grace_attempts = existing_run.get("register_failure_guard_grace_attempts")
+    register_failure_guard_grace_attempts = _resolve_register_failure_guard_grace_attempts(
+        register_failure_guard_grace_attempts
+    )
+    if existing_run and "remote_sync_enabled" in existing_run:
+        remote_sync_enabled = bool(existing_run.get("remote_sync_enabled"))
+    remote_sync_enabled = bool(remote_sync_enabled)
     max_attempts = max(target, target * MAX_ATTEMPT_MULTIPLIER)
     if resume:
         resume_flow_run(run_id)
-        update_flow_run(run_id, continue_on_error=bool(continue_on_error))
+        update_flow_run(
+            run_id,
+            continue_on_error=bool(continue_on_error),
+            register_failure_guard_grace_attempts=register_failure_guard_grace_attempts,
+            remote_sync_enabled=remote_sync_enabled,
+        )
     else:
         create_flow_run(
             run_id, target=target, batch_size=batch_size, join_mode=join_mode, parallel_workers=parallel_workers
         )
-        update_flow_run(run_id, continue_on_error=bool(continue_on_error))
+        update_flow_run(
+            run_id,
+            continue_on_error=bool(continue_on_error),
+            register_failure_guard_grace_attempts=register_failure_guard_grace_attempts,
+            remote_sync_enabled=remote_sync_enabled,
+        )
     hooks = CpaBatchHooks(run_id)
 
     chatgpt = None
@@ -1422,7 +1619,7 @@ def run_cpa_batch(
     consecutive_register_failures = 0
     consecutive_phone_failures = 0
     reuse_current_proxy_once = False
-    cpa_worker = _CpaUploadWorker(hooks)
+    cpa_worker = _CpaUploadWorker(hooks, remote_sync_enabled=remote_sync_enabled)
 
     def get_pending_cpa() -> int:
         with pending_lock:
@@ -1462,7 +1659,11 @@ def run_cpa_batch(
             batch_index=batch_index,
             worker_index=worker_index,
             stage="cpa_queued",
-            message="已提交协议认证、CPA JSON 检查和上传，继续处理后续账号",
+            message=(
+                "已提交协议认证、CPA JSON 检查和上传，继续处理后续账号"
+                if remote_sync_enabled
+                else "已提交本地 OAuth RT 确认，继续处理后续账号"
+            ),
             status="running",
         )
         cpa_worker.enqueue(email, batch_index=batch_index, worker_index=worker_index)
@@ -1530,6 +1731,19 @@ def run_cpa_batch(
             "halt_reason": reason,
         }
 
+    def should_pause_for_consecutive_register_failures() -> bool:
+        if continue_on_error or consecutive_register_failures < MAX_CONSECUTIVE_REGISTER_FAILURES:
+            return False
+        if attempts <= register_failure_guard_grace_attempts:
+            logger.warning(
+                "[CPA批量] 前 %d 次监督采样内忽略连续注册失败暂停，当前已尝试 %d 次，最近错误计数 %d",
+                register_failure_guard_grace_attempts,
+                attempts,
+                consecutive_register_failures,
+            )
+            return False
+        return True
+
     try:
         cpa_worker.start()
         if join_mode == JOIN_MODE_INVITE:
@@ -1578,13 +1792,17 @@ def run_cpa_batch(
                 hooks.run_update(current_batch=batch_index)
                 created_accounts: list[dict[str, object]] = []
 
-                def enqueue_parallel_success(item: dict[str, object]) -> None:
+                def enqueue_parallel_success(
+                    item: dict[str, object],
+                    target_accounts=created_accounts,
+                    target_batch_index=batch_index,
+                ) -> None:
                     email = _normalized_email(item.get("email"))
                     if not email:
                         return
                     worker_index = item.get("worker_index")
-                    created_accounts.append({"email": email, "worker_index": worker_index})
-                    enqueue_cpa_account(email, batch_index=batch_index, worker_index=worker_index)
+                    target_accounts.append({"email": email, "worker_index": worker_index})
+                    enqueue_cpa_account(email, batch_index=target_batch_index, worker_index=worker_index)
 
                 create_result = _create_direct_accounts_parallel(
                     create_target,
@@ -1597,8 +1815,33 @@ def run_cpa_batch(
                 account_failures += int(create_result.get("failed") or 0)
                 hooks.run_update(attempted_count=attempts)
                 if not created_accounts:
-                    consecutive_register_failures += 1
-                    if not continue_on_error and consecutive_register_failures >= MAX_CONSECUTIVE_REGISTER_FAILURES:
+                    progress_count = (
+                        int(create_result.get("attempted") or 0)
+                        + int(create_result.get("succeeded") or 0)
+                        + int(create_result.get("failed") or 0)
+                    )
+                    if progress_count <= 0:
+                        reason = "并行直注未产生账号且没有进展，已暂停"
+                        hooks.run_update(fatal_error=reason, pause_requested=True)
+                        close_cpa_worker()
+                        hooks.pause()
+                        logger.warning("[CPA批量] %s", reason)
+                        return {
+                            "run_id": run_id,
+                            "status": "paused",
+                            "target": target,
+                            "batch_size": batch_size,
+                            "join_mode": join_mode,
+                            "attempted": attempts,
+                            "succeeded": success_count,
+                            "failed": account_failures,
+                            "halt_reason": reason,
+                        }
+                    if int(create_result.get("recoverable_failures") or 0) >= int(create_result.get("failed") or 0) > 0:
+                        consecutive_register_failures = 0
+                    else:
+                        consecutive_register_failures += 1
+                    if should_pause_for_consecutive_register_failures():
                         return pause_for_consecutive_register_failures("并行直注注册未产生成功账号")
                     if not continue_on_error and should_pause_for_register_success_rate():
                         reason = register_success_rate_message()
@@ -1710,8 +1953,13 @@ def run_cpa_batch(
                 )
                 logger.warning("[CPA批量] 第 %d 个账号注册失败: %s", attempts, exc)
                 account_failures += 1
-                consecutive_register_failures += 1
-                if not continue_on_error and consecutive_register_failures >= MAX_CONSECUTIVE_REGISTER_FAILURES:
+                if _prepare_recoverable_register_retry(exc):
+                    consecutive_register_failures = 0
+                    consecutive_phone_failures = 0
+                    reuse_current_proxy_once = True
+                else:
+                    consecutive_register_failures += 1
+                if should_pause_for_consecutive_register_failures():
                     return pause_for_consecutive_register_failures(str(exc))
                 if not continue_on_error and should_pause_for_register_success_rate():
                     reason = register_success_rate_message()
@@ -1744,8 +1992,13 @@ def run_cpa_batch(
                 )
                 logger.warning("[CPA批量] 第 %d 个账号注册失败: %s", attempts, exc)
                 account_failures += 1
-                consecutive_register_failures += 1
-                if not continue_on_error and consecutive_register_failures >= MAX_CONSECUTIVE_REGISTER_FAILURES:
+                if _prepare_recoverable_register_retry(exc):
+                    consecutive_register_failures = 0
+                    consecutive_phone_failures = 0
+                    reuse_current_proxy_once = True
+                else:
+                    consecutive_register_failures += 1
+                if should_pause_for_consecutive_register_failures():
                     return pause_for_consecutive_register_failures(str(exc))
                 continue
 

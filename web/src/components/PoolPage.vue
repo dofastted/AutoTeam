@@ -18,7 +18,7 @@
         <div>
           <h3 class="text-lg font-semibold text-white">补账号完整流程</h3>
           <p class="text-sm text-gray-400 mt-1">
-            直注注册、Team 入席、session 备份、OAuth RT 认证、CPA JSON 上传在一个任务里执行，并保留每个账号的阶段记录。
+            直注注册、Team 入席、session 备份、OAuth RT 认证和本地账号保存会在一个任务里执行；CPA 和 Sub2API 上传由下方按钮手动触发。
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-3">
@@ -202,7 +202,7 @@
                   <th class="px-3 py-3 font-medium">阶段</th>
                   <th class="px-3 py-3 font-medium">状态</th>
                   <th class="px-3 py-3 font-medium">等级</th>
-                  <th class="px-3 py-3 font-medium">CPA JSON</th>
+                  <th class="px-3 py-3 font-medium">远端 CPA</th>
                   <th class="px-3 py-3 font-medium">错误</th>
                 </tr>
               </thead>
@@ -550,13 +550,14 @@ function joinModeLabel(value) {
 }
 
 function runStatusLabel(value) {
-  return { running: '运行中', paused: '已暂停', completed: '已完成', failed: '失败', partial: '部分完成' }[value] || value || '-'
+  return { running: '运行中', paused: '已暂停', stopped: '已停止', completed: '已完成', failed: '失败', partial: '部分完成' }[value] || value || '-'
 }
 
 function runStatusClass(value) {
   return {
     running: 'text-yellow-300',
     paused: 'text-amber-300',
+    stopped: 'text-gray-300',
     completed: 'text-emerald-300',
     failed: 'text-red-300',
     partial: 'text-amber-300',
@@ -602,6 +603,7 @@ function resolveWorkerStatus({ runStatus, attempted, success, failed, running, p
     return runStatus === 'running' ? 'waiting' : 'idle'
   }
   if (runStatus === 'paused') return 'paused'
+  if (runStatus === 'stopped') return 'stopped'
   if (runStatus === 'failed') return 'failed'
   if (runStatus === 'partial') return 'partial'
   if (runStatus === 'completed') {
@@ -619,6 +621,7 @@ function workerStatusLabel(value) {
     pending: '等待中',
     waiting: '待分配',
     paused: '已暂停',
+    stopped: '已停止',
     completed: '已完成',
     failed: '失败',
     partial: '部分成功',
@@ -632,6 +635,7 @@ function workerStatusClass(value) {
     pending: 'bg-gray-500/10 text-gray-300 border-gray-500/20',
     waiting: 'bg-cyan-500/10 text-cyan-300 border-cyan-500/20',
     paused: 'bg-amber-500/10 text-amber-300 border-amber-500/20',
+    stopped: 'bg-gray-500/10 text-gray-300 border-gray-500/20',
     completed: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20',
     failed: 'bg-red-500/10 text-red-300 border-red-500/20',
     partial: 'bg-orange-500/10 text-orange-300 border-orange-500/20',
@@ -658,7 +662,7 @@ function stageLabel(value) {
     cpa_auth: 'CPA 认证',
     oauth: 'OAuth',
     quota_check: '额度检查',
-    cpa_upload: 'CPA 上传',
+    cpa_upload: '远端 CPA 上传',
     completed: '完成',
     interrupted: '已中断',
   }[value] || value || '-'

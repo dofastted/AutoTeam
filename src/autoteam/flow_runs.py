@@ -122,6 +122,63 @@ def mark_interrupted_running_runs(reason: str = "服务重启或任务中断") -
         return changed
 
 
+def stop_active_flow_runs(reason: str = "用户强制停止", *, skip_run_ids: set[str] | None = None) -> list[dict]:
+    """Mark all active flow runs as stopped for the global force-stop action."""
+    with _FLOW_RUNS_LOCK:
+        skip_run_ids = {str(item) for item in (skip_run_ids or set()) if item}
+        runs = load_flow_runs()
+        stopped: list[dict] = []
+        now = _now()
+        for run in runs:
+            if run.get("status") not in ACTIVE_FLOW_STATUSES:
+                continue
+            if str(run.get("run_id") or "") in skip_run_ids:
+                stopped.append(
+                    {
+                        "run_id": run.get("run_id"),
+                        "skipped": True,
+                        "reason": "任务线程仍在运行，暂不关闭批量流程记录",
+                    }
+                )
+                continue
+
+            run["status"] = "stopped"
+            run["finished_at"] = run.get("finished_at") or now
+            run["fatal_error"] = reason
+            run["pause_requested"] = False
+            active_accounts = 0
+            for account in run.get("accounts", []):
+                if account.get("status") not in ACTIVE_FLOW_STATUSES:
+                    continue
+                active_accounts += 1
+                account["status"] = "failed"
+                account["error_level"] = "fatal"
+                account["error_message"] = account.get("error_message") or reason
+                account["finished_at"] = account.get("finished_at") or now
+                account.setdefault("events", []).append(
+                    {
+                        "ts": now,
+                        "stage": account.get("stage") or "interrupted",
+                        "message": reason,
+                        "error_level": "fatal",
+                    }
+                )
+            run["success_count"] = sum(1 for item in run.get("accounts", []) if item.get("status") == "success")
+            run["failed_count"] = sum(1 for item in run.get("accounts", []) if item.get("status") == "failed")
+            run["attempted_count"] = len(run.get("accounts", []))
+            stopped.append(
+                {
+                    "run_id": run.get("run_id"),
+                    "join_mode": run.get("join_mode"),
+                    "target": run.get("target"),
+                    "active_accounts": active_accounts,
+                }
+            )
+        if stopped:
+            save_flow_runs(runs)
+        return stopped
+
+
 def fail_running_flow_accounts(run_id: str, reason: str = "恢复前清理遗留运行记录") -> int:
     """Mark lingering running account records as failed for one flow run."""
     with _FLOW_RUNS_LOCK:

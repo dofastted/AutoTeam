@@ -6,7 +6,7 @@ import time
 import pytest
 from fastapi import HTTPException
 
-from autoteam import accounts, api, protocol_oauth
+from autoteam import accounts, api, flow_runs, protocol_oauth
 
 
 def _set_pool_runtime_config(monkeypatch):
@@ -2045,7 +2045,7 @@ def test_run_task_sets_finished_at_for_completed_task(monkeypatch):
     assert lock.locked() is False
 
 
-def test_post_stop_all_tasks_marks_running_task_stopped(monkeypatch):
+def test_post_stop_all_tasks_marks_running_task_stopped(tmp_path, monkeypatch):
     class FakeThread:
         def __init__(self):
             self.joined = False
@@ -2077,6 +2077,15 @@ def test_post_stop_all_tasks_marks_running_task_stopped(monkeypatch):
     monkeypatch.setattr(api, "_admin_login_api", None)
     monkeypatch.setattr(api, "_main_codex_flow", None)
     monkeypatch.setattr(api, "_manual_account_flow", None)
+    monkeypatch.setattr(flow_runs, "FLOW_RUNS_FILE", tmp_path / "flow_runs.json")
+    flow_runs.create_flow_run("run-active", target=20, batch_size=20, join_mode="direct")
+    flow_runs.append_flow_event(
+        "run-active",
+        "worker@example.com",
+        stage="register",
+        message="正在注册",
+        status="running",
+    )
     restart_event = threading.Event()
     monkeypatch.setattr(api, "_auto_check_restart", restart_event)
     monkeypatch.setattr(api, "_raise_thread_exit", lambda _thread: "requested")
@@ -2097,6 +2106,106 @@ def test_post_stop_all_tasks_marks_running_task_stopped(monkeypatch):
     assert thread.joined is True
     assert lock.locked() is True
     assert restart_event.is_set() is False
+    assert result["stopped_flow_runs"] == [
+        {
+            "run_id": "run-active",
+            "join_mode": "direct",
+            "target": 20,
+            "active_accounts": 1,
+        }
+    ]
+    run = flow_runs.get_flow_run("run-active")
+    assert run["status"] == "stopped"
+    assert run["finished_at"] is not None
+    assert run["accounts"][0]["status"] == "failed"
+
+
+def test_post_stop_all_tasks_marks_active_flow_runs_stopped(tmp_path, monkeypatch):
+    monkeypatch.setattr(flow_runs, "FLOW_RUNS_FILE", tmp_path / "flow_runs.json")
+    flow_runs.create_flow_run("run-active", target=20, batch_size=20, join_mode="direct")
+    flow_runs.append_flow_event(
+        "run-active",
+        "worker@example.com",
+        stage="register",
+        message="正在注册",
+        status="running",
+    )
+    flow_runs.create_flow_run("run-done", target=1, batch_size=1, join_mode="direct")
+    flow_runs.update_flow_run("run-done", status="completed", success_count=1, attempted_count=1)
+
+    monkeypatch.setattr(api, "_tasks", {})
+    monkeypatch.setattr(api, "_task_threads", {})
+    monkeypatch.setattr(api, "_admin_login_api", None)
+    monkeypatch.setattr(api, "_main_codex_flow", None)
+    monkeypatch.setattr(api, "_manual_account_flow", None)
+
+    result = api.post_stop_all_tasks()
+
+    assert result["stopped_flow_runs"] == [
+        {
+            "run_id": "run-active",
+            "join_mode": "direct",
+            "target": 20,
+            "active_accounts": 1,
+        }
+    ]
+    stopped = flow_runs.get_flow_run("run-active")
+    done = flow_runs.get_flow_run("run-done")
+    assert stopped["status"] == "stopped"
+    assert stopped["fatal_error"] == "用户强制停止"
+    assert stopped["pause_requested"] is False
+    assert stopped["accounts"][0]["status"] == "failed"
+    assert stopped["accounts"][0]["error_level"] == "fatal"
+    assert done["status"] == "completed"
+
+
+def test_post_stop_all_tasks_skips_only_flow_run_with_alive_cpa_task(tmp_path, monkeypatch):
+    class FakeThread:
+        def __init__(self, alive):
+            self.alive = alive
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout=None):
+            return None
+
+    monkeypatch.setattr(flow_runs, "FLOW_RUNS_FILE", tmp_path / "flow_runs.json")
+    flow_runs.create_flow_run("run-alive", target=20, batch_size=20, join_mode="direct")
+    flow_runs.append_flow_event("run-alive", "alive@example.com", stage="register", message="正在注册", status="running")
+    flow_runs.create_flow_run("run-stale", target=20, batch_size=20, join_mode="direct")
+    flow_runs.append_flow_event("run-stale", "stale@example.com", stage="register", message="正在注册", status="running")
+
+    monkeypatch.setattr(
+        api,
+        "_tasks",
+        {
+            "task-alive": {
+                "task_id": "task-alive",
+                "command": "cpa-batch",
+                "params": {"run_id": "run-alive"},
+                "status": "running",
+                "created_at": time.time(),
+                "finished_at": None,
+                "error": None,
+            }
+        },
+    )
+    monkeypatch.setattr(api, "_task_threads", {"task-alive": FakeThread(True)})
+    monkeypatch.setattr(api, "_admin_login_api", None)
+    monkeypatch.setattr(api, "_main_codex_flow", None)
+    monkeypatch.setattr(api, "_manual_account_flow", None)
+    monkeypatch.setattr(api, "_raise_thread_exit", lambda _thread: "requested")
+
+    result = api.post_stop_all_tasks()
+
+    assert {"run_id": "run-alive", "skipped": True, "reason": "任务线程仍在运行，暂不关闭批量流程记录"} in result[
+        "stopped_flow_runs"
+    ]
+    stale = flow_runs.get_flow_run("run-stale")
+    alive = flow_runs.get_flow_run("run-alive")
+    assert stale["status"] == "stopped"
+    assert alive["status"] == "running"
 
 
 def test_post_stop_all_tasks_stops_pending_flows_and_releases_lock(monkeypatch):

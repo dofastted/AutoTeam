@@ -31,6 +31,7 @@ _BROWSER_LEASE_STATE: dict[str, object] = {
 _BROWSER_LEASE_LIMIT_OVERRIDE: int | None = None
 _PERSISTENT_KEEPALIVE_LOCK = threading.Lock()
 _PERSISTENT_KEEPALIVE: dict[str, object] = {}
+_THREAD_LOCAL = threading.local()
 _PERSISTENT_WORKER_STOP = object()
 _PERSISTENT_CONTEXT_OPTION_KEYS = {
     "accept_downloads",
@@ -289,7 +290,26 @@ def _resolve_cdp_endpoint(cdp_url: str, timeout: float = _CDP_READY_TIMEOUT_SECO
 
 
 def _get_playwright_user_data_dir() -> str:
+    if hasattr(_THREAD_LOCAL, "playwright_user_data_dir"):
+        return str(_THREAD_LOCAL.playwright_user_data_dir or "").strip()
     return os.environ.get("PLAYWRIGHT_USER_DATA_DIR", "").strip()
+
+
+@contextmanager
+def playwright_user_data_dir_override(user_data_dir: str | None) -> Iterator[None]:
+    had_previous = hasattr(_THREAD_LOCAL, "playwright_user_data_dir")
+    previous = getattr(_THREAD_LOCAL, "playwright_user_data_dir", None)
+    _THREAD_LOCAL.playwright_user_data_dir = str(user_data_dir or "").strip()
+    try:
+        yield
+    finally:
+        if had_previous:
+            _THREAD_LOCAL.playwright_user_data_dir = previous
+        else:
+            try:
+                delattr(_THREAD_LOCAL, "playwright_user_data_dir")
+            except AttributeError:
+                pass
 
 
 def _live_thread_ids() -> set[int]:

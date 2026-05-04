@@ -40,6 +40,10 @@
 
 `src/autoteam/cpa_sync.py`: 负责 CPA 认证文件列表、上传、删除、下载、去重、正向同步、反向同步、主号文件同步。
 
+`CPA_URL` 是 CLIProxyAPI API 根地址。配置时也允许粘贴人工管理页 `http://host:8317/management.html#/auth-files`；`src/autoteam.config` 会在运行时归一化为 `http://host:8317`。后端上传、下载、列表和删除都调用 `/v0/management/auth-files` 系列接口，不把浏览器 hash 当作 HTTP 路径。
+
+上传请求使用较长超时。若上传请求超时但随后在 CPA 文件列表中能看到同名文件，`upload_to_cpa` 按成功处理，避免服务端已经写入而本地误标失败。
+
 正向同步 `sync_to_cpa`：
 
 - 读取本地账号。

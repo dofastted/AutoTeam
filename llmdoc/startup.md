@@ -9,6 +9,7 @@
 按任务继续读取：
 
 - 账号轮转、补位、清理：读 `llmdoc/architecture/account-lifecycle.md`。
+- 需要在 `cpa-batch` 运行期间清理失败账号：再读 `llmdoc/guides/account-cleanup-strategy.md`。
 - 管理员登录、浏览器自动化、Codex OAuth：读 `llmdoc/architecture/browser-and-oauth.md`。
 - 出口代理、OpenAI/邮箱/远端同步网络请求：读 `llmdoc/architecture/outbound-proxy.md`。
 - CPA / Sub2API / auth 文件：读 `llmdoc/architecture/sync-targets.md` 和 `llmdoc/reference/config-data-files.md`。

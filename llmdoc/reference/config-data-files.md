@@ -14,7 +14,7 @@
 - `MAIL_PROVIDER`: `mo_email`、`cloudmail`、`cloudflare_temp_email`。
 - `MO_EMAIL_BASE_URL`、`MO_EMAIL_DOMAIN`、`MO_EMAIL_NAME_PREFIX`、`MO_EMAIL_START_INDEX`、`MO_EMAIL_API_KEY`: MoEmail 服务接入。
 - `MO_EMAIL_EXPIRY_TIME`: 新建邮箱有效期，毫秒。`0` 表示永久邮箱。批量注册推荐 `0`：临时邮箱（如 1 小时、3 小时）会在 OTP 重试或后续 OAuth 补齐前自毁，导致收不到验证码。
-- `CPA_URL`、`CPA_KEY`、`SYNC_TARGET_CPA`: CPA 同步。
+- `CPA_URL`、`CPA_KEY`、`SYNC_TARGET_CPA`: CPA 同步。`CPA_URL` 可填 CLIProxyAPI 根地址，也可填 `management.html#/auth-files` 管理页；运行时会归一化为 API 根地址。
 - `SUB2API_URL`、`SUB2API_EMAIL`、`SUB2API_PASSWORD`、`SUB2API_GROUP`、`SYNC_TARGET_SUB2API`: Sub2API 同步。
 - `PLAYWRIGHT_BROWSER_MODE`: 浏览器显示方式，`hidden` 不弹窗，`visible` 显示窗口，`embedded` 当前按不弹窗运行。
 - `PLAYWRIGHT_HEADLESS`: 旧版兼容项，`false` 等同可见窗口。
@@ -90,15 +90,15 @@
 
 ## 认证文件
 
-账号池 OAuth RT 文件名：`auths/codex-{email}-team-{hash}-oauth.json`。这是 CPA / Sub2API 普通同步的上传来源。
+账号池 OAuth RT 文件名：`auths/codex-{email}-{plan_type}-{hash}-oauth.json`。这是 CPA / Sub2API 普通同步的上传来源。
 
-账号池 ChatGPT session 备份文件名：`auths/codex-{email}-team-{hash}-session.json`。它只保留注册完成后的 ChatGPT Web session，不是 CPA / Sub2API 上传凭证。
+账号池 ChatGPT session 备份文件名：`auths/codex-{email}-{plan_type}-{hash}-session.json`。它只保留注册完成后的 ChatGPT Web session，不是 CPA / Sub2API 上传凭证。
 
 主号文件名：`auths/codex-main-*.json`。
 
-已售、可售、不可用和归档 auth 文件分别存放在 `auths/sold/`、`auths/tradable/`、`auths/unusable/`、`auths/archive/`。这些分类目录内的文件以 `.json` 结尾，不带 `-oauth` / `-session` 后缀。
+已售、可售、不可用和归档 auth 文件分别存放在 `auths/sold/`、`auths/tradable/`、`auths/unusable/`、`auths/archive/`。这些分类目录内的文件以 `.json` 结尾，可能不带 `-oauth` / `-session` 后缀。
 
-同一邮箱同时存在根目录文件和分类目录文件时，auth 文件 API 的账号主分类按 `sold` > `tradable` > `unusable` > `archive` > `active` 判断；根目录 active 文件不覆盖分类目录。
+同一邮箱同时存在根目录文件和分类目录文件时，auth 文件 API 的账号主分类按 `sold` > `tradable` > `unusable` > `active` > `archive` 判断；`archive/` 是备份目录，不会覆盖根目录 active 文件。
 
 常见字段：
 

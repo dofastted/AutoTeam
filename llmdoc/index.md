@@ -26,6 +26,7 @@
 
 - `llmdoc/guides/local-development.md`: 本地安装、测试、前端构建、启动。
 - `llmdoc/guides/automation-watchdog.md`: 自动化看门狗使用指引。
+- `llmdoc/guides/account-cleanup-strategy.md`: `cpa-batch` 运行期间清理失败账号的证据链和操作顺序。
 - `llmdoc/guides/cpa-oauth-and-fill.md`: OAuth 登录页 CPA 凭证检查与 10 个一批补位流程。
 - `llmdoc/guides/account-management-howto.md`: 账号列表、详情、清理、分配释放、主号守卫。
 - `llmdoc/guides/account-ledger-tracing.md`: 账号事件 ledger 的手动接入和历史查询。
@@ -46,5 +47,6 @@
 - `llmdoc/memory/decisions/`: 稳定决策记录。
   - `llmdoc/memory/decisions/2026-04-30-async-incremental-sync.md`: CPA / Sub2API 异步增量同步策略。
 - `llmdoc/memory/reflections/`: 任务后的过程记录。
+  - `llmdoc/memory/reflections/2026-05-03-add-phone-cleanup.md`: `add-phone` pending 账号清理、锁冲突和本地 atomic write 记录。
 
 临时调查材料放在 `.llmdoc-tmp/investigations/`，不作为稳定文档读取。

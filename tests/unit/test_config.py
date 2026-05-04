@@ -155,3 +155,18 @@ def test_playwright_explicit_proxy_overrides_outbound_proxy(monkeypatch):
 
     options = reloaded.get_playwright_launch_options()
     assert options["proxy"]["server"] == "socks5://browser-proxy.local:1080"
+
+
+def test_cpa_url_accepts_management_auth_files_page(monkeypatch):
+    monkeypatch.setenv("CPA_URL", "http://localhost:8317/management.html#/auth-files")
+    reloaded = importlib.reload(config)
+
+    assert reloaded.CPA_URL == "http://localhost:8317"
+    assert reloaded.cpa_management_auth_files_url(reloaded.CPA_URL) == "http://localhost:8317/management.html#/auth-files"
+
+
+def test_cpa_url_accepts_management_api_path(monkeypatch):
+    monkeypatch.setenv("CPA_URL", "http://localhost:8317/v0/management/auth-files")
+    reloaded = importlib.reload(config)
+
+    assert reloaded.CPA_URL == "http://localhost:8317"

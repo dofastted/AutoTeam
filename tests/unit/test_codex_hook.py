@@ -40,8 +40,40 @@ def test_load_campaign_config_creates_default_file(tmp_path, monkeypatch):
 
     assert config["target_success"] == 100
     assert config["interval_minutes"] == 10
+    assert config["remote_sync_enabled"] is True
     stored = json.loads((tmp_path / "campaign.json").read_text(encoding="utf-8"))
     assert stored["enabled"] is True
+
+
+def test_start_cpa_batch_via_api_sends_remote_sync_enabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(codex_hook, "CONFIG_FILE", tmp_path / "campaign.json")
+    captured = {}
+
+    config = codex_hook.load_campaign_config()
+    config["api_base_url"] = "http://api.example"
+    config["remote_sync_enabled"] = True
+    codex_hook.save_campaign_config(config)
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"params": {"run_id": "run-new"}}
+
+    def fake_request(method, url, **kwargs):
+        captured["method"] = method
+        captured["url"] = url
+        captured["json"] = kwargs.get("json")
+        return FakeResponse()
+
+    monkeypatch.setattr(codex_hook.outbound_proxy, "request", fake_request)
+
+    codex_hook.start_cpa_batch_via_api(target=3, batch_size=3, parallel_workers=1, join_mode="direct")
+
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://api.example/api/tasks/cpa-batch"
+    assert captured["json"]["remote_sync_enabled"] is True
 
 
 def test_find_resumable_run_skips_completed_and_running(tmp_path, monkeypatch):

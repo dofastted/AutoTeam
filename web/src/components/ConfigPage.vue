@@ -259,8 +259,17 @@
           <div class="mb-4">
             <div class="text-sm font-medium text-white">CPA</div>
             <div class="mt-1 text-xs leading-5 text-slate-400">
-              为已启用的 CPA 远端填写连接地址和管理密钥。
+              为已启用的 CPA 远端填写连接地址和管理密钥。可填服务根地址；人工上传请打开管理页。
             </div>
+            <a
+              v-if="cpaManagementUrl"
+              :href="cpaManagementUrl"
+              target="_blank"
+              rel="noreferrer"
+              class="mt-2 inline-flex text-xs font-medium text-cyan-300 hover:text-cyan-200"
+            >
+              打开 CPA 认证文件页
+            </a>
           </div>
           <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             <div v-for="field in syncCpaFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
@@ -879,12 +888,35 @@ const cfTempEmailFields = computed(() => fieldsByKeys(['CF_TEMP_EMAIL_BASE_URL',
 
 const syncCpaEnabled = computed(() => String(runtimeForm.SYNC_TARGET_CPA || '').toLowerCase() === 'true')
 const syncSub2apiEnabled = computed(() => String(runtimeForm.SYNC_TARGET_SUB2API || '').toLowerCase() === 'true')
+const cpaManagementUrl = computed(() => buildCpaManagementUrl(runtimeForm.CPA_URL))
 const outboundProxyEnabled = computed(() => String(runtimeForm.OUTBOUND_PROXY_ENABLED || 'true').toLowerCase() === 'true')
 const proxyNodeEnabled = computed(() => String(runtimeForm.PROXY_NODE_ENABLED || 'false').toLowerCase() === 'true')
 const proxyNodeProvider = computed(() => String(runtimeForm.PROXY_NODE_PROVIDER || 'none').toLowerCase())
 const proxyNodeCanRefresh = computed(() => proxyNodeEnabled.value && proxyNodeProvider.value === 'webshare' && !runtimeLoading.value)
 const syncCpaFields = computed(() => syncCpaEnabled.value ? fieldsByKeys(['CPA_URL', 'CPA_KEY']) : [])
 const syncSub2apiFields = computed(() => syncSub2apiEnabled.value ? fieldsByKeys(['SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP']) : [])
+
+function buildCpaManagementUrl(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  try {
+    const url = new URL(raw)
+    const marker = '/management.html'
+    const apiMarker = '/v0/management'
+    const managementIndex = url.pathname.indexOf(marker)
+    const apiIndex = url.pathname.indexOf(apiMarker)
+    if (managementIndex >= 0) {
+      url.pathname = url.pathname.slice(0, managementIndex) || '/'
+    } else if (apiIndex >= 0) {
+      url.pathname = url.pathname.slice(0, apiIndex) || '/'
+    }
+    url.search = ''
+    url.hash = ''
+    return `${url.origin}${url.pathname.replace(/\/$/, '')}/management.html#/auth-files`
+  } catch {
+    return ''
+  }
+}
 
 const proxyMenuSections = [
   {

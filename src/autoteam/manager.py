@@ -28,8 +28,7 @@ import threading
 import time
 from pathlib import Path
 
-from autoteam import outbound_proxy
-from autoteam import protocol_oauth
+from autoteam import outbound_proxy, protocol_oauth
 from autoteam.about_you import fill_about_you_page
 from autoteam.account_ops import delete_managed_account, fetch_team_state
 from autoteam.accounts import (
@@ -1554,6 +1553,7 @@ def _register_direct_once(
     oauth_bundle_callback=None,
     require_session_bundle=False,
     require_oauth_bundle=False,
+    browser_owner="manager._register_direct_once",
 ):
     """执行一次直接注册，返回是否完成注册并进入 Team。"""
     from playwright.sync_api import sync_playwright
@@ -1561,7 +1561,10 @@ def _register_direct_once(
     logger.info("[直接注册] %s", email)
     signup_url = _DIRECT_SIGNUP_START_URL
 
-    with acquire_browser_lease("manager._register_direct_once", sync_playwright_factory=sync_playwright) as lease:
+    with acquire_browser_lease(
+        browser_owner or "manager._register_direct_once",
+        sync_playwright_factory=sync_playwright,
+    ) as lease:
         launch_kwargs = get_playwright_launch_options()
         if sys.platform.startswith("win"):
             launch_kwargs["slow_mo"] = 100
@@ -1767,6 +1770,49 @@ def _register_direct_once(
                     raise
                 except Exception as exc:
                     logger.warning("[直接注册] fallback 注册入口失败: %s | URL: %s", exc, page.url)
+            if current_step == "email" and _is_session_ended_page(page):
+                logger.warning(
+                    "[直接注册] 邮箱步骤遇到 session ended,回到 ChatGPT 主登录入口重置后再试一次 | URL: %s",
+                    page.url,
+                )
+                try:
+                    _goto_direct_signup_start(page)
+                    _raise_if_add_phone_url(page.url, email)
+                    _wait_for_direct_cloudflare(page, label="session_ended 重置后入口", timeout=75)
+                    _safe_invite_screenshot(page, "direct_02e_session_ended_reset.png")
+                    recovery_step = _wait_for_direct_register_step(
+                        page,
+                        {"email", "password", "code", "profile", "completed", "google", "auth_error"},
+                        timeout=20,
+                    )
+                    logger.info(
+                        "[直接注册] session_ended 重置后状态: %s | URL: %s",
+                        recovery_step,
+                        page.url,
+                    )
+                    _raise_if_add_phone_url(page.url, email)
+                    if recovery_step == "email":
+                        email_input = _first_visible_editable_locator(page, _DIRECT_EMAIL_SELECTORS, timeout=3000)
+                        if email_input:
+                            email_input.fill(email)
+                            time.sleep(0.5)
+                            logger.info("[直接注册] session_ended 重置后重新填入邮箱,点击 Continue")
+                            _click_primary_auth_button(page, email_input, ["Continue", "继续"])
+                            recovery_step = _wait_for_direct_step_change(page, "email", timeout=20)
+                            _raise_if_add_phone_url(page.url, email)
+                            logger.info(
+                                "[直接注册] session_ended 重置后再次提交结果: %s | URL: %s",
+                                recovery_step,
+                                page.url,
+                            )
+                    if recovery_step in {"password", "code", "profile", "workspace", "completed"}:
+                        current_step = recovery_step
+                    else:
+                        current_step = _detect_direct_register_step(page)
+                except PhoneVerificationRequiredError:
+                    raise
+                except Exception as exc:
+                    logger.warning("[直接注册] session_ended 重置失败: %s | URL: %s", exc, page.url)
             if current_step == "email":
                 logger.warning("[直接注册] 邮箱步骤未推进 | URL: %s | body=%s", page.url, _page_excerpt(page))
                 fail("邮箱步骤未推进")

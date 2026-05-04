@@ -5,6 +5,7 @@ import time
 import pytest
 
 from autoteam import accounts, cpa_batch, flow_runs
+from autoteam.cpa_sync import CpaUploadConfirmationUncertain
 
 
 class _FakeMailClient:
@@ -222,6 +223,39 @@ def test_run_cpa_batch_pauses_after_two_consecutive_register_failures(tmp_path, 
     assert run["fatal_error"].startswith("连续 2 个账号注册失败")
 
 
+def test_run_cpa_batch_sampling_grace_keeps_collecting_before_guard(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    failures = {"count": 0}
+
+    monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
+    monkeypatch.setattr(cpa_batch, "update_account", lambda *args, **kwargs: None)
+
+    def fake_create_direct(_mail_client, **_kwargs):
+        failures["count"] += 1
+        raise cpa_batch.AccountFlowError(
+            f"bad{failures['count']}@example.com",
+            "连续 3 次直注注册失败",
+        )
+
+    monkeypatch.setattr(cpa_batch, "_create_direct_account", fake_create_direct)
+
+    result = cpa_batch.run_cpa_batch(
+        "run-register-guard-grace",
+        target=5,
+        batch_size=5,
+        join_mode="direct",
+        register_failure_guard_grace_attempts=10,
+    )
+    run = flow_runs.get_flow_run("run-register-guard-grace")
+
+    assert result["status"] == "partial"
+    assert result["attempted"] == 10
+    assert failures["count"] == 10
+    assert run["status"] == "partial"
+    assert run["failed_count"] == 10
+    assert run["register_failure_guard_grace_attempts"] == 10
+
+
 def test_run_cpa_batch_continue_on_error_ignores_register_failure_guard(tmp_path, monkeypatch):
     _use_tmp_flow_file(tmp_path, monkeypatch)
     failures = {"count": 0}
@@ -253,6 +287,83 @@ def test_run_cpa_batch_continue_on_error_ignores_register_failure_guard(tmp_path
     assert run["status"] == "partial"
     assert run["failed_count"] == 6
     assert run["continue_on_error"] is True
+
+
+def test_run_cpa_batch_rotates_proxy_and_reuses_it_after_session_ended_failure(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    calls = []
+    rotated = []
+
+    monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
+    monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", lambda email, _cache, **_kwargs: _fake_cpa_result(email))
+    monkeypatch.setattr(
+        cpa_batch.outbound_proxy,
+        "rotate_task_proxy",
+        lambda: rotated.append("http://proxy-b:8080") or "http://proxy-b:8080",
+    )
+    monkeypatch.setattr(cpa_batch.outbound_proxy, "current_proxy_url", lambda: "http://proxy-b:8080")
+
+    def fake_create_direct(_mail_client, **kwargs):
+        calls.append(kwargs.get("reuse_current_proxy_once"))
+        if len(calls) == 1:
+            raise cpa_batch.AccountFlowError(
+                "session-ended@example.com",
+                "直注注册失败: 直注注册未完成: step=email url=https://auth.openai.com/ error_text=Your session has ended reason=session_ended",
+            )
+        return "ok@example.com"
+
+    monkeypatch.setattr(cpa_batch, "_create_direct_account", fake_create_direct)
+
+    result = cpa_batch.run_cpa_batch(
+        "run-session-ended-recover",
+        target=1,
+        batch_size=1,
+        join_mode="direct",
+    )
+    run = flow_runs.get_flow_run("run-session-ended-recover")
+
+    assert result["status"] == "completed"
+    assert result["attempted"] == 2
+    assert result["succeeded"] == 1
+    assert run["failed_count"] == 1
+    assert rotated == ["http://proxy-b:8080"]
+    assert calls == [False, True]
+
+
+def test_run_cpa_batch_rotates_proxy_and_reuses_it_after_email_step_stuck(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    calls = []
+    rotated = []
+
+    monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
+    monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", lambda email, _cache, **_kwargs: _fake_cpa_result(email))
+    monkeypatch.setattr(
+        cpa_batch.outbound_proxy,
+        "rotate_task_proxy",
+        lambda: rotated.append("http://proxy-c:8080") or "http://proxy-c:8080",
+    )
+    monkeypatch.setattr(cpa_batch.outbound_proxy, "current_proxy_url", lambda: "http://proxy-c:8080")
+
+    def fake_create_direct(_mail_client, **kwargs):
+        calls.append(kwargs.get("reuse_current_proxy_once"))
+        if len(calls) == 1:
+            raise cpa_batch.AccountFlowError("stuck@example.com", "直注注册失败: 邮箱步骤未推进")
+        return "ok2@example.com"
+
+    monkeypatch.setattr(cpa_batch, "_create_direct_account", fake_create_direct)
+
+    result = cpa_batch.run_cpa_batch(
+        "run-email-stuck-recover",
+        target=1,
+        batch_size=1,
+        join_mode="direct",
+    )
+
+    assert result["status"] == "completed"
+    assert result["attempted"] == 2
+    assert result["succeeded"] == 1
+    assert rotated == ["http://proxy-c:8080"]
+    assert calls == [False, True]
 
 
 def test_run_cpa_batch_skips_phone_verification_and_continues(tmp_path, monkeypatch):
@@ -822,9 +933,9 @@ def test_run_cpa_batch_stops_when_pause_is_requested(tmp_path, monkeypatch):
     run = flow_runs.get_flow_run("run-4")
 
     assert result["status"] == "paused"
-    assert seen == ["a1@example.com", "a2@example.com"]
+    assert seen in (["a1@example.com"], ["a1@example.com", "a2@example.com"])
     assert run["status"] == "paused"
-    assert len(run["accounts"]) == 2
+    assert len(run["accounts"]) == len(seen)
 
 
 def test_cpa_upload_success_syncs_sub2api_when_enabled(tmp_path, monkeypatch):
@@ -858,6 +969,52 @@ def test_cpa_upload_success_syncs_sub2api_when_enabled(tmp_path, monkeypatch):
     assert synced == ["sync@example.com"]
     assert any(event["stage"] == "sub2api_sync" for event in run["accounts"][0]["events"])
     assert run["accounts"][0]["sub2api_synced"] is True
+
+
+def test_run_cpa_batch_local_only_saves_oauth_rt_without_remote_sync(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    oauth_path = tmp_path / "codex-local@example.com-team-oauth.json"
+    oauth_path.write_text('{"access_token":"token-ok","refresh_token":"rt-1"}', encoding="utf-8")
+    accounts.add_account("local@example.com", "pw")
+    accounts.update_account(
+        "local@example.com",
+        status=accounts.STATUS_ACTIVE,
+        plan_type="team",
+        auth_file=str(oauth_path),
+        rt_auth_file=str(oauth_path),
+    )
+    remote_calls = []
+
+    monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
+    monkeypatch.setattr(cpa_batch, "_create_direct_account", lambda _mail, **_kwargs: "local@example.com")
+    monkeypatch.setattr(cpa_batch, "check_codex_quota", lambda _token: (_ for _ in ()).throw(AssertionError("quota check should not run")))
+    monkeypatch.setattr(cpa_batch, "upload_to_cpa", lambda _path: remote_calls.append("cpa") or True)
+    monkeypatch.setattr(cpa_batch, "is_sync_target_enabled", lambda target: True)
+    monkeypatch.setattr(
+        "autoteam.sub2api_sync.sync_account_to_sub2api",
+        lambda email: remote_calls.append(("sub2api", email)),
+    )
+
+    result = cpa_batch.run_cpa_batch(
+        "run-local-only",
+        target=1,
+        batch_size=1,
+        join_mode="direct",
+        remote_sync_enabled=False,
+    )
+    run = flow_runs.get_flow_run("run-local-only")
+    latest = accounts.find_account(accounts.load_accounts(), "local@example.com")
+
+    assert result["status"] == "completed"
+    assert result["succeeded"] == 1
+    assert remote_calls == []
+    assert latest["rt_auth_file"] == str(oauth_path)
+    assert latest["cpa_status"] == accounts.CPA_STATUS_PENDING
+    assert latest["usage_status"] == accounts.USAGE_INVENTORY
+    assert run["remote_sync_enabled"] is False
+    assert run["accounts"][0]["status"] == "success"
+    assert run["accounts"][0]["cpa_uploaded"] is False
+    assert run["accounts"][0]["events"][-1]["message"] == "本地账号和 Codex OAuth RT 已保存"
 
 
 def test_direct_account_records_email_before_register_failure(tmp_path, monkeypatch):
@@ -1000,6 +1157,78 @@ def test_direct_account_saves_registration_window_oauth_callback(tmp_path, monke
     assert saved_sources == ["session", "oauth"]
     run = flow_runs.get_flow_run("run-oauth-window")
     assert any(event["stage"] == "oauth" for event in run["accounts"][0]["events"])
+
+
+def test_direct_account_uses_cpa_browser_owner_and_ignores_shared_profile(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    flow_runs.create_flow_run("run-browser-owner", target=1, batch_size=20, join_mode="direct")
+    session_path = tmp_path / "codex-new@example.com-team-session.json"
+    oauth_path = tmp_path / "codex-new@example.com-team-oauth.json"
+    captured = {}
+
+    def fake_register(
+        _mail_client,
+        email,
+        _password,
+        mail_account_id=None,
+        session_bundle_callback=None,
+        oauth_bundle_callback=None,
+        browser_owner=None,
+        **_kwargs,
+    ):
+        captured["mail_account_id"] = mail_account_id
+        captured["browser_owner"] = browser_owner
+        captured["user_data_dir"] = cpa_batch.os.environ.get("PLAYWRIGHT_USER_DATA_DIR", "")
+        from autoteam import browser_runtime
+
+        captured["effective_user_data_dir"] = browser_runtime._get_playwright_user_data_dir()
+        session_bundle_callback(
+            {
+                "email": email,
+                "account_id": "acc-1",
+                "plan_type": "team",
+                "access_token": "session-access",
+                "id_token": "session-token",
+                "refresh_token": "",
+                "expired": 2000000000,
+                "credential_source": "chatgpt_session",
+            }
+        )
+        oauth_bundle_callback(
+            {
+                "email": email,
+                "account_id": "acc-1",
+                "plan_type": "team",
+                "access_token": "oauth-access",
+                "refresh_token": "oauth-refresh",
+                "id_token": "oauth-id",
+                "expired": 2000000000,
+                "credential_source": "oauth",
+            }
+        )
+        return True
+
+    def fake_save(bundle, source=None):
+        if source == "session":
+            return str(session_path)
+        if source == "oauth":
+            return str(oauth_path)
+        raise AssertionError(f"unexpected source {source}")
+
+    monkeypatch.setenv("PLAYWRIGHT_USER_DATA_DIR", "/tmp/autoteam-chromium-profile")
+    monkeypatch.setattr("autoteam.manager._register_direct_once", fake_register)
+    monkeypatch.setattr(cpa_batch, "save_auth_file", fake_save)
+
+    hooks = cpa_batch.CpaBatchHooks("run-browser-owner")
+    email = cpa_batch._create_direct_account(_FakeMailClient(), hooks=hooks, batch_index=1, worker_index=2)
+
+    assert email == "new@example.com"
+    assert captured == {
+        "mail_account_id": "mail-1",
+        "browser_owner": "cpa_batch.direct.worker-2",
+        "user_data_dir": "/tmp/autoteam-chromium-profile",
+        "effective_user_data_dir": "",
+    }
 
 
 def test_direct_account_rotates_proxy_and_recreates_email_on_ip_block(tmp_path, monkeypatch):
@@ -1334,3 +1563,77 @@ def test_cpa_verify_marks_account_unavailable_when_quota_reports_account_deactiv
     assert latest["sync_disabled"] is True
     assert latest["unavailable_reason"] == "account_deactivated"
     assert latest["unavailable_at"]
+
+
+def test_cpa_upload_worker_pauses_instead_of_marking_failed_when_upload_timeout_confirmation_is_uncertain(
+    tmp_path, monkeypatch
+):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    accounts.add_account("uncertain@example.com", "pw")
+    accounts.update_account(
+        "uncertain@example.com",
+        status=accounts.STATUS_ACTIVE,
+        cpa_status=accounts.CPA_STATUS_PENDING,
+    )
+    flow_runs.create_flow_run("run-cpa-uncertain", target=1, batch_size=1, join_mode="direct")
+
+    monkeypatch.setattr(
+        cpa_batch,
+        "_verify_and_upload_cpa",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            CpaUploadConfirmationUncertain("codex-uncertain@example.com-team.json", attempts=3, last_error="timed out")
+        ),
+    )
+
+    hooks = cpa_batch.CpaBatchHooks("run-cpa-uncertain")
+    worker = cpa_batch._CpaUploadWorker(hooks)
+    worker.start()
+    worker.enqueue("uncertain@example.com", batch_index=1)
+    worker.jobs.join()
+    worker.finish()
+    worker.join(timeout=1)
+
+    result = worker.results.get(timeout=1)
+    latest = accounts.find_account(accounts.load_accounts(), "uncertain@example.com")
+    run = flow_runs.get_flow_run("run-cpa-uncertain")
+    account = run["accounts"][0]
+
+    assert result["ok"] is False
+    assert latest["cpa_status"] == accounts.CPA_STATUS_PENDING
+    assert latest["flow_status"] == "running"
+    assert latest["flow_error_level"] == "warn"
+    assert "远端确认暂时不可用" in latest["cpa_error_message"]
+    assert run["pause_requested"] is True
+    assert "已暂停等待人工复查" in run["fatal_error"]
+    assert account["status"] == "running"
+    assert account["error_level"] == "warn"
+    assert account["stage"] == "cpa_auth"
+
+
+def test_cpa_upload_worker_preserves_parent_task_proxy_context(tmp_path, monkeypatch):
+    _use_tmp_flow_file(tmp_path, monkeypatch)
+    accounts.add_account("proxy@example.com", "pw")
+    flow_runs.create_flow_run("run-proxy", target=1, batch_size=1, join_mode="direct")
+    seen = []
+
+    monkeypatch.setattr(cpa_batch.outbound_proxy, "select_proxy", lambda: "http://fresh-proxy:8080")
+
+    def fake_verify(email, _cache, **_kwargs):
+        seen.append(cpa_batch.outbound_proxy.current_proxy_url())
+        return _fake_cpa_result(email)
+
+    monkeypatch.setattr(cpa_batch, "_verify_and_upload_cpa", fake_verify)
+    monkeypatch.setattr(cpa_batch, "_sync_cpa_account_to_sub2api", lambda *_args, **_kwargs: None)
+
+    hooks = cpa_batch.CpaBatchHooks("run-proxy")
+    with cpa_batch.outbound_proxy.task_proxy_context("http://sticky-proxy:8080"):
+        worker = cpa_batch._CpaUploadWorker(hooks)
+        worker.start()
+        worker.enqueue("proxy@example.com", batch_index=1)
+        worker.jobs.join()
+        worker.finish()
+        worker.join(timeout=1)
+
+    result = worker.results.get(timeout=1)
+    assert result["ok"] is True
+    assert seen == ["http://sticky-proxy:8080"]

@@ -1124,6 +1124,30 @@ def _request_stop_all_tasks(reason: str):
     return stopped
 
 
+def _alive_cpa_batch_run_ids(stopped_tasks: list[dict]) -> set[str]:
+    run_ids: set[str] = set()
+    for item in stopped_tasks:
+        if not item.get("thread_alive"):
+            continue
+        task = _tasks.get(str(item.get("task_id") or ""))
+        if not task or task.get("command") != "cpa-batch":
+            continue
+        run_id = str((task.get("params") or {}).get("run_id") or "").strip()
+        if run_id:
+            run_ids.add(run_id)
+    return run_ids
+
+
+def _stop_active_flow_runs(reason: str, *, skip_run_ids: set[str] | None = None):
+    try:
+        from autoteam.flow_runs import stop_active_flow_runs
+
+        return stop_active_flow_runs(reason, skip_run_ids=skip_run_ids)
+    except Exception as exc:
+        logger.warning("[API] 强制停止批量流程记录失败: %s", exc)
+        return [{"error": str(exc)}]
+
+
 def _maybe_refresh_proxy_node_for_task(task: dict):
     try:
         from autoteam import proxy_nodes
@@ -1243,6 +1267,27 @@ class CpaBatchParams(BaseModel):
     batch_size: int | None = None
     parallel_workers: int | None = None
     continue_on_error: bool = False
+    register_failure_guard_grace_attempts: int | None = None
+    remote_sync_enabled: bool = False
+
+
+def _load_cpa_batch_campaign_defaults() -> dict:
+    try:
+        from autoteam.codex_hook import load_campaign_config
+
+        config = load_campaign_config()
+    except Exception as exc:
+        logger.debug("[CPA批量] 读取 hook 配置失败，使用代码默认值: %s", exc)
+        return {}
+    return config if isinstance(config, dict) else {}
+
+
+def _int_config_default(config: dict, key: str, fallback: int) -> int:
+    try:
+        value = int(config.get(key) or fallback)
+    except Exception:
+        return fallback
+    return value if value > 0 else fallback
 
 
 class CleanupParams(BaseModel):
@@ -4268,13 +4313,15 @@ def post_fill(params: TaskParams = TaskParams()):
 
 @app.post("/api/tasks/cpa-batch", status_code=202)
 def post_cpa_batch(params: CpaBatchParams = CpaBatchParams()):
-    """新做 100 个 team 账号 CPA JSON。"""
+    """新做 team 账号；默认只保存本地账号和 OAuth RT，远端同步由用户手动执行。"""
     from autoteam.mail_provider import get_mail_provider_name, get_mail_provider_required_keys
 
     env = _current_runtime_env()
     provider = get_mail_provider_name(env)
     _require_runtime_configs(get_mail_provider_required_keys(provider), "批量 CPA JSON", env=env)
-    _require_cpa_configs("批量 CPA JSON")
+    remote_sync_enabled = bool(params.remote_sync_enabled)
+    if remote_sync_enabled:
+        _require_cpa_configs("批量 CPA JSON")
     if not _admin_status().get("configured"):
         raise HTTPException(status_code=400, detail="批量 CPA JSON 前请先完成管理员登录")
 
@@ -4293,9 +4340,14 @@ def post_cpa_batch(params: CpaBatchParams = CpaBatchParams()):
     if join_mode not in VALID_JOIN_MODES:
         raise HTTPException(status_code=400, detail=f"未知入席方式: {join_mode}")
 
+    campaign_defaults = _load_cpa_batch_campaign_defaults()
+    default_batch_size = _int_config_default(campaign_defaults, "batch_size", DEFAULT_BATCH_SIZE)
+    default_parallel_workers = _int_config_default(campaign_defaults, "parallel_workers", 1)
     target = min(DEFAULT_TARGET, max(1, params.target or DEFAULT_TARGET))
-    batch_size = min(DEFAULT_BATCH_SIZE, max(1, params.batch_size or DEFAULT_BATCH_SIZE))
-    parallel_workers = _resolve_parallel_workers_param(params.parallel_workers)
+    batch_size = min(DEFAULT_BATCH_SIZE, max(1, params.batch_size or default_batch_size))
+    parallel_workers = _resolve_parallel_workers_param(
+        params.parallel_workers if params.parallel_workers is not None else default_parallel_workers
+    )
     if join_mode == JOIN_MODE_INVITE:
         parallel_workers = 1
     run_id = uuid.uuid4().hex[:12]
@@ -4309,6 +4361,8 @@ def post_cpa_batch(params: CpaBatchParams = CpaBatchParams()):
             "batch_size": batch_size,
             "parallel_workers": parallel_workers,
             "continue_on_error": bool(params.continue_on_error),
+            "register_failure_guard_grace_attempts": params.register_failure_guard_grace_attempts,
+            "remote_sync_enabled": remote_sync_enabled,
         },
         run_cpa_batch,
         run_id,
@@ -4317,6 +4371,8 @@ def post_cpa_batch(params: CpaBatchParams = CpaBatchParams()):
         batch_size=batch_size,
         parallel_workers=parallel_workers,
         continue_on_error=bool(params.continue_on_error),
+        register_failure_guard_grace_attempts=params.register_failure_guard_grace_attempts,
+        remote_sync_enabled=remote_sync_enabled,
     )
     return task
 
@@ -4352,15 +4408,18 @@ def post_stop_all_tasks():
     reason = "用户强制停止"
     stopped_tasks = _request_stop_all_tasks(reason)
     stopped_flows = _stop_pending_flows(reason)
+    stopped_flow_runs = _stop_active_flow_runs(reason, skip_run_ids=_alive_cpa_batch_run_ids(stopped_tasks))
     logger.warning(
-        "[API] 用户请求强制停止全部工作: tasks=%d flows=%d",
+        "[API] 用户请求强制停止全部工作: tasks=%d flows=%d flow_runs=%d",
         len(stopped_tasks),
         len(stopped_flows),
+        len(stopped_flow_runs),
     )
     return {
         "message": "已请求停止全部工作",
         "stopped_tasks": stopped_tasks,
         "stopped_flows": stopped_flows,
+        "stopped_flow_runs": stopped_flow_runs,
     }
 
 

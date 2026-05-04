@@ -1,8 +1,14 @@
-import pytest
 import threading
 
+import pytest
+
 import autoteam.browser_runtime as browser_runtime
-from autoteam.browser_runtime import BrowserLeaseError, acquire_browser_lease, browser_parallel_limit
+from autoteam.browser_runtime import (
+    BrowserLeaseError,
+    acquire_browser_lease,
+    browser_parallel_limit,
+    playwright_user_data_dir_override,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -404,3 +410,12 @@ def test_browser_parallel_limit_allows_configured_slots():
 
     for lease in reversed(leases):
         lease.__exit__(None, None, None)
+
+
+def test_playwright_user_data_dir_override_is_thread_local(monkeypatch):
+    monkeypatch.setenv("PLAYWRIGHT_USER_DATA_DIR", "/tmp/shared-profile")
+
+    assert browser_runtime._get_playwright_user_data_dir() == "/tmp/shared-profile"
+    with playwright_user_data_dir_override(""):
+        assert browser_runtime._get_playwright_user_data_dir() == ""
+    assert browser_runtime._get_playwright_user_data_dir() == "/tmp/shared-profile"

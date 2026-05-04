@@ -47,7 +47,7 @@ API 模式下，Playwright 相关操作通过 `src/autoteam/api.py` (`_Playwrigh
 
 直注注册窗口会在 `admin/members` 可访问后打开 PKCE Codex OAuth 链接。浏览器已带 ChatGPT 登录态，`src/autoteam/protocol_oauth.py` (`run_protocol_oauth_login_with_browser_context`) 通过 callback URL 取 code，再调用 token endpoint 生成 `auths/codex-{email}-team-{hash}-oauth.json`。同一阶段也保存 `auths/codex-{email}-team-{hash}-session.json` 作为 ChatGPT Web session 备份。后续 CPA worker 只有在缺少 OAuth RT 文件时才调用 `run_account_oauth_login` 后备。
 
-直注批量并行由 `src/autoteam/cpa_batch.py` (`_create_direct_accounts_parallel`) 调度。每个 worker 使用独立邮箱客户端和独立 Chromium 槽位，按 `BROWSER_PARALLEL_WORKERS=1..3` 分配目标数；该路径不会调用 `src/autoteam/manager.py` (`_create_new_accounts_parallel`)。
+直注批量并行由 `src/autoteam/cpa_batch.py` (`_create_direct_accounts_parallel`) 调度。每个 worker 使用独立邮箱客户端和独立 Chromium 槽位，按 `BROWSER_PARALLEL_WORKERS=1..3` 分配目标数；该路径不会调用 `src/autoteam/manager.py` (`_create_new_accounts_parallel`)。CPA direct worker 调 `_register_direct_once` 时传入 `cpa_batch.direct.worker-N` 或 `cpa_batch.direct.single` 作为浏览器 owner，并通过 `src/autoteam/browser_runtime.py` (`playwright_user_data_dir_override`) 在线程内禁用共享 `PLAYWRIGHT_USER_DATA_DIR`，避免并行 worker 共用 `/tmp/autoteam-chromium-profile`。
 
 主号 OAuth 入口是 `SessionCodexAuthFlow`、`MainCodexLoginFlow`、`MainCodexSyncFlow`。主号认证文件保存为 `auths/codex-main-*.json`，不进入账号池。
 

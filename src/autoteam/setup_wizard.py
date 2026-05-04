@@ -357,9 +357,12 @@ def _verify_cpa():
     try:
         import requests
 
+        from autoteam.config import normalize_cpa_url
+
+        api_base_url = normalize_cpa_url(cpa_url)
         resp = outbound_proxy.request(
             "GET",
-            f"{cpa_url}/v0/management/auth-files",
+            f"{api_base_url}/v0/management/auth-files",
             headers={"Authorization": f"Bearer {cpa_key}"},
             timeout=10,
         )

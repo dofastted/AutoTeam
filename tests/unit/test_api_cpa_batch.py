@@ -24,6 +24,7 @@ def test_post_cpa_batch_starts_fixed_size_task(monkeypatch):
         },
     )
     monkeypatch.setattr(api, "_admin_status", lambda: {"configured": True})
+    monkeypatch.setattr(api, "_load_cpa_batch_campaign_defaults", lambda: {"batch_size": 6, "parallel_workers": 3})
     monkeypatch.setattr("uuid.uuid4", lambda: type("FakeUuid", (), {"hex": "runid1234567890"})())
 
     def fake_start_task(command, func, params, *args, **kwargs):
@@ -42,11 +43,14 @@ def test_post_cpa_batch_starts_fixed_size_task(monkeypatch):
         "run_id": "runid1234567",
         "join_mode": "invite",
         "target": 100,
-        "batch_size": 20,
+        "batch_size": 6,
         "parallel_workers": 1,
         "continue_on_error": False,
+        "register_failure_guard_grace_attempts": None,
+        "remote_sync_enabled": False,
     }
     assert captured["kwargs"]["join_mode"] == "invite"
+    assert captured["kwargs"]["remote_sync_enabled"] is False
 
 
 def test_post_cpa_batch_accepts_single_validation_target(monkeypatch):
@@ -150,6 +154,93 @@ def test_post_cpa_batch_accepts_continue_on_error(monkeypatch):
 
     assert captured["params"]["continue_on_error"] is True
     assert captured["kwargs"]["continue_on_error"] is True
+
+
+def test_post_cpa_batch_accepts_register_failure_guard_grace_attempts(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        api,
+        "_current_runtime_env",
+        lambda: {
+            "MAIL_PROVIDER": "mo_email",
+            "MO_EMAIL_BASE_URL": "https://mo.example.com",
+            "MO_EMAIL_API_KEY": "key",
+            "MO_EMAIL_DOMAIN": "example.com",
+            "MO_EMAIL_NAME_PREFIX": "abc",
+            "MO_EMAIL_START_INDEX": "1",
+            "MO_EMAIL_EXPIRY_TIME": "3600000",
+            "CPA_URL": "http://127.0.0.1:8317",
+            "CPA_KEY": "secret",
+        },
+    )
+    monkeypatch.setattr(api, "_admin_status", lambda: {"configured": True})
+    monkeypatch.setattr("uuid.uuid4", lambda: type("FakeUuid", (), {"hex": "runid1234567890"})())
+
+    def fake_start_task(command, func, params, *args, **kwargs):
+        captured["params"] = params
+        captured["kwargs"] = kwargs
+        return {"task_id": "task-1", "command": command, "params": params}
+
+    monkeypatch.setattr(api, "_start_task", fake_start_task)
+
+    api.post_cpa_batch(api.CpaBatchParams(join_mode="direct", register_failure_guard_grace_attempts=10))
+
+    assert captured["params"]["register_failure_guard_grace_attempts"] == 10
+    assert captured["kwargs"]["register_failure_guard_grace_attempts"] == 10
+
+
+def test_post_cpa_batch_defaults_to_local_only_without_cpa_config(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        api,
+        "_current_runtime_env",
+        lambda: {
+            "MAIL_PROVIDER": "mo_email",
+            "MO_EMAIL_BASE_URL": "https://mo.example.com",
+            "MO_EMAIL_API_KEY": "key",
+            "MO_EMAIL_DOMAIN": "example.com",
+            "MO_EMAIL_NAME_PREFIX": "abc",
+            "MO_EMAIL_START_INDEX": "1",
+            "MO_EMAIL_EXPIRY_TIME": "3600000",
+        },
+    )
+    monkeypatch.setattr(api, "_admin_status", lambda: {"configured": True})
+    monkeypatch.setattr("uuid.uuid4", lambda: type("FakeUuid", (), {"hex": "runid1234567890"})())
+
+    def fake_start_task(command, func, params, *args, **kwargs):
+        captured["params"] = params
+        captured["kwargs"] = kwargs
+        return {"task_id": "task-1", "command": command, "params": params}
+
+    monkeypatch.setattr(api, "_start_task", fake_start_task)
+
+    api.post_cpa_batch(api.CpaBatchParams(join_mode="direct", target=1))
+
+    assert captured["params"]["remote_sync_enabled"] is False
+    assert captured["kwargs"]["remote_sync_enabled"] is False
+
+
+def test_post_cpa_batch_requires_cpa_config_when_remote_sync_enabled(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "_current_runtime_env",
+        lambda: {
+            "MAIL_PROVIDER": "mo_email",
+            "MO_EMAIL_BASE_URL": "https://mo.example.com",
+            "MO_EMAIL_API_KEY": "key",
+            "MO_EMAIL_DOMAIN": "example.com",
+            "MO_EMAIL_NAME_PREFIX": "abc",
+            "MO_EMAIL_START_INDEX": "1",
+            "MO_EMAIL_EXPIRY_TIME": "3600000",
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.post_cpa_batch(api.CpaBatchParams(join_mode="direct", target=1, remote_sync_enabled=True))
+
+    assert exc.value.status_code == 400
 
 
 def test_post_fill_accepts_parallel_workers(monkeypatch):
@@ -377,7 +468,7 @@ def test_run_cpa_batch_single_worker_pipelines_cpa_upload_before_return(tmp_path
     first_upload_finished = threading.Event()
     second_created_before_first_upload_finished = {"value": False}
 
-    def fake_create_direct(_mail_client, hooks=None, batch_index=None):
+    def fake_create_direct(_mail_client, hooks=None, batch_index=None, **_kwargs):
         email = f"user{len(created) + 1}@example.com"
         created.append(email)
         accounts.add_account(email, "pw")

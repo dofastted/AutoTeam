@@ -22,7 +22,7 @@ cp .env.example .env
 | `CLOUDMAIL_PASSWORD` | CloudMail 登录密码 | 账号池操作时必填 |
 | `CLOUDMAIL_DOMAIN` | 临时邮箱域名（如 `@example.com`） | 账号池操作时必填 |
 | `SYNC_TARGET_CPA` | 是否启用 CPA 同步（`true/false`） | 否 |
-| `CPA_URL` | CPA（CLIProxyAPI）地址 | 启用 CPA 时必填（默认 `http://127.0.0.1:8317`） |
+| `CPA_URL` | CPA（CLIProxyAPI）地址 | 启用 CPA 时必填（默认 `http://127.0.0.1:8317`）；可填管理页 `http://127.0.0.1:8317/management.html#/auth-files`，后端会归一化为 API 根地址 |
 | `CPA_KEY` | CPA 管理密钥 | 启用 CPA 时必填 |
 | `SYNC_TARGET_SUB2API` | 是否启用 Sub2API 同步（`true/false`） | 否 |
 | `SUB2API_URL` | Sub2API 地址 | 启用 Sub2API 时必填 |

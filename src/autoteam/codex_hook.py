@@ -49,6 +49,7 @@ def _default_config() -> dict:
         "join_mode": "direct",
         "batch_size": 6,
         "parallel_workers": 3,
+        "remote_sync_enabled": True,
         "managed_run_ids": [],
         "last_check_at": None,
         "last_success_count": 0,
@@ -200,11 +201,20 @@ def ensure_api_service(config: dict | None = None, timeout_seconds: float = 20.0
 def find_resumable_run(config: dict | None = None) -> dict | None:
     config = config or load_campaign_config()
     managed_ids = set(config.get("managed_run_ids") or [])
+    expected_join_mode = (config.get("join_mode") or "direct").strip().lower()
+    expected_batch_size = int(config.get("batch_size") or 0)
+    expected_parallel_workers = int(config.get("parallel_workers") or 0)
     runs = load_flow_runs()
     candidates = []
     for run in runs:
         run_id = run.get("run_id")
         if managed_ids and run_id not in managed_ids:
+            continue
+        if expected_join_mode and (run.get("join_mode") or "direct").strip().lower() != expected_join_mode:
+            continue
+        if expected_batch_size > 0 and int(run.get("batch_size") or 0) != expected_batch_size:
+            continue
+        if expected_parallel_workers > 0 and int(run.get("parallel_workers") or 1) != expected_parallel_workers:
             continue
         if int(run.get("success_count") or 0) >= int(run.get("target") or 0):
             continue
@@ -252,6 +262,7 @@ def start_cpa_batch_via_api(
         "batch_size": int(batch_size),
         "parallel_workers": int(parallel_workers),
         "join_mode": join_mode,
+        "remote_sync_enabled": bool(config.get("remote_sync_enabled", True)),
     }
     resp = outbound_proxy.request(
         "POST",

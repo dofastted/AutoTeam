@@ -1,5 +1,8 @@
 import json
 
+import pytest
+import requests
+
 from autoteam import accounts, cpa_sync
 
 
@@ -77,6 +80,10 @@ def test_sync_to_cpa_uploads_only_local_rt_files_and_does_not_delete_remote(tmp_
     ]
     latest = accounts.find_account(accounts.load_accounts(), "active@example.com")
     assert latest["cpa_uploaded_at"] > 0
+    assert latest["cpa_status"] == accounts.CPA_STATUS_SUCCESS
+    assert latest["cpa_error_message"] == ""
+    assert latest["health_status"] == "valid"
+    assert latest["qualified_at"] > 0
 
 
 def test_sync_to_cpa_skips_remote_existing_by_email_or_name(tmp_path, monkeypatch):
@@ -337,6 +344,83 @@ def test_cleanup_invalid_cpa_refresh_tokens_writes_rotated_rt_to_local_auths(tmp
     assert local_payload["access_token"] == "new-at"
     assert local_payload["refresh_token"] == "new-rt"
     assert local_payload["id_token"] == "new-id"
+
+
+def test_upload_to_cpa_treats_timeout_as_success_when_remote_file_exists(tmp_path, monkeypatch):
+    auth_path = tmp_path / "codex-ok@example.com-team-acc-oauth.json"
+    auth_path.write_text(json.dumps({"email": "ok@example.com", "refresh_token": "rt"}), encoding="utf-8")
+
+    def raise_timeout(*_args, **_kwargs):
+        raise requests.exceptions.ReadTimeout("timed out")
+
+    monkeypatch.setattr(cpa_sync.outbound_proxy, "request", raise_timeout)
+    monkeypatch.setattr(cpa_sync, "list_cpa_files", lambda: [{"name": auth_path.name}])
+    monkeypatch.setattr(cpa_sync, "_download_cpa_file_state", lambda _name: cpa_sync.REMOTE_FILE_EXISTS)
+
+    assert cpa_sync.upload_to_cpa(auth_path) is True
+
+
+def test_upload_to_cpa_does_not_confirm_remote_file_after_non_timeout_error(tmp_path, monkeypatch):
+    auth_path = tmp_path / "codex-stale@example.com-team-acc-oauth.json"
+    auth_path.write_text(json.dumps({"email": "stale@example.com", "refresh_token": "new-rt"}), encoding="utf-8")
+    confirm_calls = []
+
+    def raise_connection_error(*_args, **_kwargs):
+        raise requests.exceptions.ConnectionError("connection failed before upload")
+
+    def confirm_should_not_run(_name):
+        confirm_calls.append(_name)
+        return cpa_sync.REMOTE_FILE_EXISTS
+
+    monkeypatch.setattr(cpa_sync.outbound_proxy, "request", raise_connection_error)
+    monkeypatch.setattr(cpa_sync, "confirm_remote_file_state", confirm_should_not_run)
+
+    with pytest.raises(requests.exceptions.ConnectionError):
+        cpa_sync.upload_to_cpa(auth_path)
+
+    assert confirm_calls == []
+
+
+def test_upload_to_cpa_reraises_timeout_when_remote_file_missing(tmp_path, monkeypatch):
+    auth_path = tmp_path / "codex-missing@example.com-team-acc-oauth.json"
+    auth_path.write_text(json.dumps({"email": "missing@example.com", "refresh_token": "rt"}), encoding="utf-8")
+
+    def raise_timeout(*_args, **_kwargs):
+        raise requests.exceptions.ReadTimeout("timed out")
+
+    monkeypatch.setattr(cpa_sync.outbound_proxy, "request", raise_timeout)
+    monkeypatch.setattr(cpa_sync, "list_cpa_files", lambda: [])
+    monkeypatch.setattr(cpa_sync, "_download_cpa_file_state", lambda _name: cpa_sync.REMOTE_FILE_MISSING)
+
+    try:
+        cpa_sync.upload_to_cpa(auth_path)
+    except requests.exceptions.ReadTimeout:
+        pass
+    else:
+        raise AssertionError("expected ReadTimeout")
+
+
+def test_upload_to_cpa_raises_uncertain_when_timeout_confirmation_is_temporarily_unavailable(tmp_path, monkeypatch):
+    auth_path = tmp_path / "codex-unknown@example.com-team-acc-oauth.json"
+    auth_path.write_text(json.dumps({"email": "unknown@example.com", "refresh_token": "rt"}), encoding="utf-8")
+
+    def raise_timeout(*_args, **_kwargs):
+        raise requests.exceptions.ReadTimeout("timed out")
+
+    attempts = {"count": 0}
+
+    def flaky_list():
+        attempts["count"] += 1
+        raise RuntimeError("cpa list temporary error")
+
+    monkeypatch.setattr(cpa_sync.outbound_proxy, "request", raise_timeout)
+    monkeypatch.setattr(cpa_sync, "list_cpa_files", flaky_list)
+    monkeypatch.setattr(cpa_sync, "_download_cpa_file_state", lambda _name: (_ for _ in ()).throw(RuntimeError("download failed")))
+
+    with pytest.raises(cpa_sync.CpaUploadConfirmationUncertain):
+        cpa_sync.upload_to_cpa(auth_path)
+
+    assert attempts["count"] == cpa_sync.CPA_UPLOAD_CONFIRM_ATTEMPTS
 
 
 def test_mark_unusable_account_deactivated_from_dir_marks_local_accounts(tmp_path, monkeypatch):

@@ -9,6 +9,8 @@ from datetime import datetime
 from hashlib import md5
 from pathlib import Path
 
+import requests
+
 from autoteam import outbound_proxy
 from autoteam.auth_storage import AUTH_DIR, ensure_auth_dir, ensure_auth_file_permissions
 from autoteam.codex_auth import CODEX_CLIENT_ID, CODEX_TOKEN_URL, select_oauth_rt_auth_file
@@ -17,14 +19,98 @@ from autoteam.textio import read_text, write_text
 
 logger = logging.getLogger(__name__)
 
+CPA_UPLOAD_TIMEOUT_SECONDS = 30
+CPA_UPLOAD_CONFIRM_ATTEMPTS = 3
+CPA_UPLOAD_CONFIRM_DELAY_SECONDS = 1.0
+
+REMOTE_FILE_EXISTS = "exists"
+REMOTE_FILE_MISSING = "missing"
+REMOTE_FILE_UNKNOWN = "unknown"
+
+
+class CpaUploadConfirmationUncertain(requests.exceptions.ReadTimeout):
+    """Raised when the upload timed out and remote-side confirmation stayed inconclusive."""
+
+    def __init__(self, auth_name: str, *, attempts: int, last_error: str = ""):
+        message = f"CPA 上传超时，远端确认暂时不可用: {auth_name}"
+        if last_error:
+            message = f"{message} ({last_error})"
+        super().__init__(message)
+        self.auth_name = auth_name
+        self.attempts = attempts
+        self.last_error = last_error
+
 
 def _headers():
     return {"Authorization": f"Bearer {CPA_KEY}"}
 
 
+def _cpa_file_url(path: str = "") -> str:
+    suffix = path if not path or path.startswith("/") else f"/{path}"
+    return f"{CPA_URL}/v0/management/auth-files{suffix}"
+
+
+def _download_cpa_file_state(name: str) -> str:
+    resp = outbound_proxy.request(
+        "GET",
+        _cpa_file_url("/download"),
+        headers=_headers(),
+        params={"name": name},
+        timeout=10,
+    )
+    if resp.status_code == 200:
+        return REMOTE_FILE_EXISTS
+    if resp.status_code == 404:
+        return REMOTE_FILE_MISSING
+    raise RuntimeError(f"download status={resp.status_code}")
+
+
+def confirm_remote_file_state(
+    name: str,
+    *,
+    attempts: int = CPA_UPLOAD_CONFIRM_ATTEMPTS,
+    delay_seconds: float = CPA_UPLOAD_CONFIRM_DELAY_SECONDS,
+) -> str:
+    attempts = max(1, int(attempts or 1))
+    delay_seconds = max(0.0, float(delay_seconds or 0.0))
+    all_attempts_missing = True
+    saw_unknown = False
+
+    for attempt in range(1, attempts + 1):
+        list_missing = False
+        try:
+            files = list_cpa_files()
+        except Exception as exc:
+            saw_unknown = True
+            logger.debug("[CPA] 上传后读取远端文件列表失败(%d/%d): %s", attempt, attempts, exc)
+        else:
+            if any((item.get("name") or "") == name for item in files):
+                return REMOTE_FILE_EXISTS
+            list_missing = True
+
+        try:
+            download_state = _download_cpa_file_state(name)
+        except Exception as exc:
+            saw_unknown = True
+            all_attempts_missing = False
+            logger.debug("[CPA] 上传后按文件名确认远端文件失败(%d/%d): %s", attempt, attempts, exc)
+        else:
+            if download_state == REMOTE_FILE_EXISTS:
+                return REMOTE_FILE_EXISTS
+            if not list_missing or download_state != REMOTE_FILE_MISSING:
+                all_attempts_missing = False
+
+        if attempt < attempts:
+            time.sleep(delay_seconds * attempt)
+
+    if all_attempts_missing and not saw_unknown:
+        return REMOTE_FILE_MISSING
+    return REMOTE_FILE_UNKNOWN
+
+
 def list_cpa_files():
     """获取 CPA 中所有认证文件"""
-    resp = outbound_proxy.request("GET", f"{CPA_URL}/v0/management/auth-files", headers=_headers(), timeout=10)
+    resp = outbound_proxy.request("GET", _cpa_file_url(), headers=_headers(), timeout=10)
     if resp.status_code != 200:
         logger.error("[CPA] 获取文件列表失败: %d", resp.status_code)
         return []
@@ -39,14 +125,32 @@ def upload_to_cpa(filepath):
         logger.warning("[CPA] 文件不存在: %s", filepath)
         return False
 
-    with open(filepath, "rb") as f:
-        resp = outbound_proxy.request(
-            "POST",
-            f"{CPA_URL}/v0/management/auth-files",
-            headers=_headers(),
-            files={"file": (filepath.name, f, "application/json")},
-            timeout=10,
-        )
+    try:
+        with open(filepath, "rb") as f:
+            resp = outbound_proxy.request(
+                "POST",
+                _cpa_file_url(),
+                headers=_headers(),
+                files={"file": (filepath.name, f, "application/json")},
+                timeout=CPA_UPLOAD_TIMEOUT_SECONDS,
+            )
+    except requests.exceptions.ReadTimeout as exc:
+        remote_state = confirm_remote_file_state(filepath.name)
+        if remote_state == REMOTE_FILE_EXISTS:
+            logger.info("[CPA] 上传超时但远端已存在: %s", filepath.name)
+            return True
+        if remote_state == REMOTE_FILE_UNKNOWN:
+            logger.warning("[CPA] 上传超时且远端确认暂不可用: %s", filepath.name)
+            raise CpaUploadConfirmationUncertain(
+                filepath.name,
+                attempts=CPA_UPLOAD_CONFIRM_ATTEMPTS,
+                last_error=str(exc),
+            ) from exc
+        logger.error("[CPA] 上传异常: %s %s", filepath.name, exc)
+        raise
+    except Exception as exc:
+        logger.error("[CPA] 上传异常: %s %s", filepath.name, exc)
+        raise
 
     if resp.status_code == 200:
         logger.info("[CPA] 已上传: %s", filepath.name)
@@ -60,7 +164,7 @@ def delete_from_cpa(name):
     """从 CPA 删除认证文件"""
     resp = outbound_proxy.request(
         "DELETE",
-        f"{CPA_URL}/v0/management/auth-files",
+        _cpa_file_url(),
         headers=_headers(),
         params={"name": name},
         timeout=10,
@@ -77,7 +181,7 @@ def refresh_cpa_auth_file(name):
     """让 CPA 刷新单个 Codex auth 文件。"""
     resp = outbound_proxy.request(
         "POST",
-        f"{CPA_URL}/v0/management/auth-files/codex/refresh",
+        _cpa_file_url("/codex/refresh"),
         headers={**_headers(), "Content-Type": "application/json"},
         json={"name": name},
         timeout=30,
@@ -92,7 +196,7 @@ def delete_http401_from_cpa():
     """删除 CPA 中已记录为 HTTP 401 的认证文件。"""
     resp = outbound_proxy.request(
         "DELETE",
-        f"{CPA_URL}/v0/management/auth-files/401",
+        _cpa_file_url("/401"),
         headers=_headers(),
         timeout=30,
     )
@@ -238,7 +342,7 @@ def download_from_cpa(name):
     """从 CPA 下载认证文件内容。"""
     resp = outbound_proxy.request(
         "GET",
-        f"{CPA_URL}/v0/management/auth-files/download",
+        _cpa_file_url("/download"),
         headers=_headers(),
         params={"name": name},
         timeout=10,
@@ -725,7 +829,8 @@ def sync_to_cpa():
 
     普通同步不启动浏览器、不补 OAuth、不上传 ChatGPT session 备份，也不删除远端文件。
     """
-    from autoteam.accounts import STATUS_ACTIVE, load_accounts, save_accounts
+    from autoteam.account_models import HEALTH_VALID
+    from autoteam.accounts import CPA_STATUS_SUCCESS, STATUS_ACTIVE, load_accounts, save_accounts
 
     accounts = load_accounts()
     local_emails = {a["email"].lower() for a in accounts}
@@ -764,7 +869,12 @@ def sync_to_cpa():
         logger.info("[CPA] 上传: %s", name)
         if upload_to_cpa(path):
             uploaded += 1
-            acc["cpa_uploaded_at"] = time.time()
+            now = time.time()
+            acc["cpa_status"] = CPA_STATUS_SUCCESS
+            acc["cpa_error_message"] = ""
+            acc["health_status"] = HEALTH_VALID
+            acc["cpa_uploaded_at"] = now
+            acc["qualified_at"] = acc.get("qualified_at") or now
             changed = True
 
     if changed:

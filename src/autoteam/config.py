@@ -3,7 +3,7 @@
 import importlib
 import os
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from autoteam import outbound_proxy
 from autoteam.textio import parse_env_line, parse_env_value, read_text
@@ -63,7 +63,33 @@ MO_EMAIL_EXPIRY_TIME = _get_int_env("MO_EMAIL_EXPIRY_TIME", 3600000)
 CHATGPT_ACCOUNT_ID = os.environ.get("CHATGPT_ACCOUNT_ID", "")
 
 # CPA (CLIProxyAPI) 配置
-CPA_URL = os.environ.get("CPA_URL", "")
+def normalize_cpa_url(value: str) -> str:
+    """Return the CPA API base URL even if a management page URL is pasted."""
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return raw.rstrip("/")
+
+    path = parsed.path or ""
+    for marker in ("/management.html", "/v0/management"):
+        index = path.find(marker)
+        if index >= 0:
+            path = path[:index]
+            break
+    path = path.rstrip("/")
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", "")).rstrip("/")
+
+
+def cpa_management_auth_files_url(value: str) -> str:
+    base = normalize_cpa_url(value)
+    if not base:
+        return ""
+    return f"{base}/management.html#/auth-files"
+
+
+CPA_URL = normalize_cpa_url(os.environ.get("CPA_URL", ""))
 CPA_KEY = os.environ.get("CPA_KEY", "")
 
 # Sub2API 配置
