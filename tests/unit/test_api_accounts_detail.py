@@ -14,6 +14,7 @@ def _set_api_defaults(monkeypatch):
 
 def _patch_load_accounts(monkeypatch, accounts_data):
     monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: [dict(item) for item in accounts_data])
+    monkeypatch.setattr(api, "_load_sub2api_presence_emails", lambda: None)
 
 
 def test_get_account_detail_returns_aggregated_detail_for_sub_account(tmp_path, monkeypatch):

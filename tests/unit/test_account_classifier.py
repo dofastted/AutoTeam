@@ -1,4 +1,4 @@
-from autoteam.account_classifier import classify_account, derive_category
+from autoteam.account_classifier import classify_account, derive_category, reconcile_usage_classification
 from autoteam.account_models import (
     HEALTH_DEACTIVATED,
     HEALTH_INVALID,
@@ -46,7 +46,7 @@ def test_classify_account_marks_inventory_when_rt_is_ready():
     account = {
         "registration_status": REGISTRATION_REGISTERED,
         "health_status": HEALTH_VALID,
-        "usage_status": "normal",
+        "usage_status": "inventory",
         "cpa_status": "success",
         "rt_auth_file": "auths/example-oauth.json",
         "sync_disabled": False,
@@ -66,6 +66,7 @@ def test_classify_account_marks_in_use_before_inventory():
         "cpa_status": "success",
         "rt_auth_file": "auths/example-oauth.json",
         "sync_disabled": False,
+        "remote": {"sub2api": {"status": "present"}},
     }
 
     result = classify_account(account)
@@ -173,7 +174,7 @@ def test_derive_category_is_pure_function():
     account = {
         "registration_status": REGISTRATION_REGISTERED,
         "health_status": HEALTH_VALID,
-        "usage_status": "normal",
+        "usage_status": "inventory",
         "cpa_status": "success",
         "rt_auth_file": "auths/example-oauth.json",
         "sync_disabled": False,
@@ -202,6 +203,7 @@ def test_classifier_in_use_with_allocation_metadata():
         usage_status=USAGE_IN_USE,
         cpa_status="success",
         rt_auth_file="auths/example-oauth.json",
+        remote={"sub2api": {"status": "present"}},
         allocation={"allocated_to": "worker-1", "project": "proj-a"},
     )
 
@@ -219,21 +221,159 @@ def test_classifier_not_registered_for_registering_status():
     assert result["category"] == "not_registered"
 
 
+def test_classifier_in_use_reflects_sub2api_presence_before_registration_status():
+    account = _make_account(
+        registration_status="pending",
+        health_status="unknown",
+        usage_status=USAGE_IN_USE,
+        allocation={"status": "in_use", "source": "sub2api"},
+    )
+
+    result = classify_account(account)
+
+    assert result["category"] == "not_registered"
+
+
+def test_classifier_rejects_in_use_with_401_marker():
+    account = _make_account(
+        usage_status=USAGE_IN_USE,
+        cpa_status="success",
+        rt_auth_file="auths/example-oauth.json",
+        unavailable_reason="http_401",
+        allocation={"status": "in_use", "source": "sub2api"},
+    )
+
+    result = classify_account(account)
+
+    assert result["category"] == "invalid"
+
+
+def test_classifier_rejects_in_use_with_string_sync_disabled():
+    account = _make_account(
+        usage_status=USAGE_IN_USE,
+        cpa_status="success",
+        rt_auth_file="auths/example-oauth.json",
+        sync_disabled="true",
+        remote={"sub2api": {"status": "present"}},
+    )
+
+    result = classify_account(account)
+
+    assert result["category"] == "registered"
+    assert result["usage_status"] == "normal"
+
+
+def test_classifier_rejects_inventory_without_oauth_rt_file():
+    account = _make_account(
+        usage_status="inventory",
+        cpa_status="success",
+        auth_file="auths/example-session.json",
+        credentials={"session": {"file": "auths/example-session.json", "present": True}},
+    )
+
+    result = classify_account(account)
+
+    assert result["category"] == "registered"
+    assert result["usage_status"] == "normal"
+
+
+def test_classifier_accepts_legacy_oauth_auth_file_as_rt():
+    account = _make_account(
+        usage_status="inventory",
+        cpa_status="success",
+        auth_file="auths/example-oauth.json",
+    )
+
+    result = classify_account(account)
+
+    assert result["category"] == "inventory"
+    assert result["usage_status"] == "inventory"
+
+
+def test_classifier_rejects_in_use_without_cpa_success():
+    account = _make_account(
+        usage_status=USAGE_IN_USE,
+        cpa_status="pending",
+        rt_auth_file="auths/example-oauth.json",
+        allocation={"status": "in_use", "source": "sub2api"},
+    )
+
+    result = classify_account(account)
+
+    assert result["category"] == "registered"
+
+
+def test_classifier_rejects_in_use_without_sub2api_presence():
+    account = _make_account(
+        usage_status=USAGE_IN_USE,
+        cpa_status="success",
+        rt_auth_file="auths/example-oauth.json",
+        allocation={"allocated_to": "worker-1"},
+    )
+
+    result = classify_account(account)
+
+    assert result["category"] == "inventory"
+    assert result["usage_status"] == "inventory"
+
+
 def test_classifier_quota_exhausted_in_use_is_not_invalid():
     account = _make_account(
         health_status=HEALTH_QUOTA_EXHAUSTED,
         usage_status=USAGE_IN_USE,
+        cpa_status="success",
+        rt_auth_file="auths/example-oauth.json",
+        remote={"sub2api": {"status": "present"}},
         allocation={"allocated_to": "worker-1"},
     )
 
     result = classify_account(account)
 
     assert result["category"] == "in_use"
+    assert result["usage_status"] == "in_use"
+
+
+def test_reconcile_usage_sets_in_use_only_when_sub2api_present():
+    account = _make_account(
+        usage_status="inventory",
+        cpa_status="success",
+        rt_auth_file="auths/example-oauth.json",
+        remote={"sub2api": {"status": "missing"}},
+        allocation={"status": "inventory"},
+    )
+
+    result = reconcile_usage_classification(account, sub2api_present=True)
+
+    assert result["changed"] is True
+    assert account["category"] == "in_use"
+    assert account["usage_status"] == "in_use"
+    assert account["allocation"]["status"] == "in_use"
+    assert account["remote"]["sub2api"]["status"] == "present"
+
+
+def test_reconcile_usage_demotes_unusable_in_use_to_normal_and_unavailable():
+    account = _make_account(
+        usage_status=USAGE_IN_USE,
+        cpa_status="success",
+        rt_auth_file="auths/example-oauth.json",
+        health_status=HEALTH_INVALID,
+        remote={"sub2api": {"status": "present"}},
+        allocation={"status": "in_use"},
+    )
+
+    result = reconcile_usage_classification(account, sub2api_present=True)
+
+    assert result["changed"] is True
+    assert account["category"] == "invalid"
+    assert account["usage_status"] == "normal"
+    assert account["status"] == "unavailable"
+    assert account["allocation"]["status"] == "released"
 
 
 def test_classifier_main_account_keeps_current_inventory_behavior():
     account = _make_account(
         is_main_account=True,
+        usage_status="inventory",
         cpa_status="success",
         rt_auth_file="auths/main-oauth.json",
     )

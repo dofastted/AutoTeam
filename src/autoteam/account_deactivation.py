@@ -132,6 +132,17 @@ def _is_candidate_account(acc: dict[str, Any], statuses: set[str]) -> bool:
     return True
 
 
+def _is_targeted_candidate_account(acc: dict[str, Any]) -> bool:
+    email = _normalized_email(acc.get("email"))
+    if not email:
+        return False
+    status = str(acc.get("status") or "").strip().lower()
+    usage_status = str(acc.get("usage_status") or "").strip().lower()
+    if status == STATUS_SOLD or usage_status in {USAGE_SOLD, USAGE_SELF_USE}:
+        return False
+    return True
+
+
 def deactivated_mail_candidates(
     accounts: list[dict[str, Any]] | None = None,
     *,
@@ -290,10 +301,13 @@ def check_deactivated_mail(
     keyword: str = DEFAULT_DEACTIVATED_KEYWORD,
     size: int = 30,
     statuses: list[str] | tuple[str, ...] | set[str] | None = None,
+    emails: list[str] | tuple[str, ...] | set[str] | None = None,
     directory: str | None = None,
     apply: bool = False,
     release_team: bool = True,
+    release_all_matched_team: bool = False,
     dispose_mailbox: bool = True,
+    include_targeted_accounts: bool = False,
     team_remover: TeamRemover | None = None,
 ) -> dict[str, Any]:
     """Check account mailboxes for deactivation notices.
@@ -305,13 +319,29 @@ def check_deactivated_mail(
     keyword = str(keyword or "").strip() or DEFAULT_DEACTIVATED_KEYWORD
     size = max(1, int(size or 30))
     accounts = load_accounts()
+    email_filter = {_normalized_email(item) for item in (emails or []) if _normalized_email(item)}
     source_mode = "directory" if directory else "accounts"
     if directory:
         directory_payload = load_deactivated_mail_directory_entries(directory, accounts=accounts)
         candidates = list(directory_payload["entries"])
     else:
         directory_payload = None
-        candidates = deactivated_mail_candidates(accounts, statuses=statuses)
+        if email_filter and include_targeted_accounts:
+            candidates = [
+                acc
+                for acc in accounts
+                if isinstance(acc, dict)
+                and _normalized_email(acc.get("email")) in email_filter
+                and _is_targeted_candidate_account(acc)
+            ]
+        else:
+            candidates = deactivated_mail_candidates(accounts, statuses=statuses)
+    if email_filter:
+        candidates = [
+            item
+            for item in candidates
+            if _normalized_email(item.get("email") if isinstance(item, dict) else "") in email_filter
+        ]
     clients: dict[str, Any] = {}
 
     result: dict[str, Any] = {
@@ -404,7 +434,7 @@ def check_deactivated_mail(
         seat_release = {"attempted": False, "status": "skipped"}
         mailbox_disposal = {"attempted": False, "success": False, "message": "skipped"}
 
-        if release_team and acc and acc.get("status") in TEAM_SEAT_STATUSES:
+        if release_team and acc and (release_all_matched_team or acc.get("status") in TEAM_SEAT_STATUSES):
             seat_release["attempted"] = True
             if team_remover is None:
                 seat_release["status"] = "not_configured"

@@ -62,4 +62,6 @@
 
 只在连接失败、代理失败、超时这类网络错误时尝试下一个代理。HTTP 401/403、账号失效、CPA/Sub2API 鉴权失败不是代理失败，不触发切换。
 
+RT 恢复的 OAuth 阶段也使用同一代理池。`src/autoteam/api.py` (`_run_rt_recovery_oauth_with_retry`) 每次 attempt 会显式继承当前任务代理；网络、代理、超时类错误会切换到 `OUTBOUND_PROXY_POOL` 的下一个代理后重试。默认只有 1 次 attempt，需要多代理重试时必须显式设置 `RT_RECOVERY_OAUTH_RETRY_ATTEMPTS` 或 `RT_RECOVERY_STEP_RETRY_ATTEMPTS`。账号语义错误不切换代理，包括 `account_deactivated` / `deleted`、`phone_required`、`HTTP 401`、`invalid_username_or_password`、`password_rejected`、`login_rejected`、未注册、注册未完成和无有效组织。
+
 Python `requests` 使用 `socks5` 或 `socks5h` 时需要 SOCKS 依赖。缺失时会报出可执行提示：安装 `requests[socks]` 或改用 HTTP 代理。

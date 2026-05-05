@@ -109,7 +109,27 @@ Auth 文件盘点筛选参数：
 
 apply 前一定先备份 `accounts.json`。API 入口会先调 `backup_accounts_file`，生成 `.bak-account-clean-<unix>`，再继续清理，见 `src/autoteam/api.py:2138` 和 `src/autoteam/account_cleaner.py:21`。
 
-## 5. 主号禁止说明
+## 5. 恢复缺失 RT / 401 RT
+
+RT 恢复用于“账号已注册，但缺 OAuth RT”或“OAuth RT 检测为 401，需要重新获取”的账号。它不用于未注册账号，也不用于已售账号。
+
+相关入口：
+
+- 扫描：`POST /api/accounts/rt-recovery/scan`
+- 批量启动：`POST /api/accounts/rt-recovery/start`
+- 单账号恢复：`POST /api/accounts/{email}/rt-recovery`
+- Deactivated 标记：`POST /api/accounts/rt-recovery/mark-deactivated`
+- 前端面板：`web/src/components/AccountRtRecoveryPanel.vue`
+
+批量启动后，每个账号都会先用 MoEmail 按原邮箱重建永久邮箱，再拉取邮件检查 `Deactivated`。如果邮件命中 Deactivated，系统会标记账号不可用、禁用同步并释放 Team 席位，不会继续获取 RT。没有命中时，才会进入 Codex OAuth RT 获取流程。
+
+RT 恢复默认按快速失败处理：邮箱重建、Deactivated 查信和 OAuth 单次 attempt 默认 60 秒，默认只尝试 1 次。需要长等待或多代理重试时，可以通过 `RT_RECOVERY_STEP_TIMEOUT_SECONDS`、`RT_RECOVERY_STEP_RETRY_ATTEMPTS`、`RT_RECOVERY_OAUTH_TIMEOUT_SECONDS`、`RT_RECOVERY_OAUTH_RETRY_ATTEMPTS` 显式覆盖。HTTP 401、`invalid_username_or_password`、`password_rejected`、`login_rejected` 等账号语义错误会直接记失败，不会继续切代理或等待 OTP。
+
+这条流程不会自动上传 CPA / Sub2API。恢复成功后如需远端使用，仍要通过同步中心或单独同步入口处理。
+
+不要把 Sub2API 里存在的账号直接当成可用账号。未注册、不可用、401、`sync_disabled=true` 或没有 Team OAuth RT 的账号，都不能归为使用中。
+
+## 6. 主号禁止说明
 
 主号判断入口：
 
@@ -126,7 +146,7 @@ apply 前一定先备份 `accounts.json`。API 入口会先调 `backup_accounts_
 
 `is_main_account=True` 不是展示字段而已，它是库存流的硬约束。
 
-## 6. 前端约束
+## 7. 前端约束
 
 账号管理页没有 `vue-router`。顶层切页靠 `web/src/App.vue:221` 的 `currentPage`，模板用 `v-if` / `v-else-if`，见 `web/src/App.vue:156-192`。
 

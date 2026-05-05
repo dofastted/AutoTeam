@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 15
 _PAGE_LIMIT = 100
+PERMANENT_EMAIL_EXPIRY = 0
 _CREATE_EMAIL_LOCK = threading.Lock()
 _RESERVED_EMAIL_NAMES: set[str] = set()
 _DEFAULT_EMAIL_NAME_PATTERN = "{prefix}-{index:03d}"
@@ -38,6 +39,15 @@ _VERIFICATION_CODE_PATTERNS = (
     r"(?:temporary\s+(?:openai|chatgpt)\s+login\s+code(?:\s+is)?|verification\s+code(?:\s+is)?|login\s+code(?:\s+is)?|code(?:\s+is)?|验证码(?:为|是)?)\D{0,24}(\d{6})",
     r"\b(\d{6})\b",
 )
+
+
+class MoEmailRequestError(RuntimeError):
+    """Mo Email API error that keeps HTTP metadata for targeted recovery."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, payload=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.payload = payload
 
 
 def normalize_mo_email_base_url(base_url: str) -> str:
@@ -67,6 +77,10 @@ def _resolve_email_name_pattern(pattern: str | None = None) -> str:
 def format_email_name(prefix: str, index: int, pattern: str | None = None) -> str:
     resolved_pattern = _resolve_email_name_pattern(pattern)
     return resolved_pattern.format(prefix=prefix, index=index)
+
+
+def parse_email_local_name(email: str) -> str:
+    return str(email or "").strip().lower().split("@", 1)[0]
 
 
 def _extract_email_name_index(name: str, prefix: str, pattern: str) -> int | None:
@@ -157,7 +171,11 @@ class MoEmailClient:
             detail = payload
             if isinstance(payload, dict):
                 detail = payload.get("message") or payload.get("detail") or payload.get("error") or payload
-            raise RuntimeError(f"Mo Email {label}失败: HTTP {response.status_code} {detail}")
+            raise MoEmailRequestError(
+                f"Mo Email {label}失败: HTTP {response.status_code} {detail}",
+                status_code=response.status_code,
+                payload=payload,
+            )
 
         if (
             isinstance(payload, dict)
@@ -277,6 +295,42 @@ class MoEmailClient:
 
         return results[:remaining]
 
+    def find_account_by_email(self, email: str, *, include_local_cache: bool = True):
+        target = self._normalize_email(email)
+        if not target:
+            return None
+
+        try:
+            for account in self.list_accounts(size=1000):
+                normalized = self._normalize_account_item(account)
+                if self._normalize_email(normalized.get("email")) == target:
+                    return normalized
+        except Exception:
+            pass
+
+        if not include_local_cache:
+            return None
+
+        try:
+            from autoteam.accounts import load_accounts
+
+            for acc in load_accounts():
+                if self._normalize_email(acc.get("email")) != target:
+                    continue
+                account_id = acc.get("mail_account_id") or acc.get("cloudmail_account_id")
+                if account_id is None:
+                    continue
+                return self._normalize_account_item(
+                    {
+                        "id": account_id,
+                        "email": target,
+                        "address": target,
+                    }
+                )
+        except Exception:
+            pass
+        return None
+
     def _iter_existing_email_values(self):
         for account in self.list_accounts(size=1000):
             email = account.get("email")
@@ -344,6 +398,63 @@ class MoEmailClient:
 
         logger.info("[MoEmail] 临时邮箱已创建: %s (emailId=%s)", email, account_id)
         return account_id, email
+
+    def recreate_permanent_email(self, email: str) -> dict:
+        """Re-create an existing local-part as a permanent MoEmail mailbox."""
+        name = parse_email_local_name(email)
+        if not name:
+            raise RuntimeError("邮箱 local-part 为空")
+        _local_name, _, email_domain = str(email or "").strip().lower().partition("@")
+        domain = email_domain or self.domain
+        if not domain:
+            raise RuntimeError("Mo Email 域名为空")
+
+        try:
+            payload = self._request(
+                "POST",
+                "/api/emails/generate",
+                label="重建永久邮箱",
+                json={
+                    "name": name,
+                    "expiryTime": PERMANENT_EMAIL_EXPIRY,
+                    "domain": domain,
+                },
+            )
+        except MoEmailRequestError as exc:
+            if exc.status_code != 409:
+                raise
+            existing_email = f"{name}@{domain}".lower()
+            existing = self.find_account_by_email(existing_email, include_local_cache=False)
+            if not existing:
+                raise RuntimeError(f"Mo Email 永久邮箱已存在但无法查询 account_id: {existing_email}") from exc
+            account_id = existing.get("accountId") or existing.get("id")
+            if account_id is None:
+                raise RuntimeError(f"Mo Email 永久邮箱已存在但未返回 account_id: {existing_email}") from exc
+            logger.info("[MoEmail] 永久邮箱已存在，复用: %s (emailId=%s)", existing_email, account_id)
+            return {
+                "email": existing.get("email") or existing_email,
+                "account_id": account_id,
+                "raw_account": existing,
+                "reused": True,
+            }
+        account_payload = self._unwrap_item(payload, "email")
+        if not account_payload:
+            account_payload = self._unwrap_item(payload, "data")
+        if not account_payload and isinstance(payload, dict):
+            account_payload = payload
+        account = self._normalize_account_item(account_payload if isinstance(account_payload, dict) else {})
+        recreated_email = account.get("email") or f"{name}@{domain}"
+        account_id = account.get("accountId") or account.get("id")
+        if account_id is None:
+            account_id = self._resolve_account_id_for_email(recreated_email)
+        if account_id is None:
+            raise RuntimeError(f"Mo Email 重建邮箱后未返回 account_id: {recreated_email}")
+        logger.info("[MoEmail] 永久邮箱已重建: %s (emailId=%s)", recreated_email, account_id)
+        return {
+            "email": recreated_email,
+            "account_id": account_id,
+            "raw_account": account,
+        }
 
     def _resolve_account_id_for_email(self, to_email):
         target = self._normalize_email(to_email)

@@ -29,3 +29,7 @@ web/node_modules/
 .trellis/
 .autoteam-hook/
 .coverage
+.claude/
+AGENTS.md
+style.md
+temp/
