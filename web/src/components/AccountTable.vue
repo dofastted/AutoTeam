@@ -110,7 +110,7 @@
               <td class="px-4 py-3 align-top sm:px-5">
                 <div class="font-mono text-xs text-slate-100">{{ account.email || '-' }}</div>
                 <div class="mt-1 flex flex-wrap gap-2 text-[11px] text-slate-500">
-                  <span>分类: {{ account.category || deriveFallbackCategory(account) }}</span>
+                  <span>分类: {{ account.category || 'unknown' }}</span>
                   <span v-if="account.updated_at">更新: {{ formatTimestamp(account.updated_at) }}</span>
                 </div>
               </td>
@@ -726,20 +726,11 @@ function formatTimestamp(value) {
   return `${month}-${day} ${hours}:${minutes}`
 }
 
-function deriveFallbackCategory(account) {
-  if (account?.usage_status === 'sold') return 'sold'
-  if (['invalid', 'deactivated', 'risk_blocked'].includes(account?.health_status)) return 'invalid'
-  if (account?.registration_status !== 'registered') return 'not_registered'
-  if (account?.usage_status === 'in_use') return 'in_use'
-  if (account?.usage_status === 'inventory') return 'inventory'
-  return 'registered'
-}
-
 function statusBadges(account) {
   const badges = []
   const usageStatus = account?.usage_status || ''
   const healthStatus = account?.health_status || ''
-  const category = account?.category || deriveFallbackCategory(account)
+  const category = account?.category || 'unknown'
 
   if (usageStatus === 'sold') {
     badges.push({
@@ -769,14 +760,14 @@ function statusBadges(account) {
       className: 'border-amber-500/30 bg-amber-500/15 text-amber-200',
       dotClass: 'bg-amber-300',
     })
-  } else if (healthStatus === 'valid' && (usageStatus === 'inventory' || category === 'inventory')) {
+  } else if (category === 'inventory') {
     badges.push({
       key: 'usage-inventory',
       label: '库存',
       className: 'border-emerald-500/30 bg-emerald-500/15 text-emerald-200',
       dotClass: 'bg-emerald-300',
     })
-  } else if (healthStatus === 'valid' && (usageStatus === 'in_use' || category === 'in_use')) {
+  } else if (category === 'in_use') {
     badges.push({
       key: 'usage-in-use',
       label: '使用中',

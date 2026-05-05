@@ -94,6 +94,10 @@
               <dt class="text-slate-200">账号清理</dt>
               <dd>工作台内置 dry-run、预览、CSV、完整 JSON、apply 确认和复扫结果。</dd>
             </div>
+            <div>
+              <dt class="text-slate-200">RT 恢复</dt>
+              <dd>归类缺 RT、401 和 Deactivated 账号，恢复动作只在确认后启动。</dd>
+            </div>
           </dl>
         </div>
       </aside>
@@ -194,6 +198,30 @@
 
           <AccountCleanPage :loading="loading" @refresh="handleEmbeddedCleanRefresh" />
         </section>
+
+        <section
+          v-show="activeView === 'rt-recovery'"
+          id="rt-recovery-panel"
+          class="space-y-4"
+          role="tabpanel"
+          aria-labelledby="rt-recovery-tab"
+          :aria-hidden="activeView !== 'rt-recovery'"
+        >
+          <div class="account-section-head">
+            <div>
+              <p class="account-section-kicker">/api/accounts/rt-recovery</p>
+              <h3 class="account-section-title">RT 恢复</h3>
+              <p class="account-section-copy">
+                扫描注册完成但缺少 OAuth RT 的账号，401 账号可重新跑 RT 获取；错误包含 Deactivated 的账号只标记失效。
+              </p>
+            </div>
+            <div class="account-section-badge">
+              手动启动
+            </div>
+          </div>
+
+          <AccountRtRecoveryPanel @refresh="handleEmbeddedCleanRefresh" />
+        </section>
       </main>
     </div>
 
@@ -210,6 +238,7 @@
 import { computed, ref } from 'vue'
 import AccountDrawer from './AccountDrawer.vue'
 import AccountCleanPage from './AccountCleanPage.vue'
+import AccountRtRecoveryPanel from './AccountRtRecoveryPanel.vue'
 import AccountTable from './AccountTable.vue'
 import AuthsTable from './AuthsTable.vue'
 
@@ -229,6 +258,7 @@ const workspaceViews = [
   { value: 'lifecycle', index: '01', label: '生命周期表', hint: '本地账号详情与动作' },
   { value: 'auths', index: '02', label: 'auth 文件盘点', hint: '只读认证文件扫描' },
   { value: 'clean', index: '03', label: '账号清理', hint: '扫描、预览和应用清理' },
+  { value: 'rt-recovery', index: '04', label: 'RT 恢复', hint: '缺 RT、401 和失效归类' },
 ]
 
 const categories = [
