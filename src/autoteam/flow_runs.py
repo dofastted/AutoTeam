@@ -226,7 +226,7 @@ def resume_flow_run(run_id: str) -> dict | None:
     status = run.get("status") or "running"
     if status != "running":
         status = "running"
-    return update_flow_run(run_id, pause_requested=False, status=status, finished_at=None)
+    return update_flow_run(run_id, pause_requested=False, status=status, finished_at=None, fatal_error="")
 
 
 def is_flow_pause_requested(run_id: str) -> bool:

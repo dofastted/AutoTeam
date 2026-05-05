@@ -484,6 +484,7 @@ def test_run_cpa_batch_resume_continues_existing_run(tmp_path, monkeypatch):
         attempted_count=1,
         finished_at=1000,
         pause_requested=True,
+        fatal_error="连续 2 个账号注册失败，已暂停",
     )
 
     monkeypatch.setattr(cpa_batch, "get_mail_client", lambda: _FakeMailClient())
@@ -498,6 +499,7 @@ def test_run_cpa_batch_resume_continues_existing_run(tmp_path, monkeypatch):
     assert result["attempted"] == 2
     assert result["succeeded"] == 2
     assert run["success_count"] == 2
+    assert run["fatal_error"] == ""
 
 
 def test_run_cpa_batch_resume_legacy_run_without_parallel_workers(tmp_path, monkeypatch):
