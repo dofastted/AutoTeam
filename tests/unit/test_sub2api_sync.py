@@ -135,6 +135,38 @@ def test_resolve_group_binding_for_sync_warns_and_skips_missing_group(monkeypatc
     assert warnings == ["未找到分组: team，已跳过分组绑定"]
 
 
+def test_list_openai_oauth_account_emails_reads_without_writes(monkeypatch):
+    monkeypatch.setattr(sub2api_sync, "_login", lambda: "token")
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_list_openai_oauth_accounts",
+        lambda token: [
+            {
+                "id": 1,
+                "name": "first@example.com",
+                "credentials": {"email": "first@example.com"},
+                "extra": {},
+            },
+            {
+                "id": 2,
+                "name": "Managed",
+                "credentials": {},
+                "extra": {"autoteam_email": "second@example.com"},
+            },
+            {"id": 3, "name": "", "credentials": {}, "extra": {}},
+        ],
+    )
+    monkeypatch.setattr(
+        sub2api_sync,
+        "_delete_account",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not delete remote accounts")),
+    )
+
+    emails = sub2api_sync.list_openai_oauth_account_emails()
+
+    assert emails == {"first@example.com", "second@example.com"}
+
+
 def test_merge_group_ids_preserves_manual_groups_and_replaces_previous_managed_group():
     account = {
         "group_ids": [11, 21],

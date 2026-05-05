@@ -41,10 +41,11 @@
 5. `inventory`
 6. `registered`
 
-这里要注意两点：
+这里要注意三点：
 
 - 当前代码里 `not_registered` 的判断发生在 `in_use` 和 `inventory` 之前，严格来说优先级是 `sold > invalid > not_registered > in_use > inventory > registered`，见 `src/autoteam/account_classifier.py:50`。
-- `inventory` 不只看 `usage_status=inventory`。还要求 `cpa_status=success`、`health_status=valid`、存在 `rt_auth_file`，且 `sync_disabled` 不是真，见 `src/autoteam/account_classifier.py:58`。
+- `in_use` 不只看 `usage_status=in_use`。必须是已注册、可用，且 Sub2API 真实存在。`src/autoteam/account_classifier.py` (`derive_category`, `reconcile_usage_classification`) 支持用 `sub2api_present` 传入实时远端结果；默认只认 `remote.sub2api.status=present/uploaded`。
+- `inventory` 不只看 `usage_status=inventory`。还要求账号可用、`cpa_status=success`、存在 OAuth RT，且未禁用同步，见 `src/autoteam/account_classifier.py` (`is_usable_account`, `derive_category`)。
 
 四轴之外还有两类相关状态：
 
@@ -177,6 +178,19 @@ V2 凭证结构：
 | POST | `/api/accounts/clean/apply` | 自动备份后应用清理，再返回复扫结果 | `696c382` |
 
 实现入口在 `src/autoteam/api.py:2114` 和 `src/autoteam/api.py:2132`。
+
+### RT 恢复
+
+| 方法 | 路径 | 说明 | 提交 |
+|------|------|------|------|
+| POST | `/api/accounts/rt-recovery/scan` | 扫描缺 RT、401 需要重取 RT、deactivated 和不可恢复账号 | 本地改动 |
+| POST | `/api/accounts/rt-recovery/start` | 人工启动批量 RT 恢复任务 | 本地改动 |
+| POST | `/api/accounts/rt-recovery/mark-deactivated` | 将 deactivated 账号标记不可用，并释放 Team 席位 | 本地改动 |
+| POST | `/api/accounts/{email}/rt-recovery` | 单账号 RT 恢复 | 本地改动 |
+
+RT 恢复的状态判断在 `src/autoteam/account_rt_recovery.py`。启动任务在 `src/autoteam/api.py`，顺序固定为 MoEmail 永久邮箱重建、定向拉信检查 Deactivated、命中后标记不可用并释放 Team、未命中才获取 OAuth RT。
+
+这组接口不属于 CPA / Sub2API 同步接口。恢复成功只保证本地账号和 OAuth RT 文件更新；远端上传要走同步中心或单独同步入口。
 
 ### 库存与修复操作
 
@@ -409,6 +423,7 @@ API 测试：
 ## 10. 关键约束 / 易错点
 
 - `sold` 的优先级最高。已售账号会被强制 `usage_status=sold` 且 `sync_disabled=true`，见 `src/autoteam/account_classifier.py:78` 和 `src/autoteam/account_inventory.py:288`。
+- Sub2API 存在不等于使用中。未注册、不可用、检测到 401、`sync_disabled=true`、没有 Team OAuth RT 的账号都不能归为 `in_use`；实时修正脚本见 `temp/reconcile_sub2api_account_usage.py`。
 - `quota_exhausted` 不等于 `invalid`。额度用尽只写 `health_status=quota_exhausted`，不会自动 `sync_disabled`，也不会把库存直接打成失效，见 `src/autoteam/account_health.py:118`。
 - 主号不能进入库存流。分配、释放、售卖、详情抽屉动作都要先挡掉 `role=main`，见 `src/autoteam/account_inventory.py:103`、`src/autoteam/account_inventory.py:185`、`src/autoteam/account_inventory.py:270`、`web/src/components/AccountDrawer.vue:317`。
 - `repair-oauth` 不是重新跑浏览器登录。它只把 `health_status` 回写成 `valid` 并记一条修复元数据，见 `src/autoteam/api.py:2535`。

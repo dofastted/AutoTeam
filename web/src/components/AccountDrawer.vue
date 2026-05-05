@@ -552,8 +552,8 @@ const usageStatus = computed(() => normalizeKey(account.value?.usage_status))
 const healthStatus = computed(() => normalizeKey(health.value?.health_status || account.value?.health_status))
 const isMain = computed(() => Boolean(account.value?.is_main_account || category.value === 'main'))
 const isInvalid = computed(() => Boolean(health.value?.is_invalid))
-const isInventory = computed(() => usageStatus.value === 'inventory' || category.value === 'inventory')
-const isInUse = computed(() => usageStatus.value === 'in_use' || category.value === 'in_use')
+const isInventory = computed(() => category.value === 'inventory')
+const isInUse = computed(() => category.value === 'in_use')
 const isValid = computed(() => healthStatus.value === 'valid' && !isInvalid.value)
 const showSaleSection = computed(() => {
   return Boolean(
@@ -624,7 +624,8 @@ const dialogSubmitLabel = computed(() => {
 
 watch(
   () => [props.open, props.email],
-  ([open, email], [prevOpen, prevEmail]) => {
+  ([open, email], previous = []) => {
+    const [prevOpen, prevEmail] = previous
     if (!open) {
       resetState()
       return

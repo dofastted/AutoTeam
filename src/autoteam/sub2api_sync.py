@@ -257,6 +257,20 @@ def _existing_openai_accounts_by_email(items: list[dict], emails: set[str]) -> t
     return matched, unmanaged_matches
 
 
+def list_openai_oauth_account_emails() -> set[str]:
+    """Return the current OpenAI OAuth emails in Sub2API without changing remote data."""
+
+    token = _login()
+    emails: set[str] = set()
+    for item in _list_openai_oauth_accounts(token):
+        if not isinstance(item, dict):
+            continue
+        email = _managed_email(item)
+        if email:
+            emails.add(email)
+    return emails
+
+
 def _parse_jwt_payload(token: str) -> dict:
     parts = (token or "").split(".")
     if len(parts) < 2:

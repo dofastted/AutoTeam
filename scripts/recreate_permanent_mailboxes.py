@@ -24,14 +24,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from autoteam.mo_email import MoEmailClient
 from autoteam import accounts as accounts_mod
+from autoteam.mo_email import PERMANENT_EMAIL_EXPIRY, MoEmailClient, parse_email_local_name
 
-PERMANENT_EXPIRY = 0
+PERMANENT_EXPIRY = PERMANENT_EMAIL_EXPIRY
 
 
 def parse_prefix(email: str) -> str:
-    return (email or "").strip().lower().split("@", 1)[0]
+    return parse_email_local_name(email)
 
 
 def recreate_one(client: MoEmailClient, email: str) -> dict:
@@ -40,32 +40,15 @@ def recreate_one(client: MoEmailClient, email: str) -> dict:
         return {"email": email, "ok": False, "error": "empty prefix"}
 
     try:
-        payload = client._request(
-            "POST",
-            "/api/emails/generate",
-            label="重建永久邮箱",
-            json={
-                "name": prefix,
-                "expiryTime": PERMANENT_EXPIRY,
-                "domain": client.domain,
-            },
-        )
+        recreated = client.recreate_permanent_email(email)
     except Exception as exc:
         return {"email": email, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
-    item = client._unwrap_item(payload, "email") or client._unwrap_item(payload, "data") or payload
-    account = client._normalize_account_item(item if isinstance(item, dict) else {})
-    new_id = account.get("accountId") or account.get("id")
-    new_email = account.get("email") or f"{prefix}@{client.domain}"
-
-    if new_id is None:
-        new_id = client._resolve_account_id_for_email(new_email)
-
     return {
-        "email": new_email,
-        "ok": bool(new_id),
-        "account_id": new_id,
-        "raw_account": account,
+        "email": recreated["email"],
+        "ok": True,
+        "account_id": recreated["account_id"],
+        "raw_account": recreated["raw_account"],
     }
 
 

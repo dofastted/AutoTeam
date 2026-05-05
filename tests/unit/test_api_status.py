@@ -1,9 +1,11 @@
+import importlib
 import json
 import logging
 import threading
 import time
 
 import pytest
+import requests
 from fastapi import HTTPException
 
 from autoteam import accounts, api, flow_runs, protocol_oauth
@@ -19,6 +21,24 @@ def _set_pool_runtime_config(monkeypatch):
     monkeypatch.setenv("CLOUDMAIL_DOMAIN", "@example.com")
     monkeypatch.setenv("CPA_URL", "http://127.0.0.1:8317")
     monkeypatch.setenv("CPA_KEY", "key-1")
+
+
+def _run_rt_recovery_test_task(command, func, params, *args, **kwargs):
+    from autoteam import outbound_proxy
+
+    with outbound_proxy.task_proxy_context():
+        return {
+            "task_id": "task-rt",
+            "command": command,
+            "params": params,
+            "result": func(*args, **kwargs),
+        }
+
+
+def _reset_test_outbound_proxy(monkeypatch, pool: str):
+    monkeypatch.setenv("OUTBOUND_PROXY_POOL", pool)
+    monkeypatch.setenv("OUTBOUND_PROXY_STRATEGY", "task-sticky")
+    importlib.reload(api.outbound_proxy)
 
 
 def test_get_status_normalizes_main_account_status_from_saved_auth(tmp_path, monkeypatch):
@@ -588,6 +608,856 @@ def test_post_account_login_force_allows_sync_disabled(tmp_path, monkeypatch):
 
     assert result["result"]["auth_file"] == str(oauth_file)
     assert save_sources == ["oauth"]
+
+
+def test_post_accounts_rt_recovery_scan_returns_recoverable_and_deactivated(monkeypatch):
+    monkeypatch.setattr("autoteam.admin_state.get_admin_email", lambda: "owner@example.com")
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {
+                "email": "missing@example.com",
+                "registration_status": "registered",
+                "status": "standby",
+            },
+            {
+                "email": "dead@example.com",
+                "registration_status": "registered",
+                "last_error": "Deactivated",
+            },
+            {
+                "email": "owner@example.com",
+                "registration_status": "registered",
+                "status": "active",
+            },
+        ],
+    )
+
+    result = api.post_accounts_rt_recovery_scan()
+
+    report = result["report"]
+    by_email = {item["email"]: item for item in report["items"]}
+    assert by_email["missing@example.com"]["category"] == "rt_missing_registered"
+    assert by_email["owner@example.com"]["category"] == "main"
+    assert report["recoverable_count"] == 1
+    assert report["deactivated_count"] == 1
+
+
+def test_post_accounts_rt_recovery_mark_deactivated_backs_up_and_saves(monkeypatch):
+    accounts_data = [
+        {
+            "email": "dead@example.com",
+            "registration_status": "registered",
+            "last_error": "Deactivated",
+        }
+    ]
+    saved = []
+
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: accounts_data)
+    monkeypatch.setattr("autoteam.accounts.save_accounts", lambda data: saved.append(list(data)))
+    monkeypatch.setattr("autoteam.account_cleaner.backup_accounts_file", lambda: "accounts.json.bak-test")
+
+    result = api.post_accounts_rt_recovery_mark_deactivated(api.RtRecoveryMarkParams())
+
+    assert result["backup_path"] == "accounts.json.bak-test"
+    assert result["result"]["changed"] == 1
+    assert saved
+    assert accounts_data[0]["status"] == "unavailable"
+    assert accounts_data[0]["health_status"] == "deactivated"
+
+
+def test_post_accounts_rt_recovery_start_recreates_mailbox_then_runs_oauth_when_not_deactivated(monkeypatch):
+    accounts_data = [
+        {
+            "email": "retry@example.com",
+            "registration_status": "registered",
+            "status": "unavailable",
+            "sync_disabled": True,
+            "unavailable_reason": "http_401",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 7,
+        }
+    ]
+    saved = []
+    login_calls = []
+    deactivation_calls = []
+
+    class FakeMoEmailClient:
+        def login(self):
+            return "ok"
+
+        def recreate_permanent_email(self, email):
+            assert email == "retry@example.com"
+            return {"email": email, "account_id": "mailbox-new", "raw_account": {}}
+
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: accounts_data)
+    monkeypatch.setattr("autoteam.accounts.save_accounts", lambda data: saved.append(list(data)))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr("autoteam.mo_email.MoEmailClient", FakeMoEmailClient)
+    monkeypatch.setattr("autoteam.manager.remove_from_team", lambda *args, **kwargs: "removed")
+    monkeypatch.setattr(
+        "autoteam.account_deactivation.check_deactivated_mail",
+        lambda **kwargs: deactivation_calls.append(kwargs)
+        or {"status": "ok", "matched": 0, "errors": [], "matches": []},
+    )
+    monkeypatch.setattr(
+        "autoteam.account_oauth.run_account_oauth_login",
+        lambda email, **kwargs: login_calls.append((email, kwargs))
+        or {
+            "email": email,
+            "plan_type": "team",
+            "rt_auth_file": "/tmp/codex-retry-oauth.json",
+            "cpa_archive_file": "/tmp/archive/codex-retry-oauth.json",
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "_start_task",
+        lambda command, func, params, *args, **kwargs: _run_rt_recovery_test_task(command, func, params, *args, **kwargs),
+    )
+
+    result = api.post_accounts_rt_recovery_start(
+        api.RtRecoveryStartParams(emails=["retry@example.com"], force=True)
+    )
+
+    assert result["command"] == "rt-recovery-batch:1"
+    assert result["result"]["completed"] == 1
+    assert result["result"]["deactivated"] == 0
+    assert deactivation_calls
+    assert deactivation_calls[0]["emails"] == ["retry@example.com"]
+    assert deactivation_calls[0]["apply"] is True
+    assert deactivation_calls[0]["team_remover"] is not None
+    assert login_calls == [("retry@example.com", {"account": accounts_data[0], "check_quota_snapshot": True})]
+    assert saved
+    assert accounts_data[0]["sync_disabled"] is False
+    assert accounts_data[0]["status"] == "standby"
+    assert accounts_data[0]["mail_account_id"] == "mailbox-new"
+    assert accounts_data[0]["mail_provider"] == "mo_email"
+
+
+def test_post_accounts_rt_recovery_start_oauth_timeout_fails_account_and_continues(monkeypatch):
+    accounts_data = [
+        {
+            "email": "slow@example.com",
+            "registration_status": "registered",
+            "status": "standby",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 7,
+        },
+        {
+            "email": "next@example.com",
+            "registration_status": "registered",
+            "status": "standby",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 8,
+        },
+    ]
+    saved = []
+
+    class FakeMoEmailClient:
+        def login(self):
+            return "ok"
+
+        def recreate_permanent_email(self, email):
+            return {"email": email, "account_id": f"mailbox-{email.split('@')[0]}", "raw_account": {}}
+
+    def fake_oauth(email, **kwargs):
+        if email == "slow@example.com":
+            time.sleep(0.2)
+            return {"email": email, "plan_type": "team", "rt_auth_file": "/tmp/too-late.json"}
+        return {"email": email, "plan_type": "team", "rt_auth_file": "/tmp/next.json"}
+
+    monkeypatch.setenv("RT_RECOVERY_OAUTH_TIMEOUT_SECONDS", "0.05")
+    monkeypatch.setenv("RT_RECOVERY_OAUTH_RETRY_ATTEMPTS", "1")
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: accounts_data)
+    monkeypatch.setattr("autoteam.accounts.save_accounts", lambda data: saved.append(list(data)))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr("autoteam.mo_email.MoEmailClient", FakeMoEmailClient)
+    monkeypatch.setattr(
+        "autoteam.account_deactivation.check_deactivated_mail",
+        lambda **kwargs: {"status": "ok", "matched": 0, "errors": [], "matches": []},
+    )
+    monkeypatch.setattr("autoteam.account_oauth.run_account_oauth_login", fake_oauth)
+    monkeypatch.setattr(
+        api,
+        "_start_task",
+        lambda command, func, params, *args, **kwargs: _run_rt_recovery_test_task(command, func, params, *args, **kwargs),
+    )
+
+    result = api.post_accounts_rt_recovery_start(
+        api.RtRecoveryStartParams(emails=["slow@example.com", "next@example.com"])
+    )
+
+    assert result["result"]["completed"] == 1
+    assert result["result"]["failed"] == 1
+    by_email = {item["email"]: item for item in result["result"]["results"]}
+    assert by_email["slow@example.com"]["status"] == "failed"
+    assert "OAuth 恢复超过 0.05 秒" in by_email["slow@example.com"]["error"]
+    assert by_email["next@example.com"]["status"] == "completed"
+    assert accounts_data[0]["last_rt_recovery_error"] == "OAuth 恢复超过 0.05 秒"
+    assert accounts_data[0]["last_rt_recovery_failed_at"]
+    assert saved
+
+
+def test_post_accounts_rt_recovery_start_mailbox_timeout_fails_account_and_continues(monkeypatch):
+    accounts_data = [
+        {
+            "email": "slow-mailbox@example.com",
+            "registration_status": "registered",
+            "status": "standby",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 7,
+        },
+        {
+            "email": "next-mailbox@example.com",
+            "registration_status": "registered",
+            "status": "standby",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 8,
+        },
+    ]
+    saved = []
+    oauth_calls = []
+
+    class FakeMoEmailClient:
+        def login(self):
+            return "ok"
+
+        def recreate_permanent_email(self, email):
+            if email == "slow-mailbox@example.com":
+                time.sleep(0.2)
+            return {"email": email, "account_id": f"mailbox-{email.split('@')[0]}", "raw_account": {}}
+
+    monkeypatch.setenv("RT_RECOVERY_STEP_TIMEOUT_SECONDS", "0.05")
+    monkeypatch.setenv("RT_RECOVERY_STEP_RETRY_ATTEMPTS", "1")
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: accounts_data)
+    monkeypatch.setattr("autoteam.accounts.save_accounts", lambda data: saved.append(list(data)))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr("autoteam.mo_email.MoEmailClient", FakeMoEmailClient)
+    monkeypatch.setattr(
+        "autoteam.account_deactivation.check_deactivated_mail",
+        lambda **kwargs: {"status": "ok", "matched": 0, "errors": [], "matches": []},
+    )
+    monkeypatch.setattr(
+        "autoteam.account_oauth.run_account_oauth_login",
+        lambda email, **kwargs: oauth_calls.append(email)
+        or {"email": email, "plan_type": "team", "rt_auth_file": f"/tmp/{email}.json"},
+    )
+    monkeypatch.setattr(
+        api,
+        "_start_task",
+        lambda command, func, params, *args, **kwargs: _run_rt_recovery_test_task(command, func, params, *args, **kwargs),
+    )
+
+    result = api.post_accounts_rt_recovery_start(
+        api.RtRecoveryStartParams(emails=["slow-mailbox@example.com", "next-mailbox@example.com"])
+    )
+
+    assert result["result"]["completed"] == 1
+    assert result["result"]["failed"] == 1
+    by_email = {item["email"]: item for item in result["result"]["results"]}
+    assert by_email["slow-mailbox@example.com"]["status"] == "failed"
+    assert "邮箱重建超过 0.05 秒" in by_email["slow-mailbox@example.com"]["error"]
+    assert by_email["next-mailbox@example.com"]["status"] == "completed"
+    assert oauth_calls == ["next-mailbox@example.com"]
+    assert accounts_data[0]["last_rt_recovery_error"] == "邮箱重建超过 0.05 秒"
+    assert accounts_data[0]["last_rt_recovery_failed_at"]
+    assert saved
+
+
+def test_post_accounts_rt_recovery_start_network_error_rotates_proxy_and_retries(monkeypatch):
+    accounts_data = [
+        {
+            "email": "proxy-retry@example.com",
+            "registration_status": "registered",
+            "status": "standby",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 7,
+        }
+    ]
+    saved = []
+    proxies_seen = []
+
+    class FakeMoEmailClient:
+        def login(self):
+            return "ok"
+
+        def recreate_permanent_email(self, email):
+            return {"email": email, "account_id": "mailbox-existing", "raw_account": {}, "reused": True}
+
+    def fake_oauth(email, **kwargs):
+        from autoteam import outbound_proxy
+
+        proxies_seen.append(outbound_proxy.current_proxy_url())
+        if len(proxies_seen) == 1:
+            raise requests.exceptions.ProxyError("proxy down")
+        return {"email": email, "plan_type": "team", "rt_auth_file": "/tmp/proxy-retry.json"}
+
+    _reset_test_outbound_proxy(monkeypatch, "socks5://proxy-a:1080,socks5://proxy-b:1080")
+    monkeypatch.setenv("RT_RECOVERY_OAUTH_RETRY_ATTEMPTS", "2")
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: accounts_data)
+    monkeypatch.setattr("autoteam.accounts.save_accounts", lambda data: saved.append(list(data)))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr("autoteam.mo_email.MoEmailClient", FakeMoEmailClient)
+    monkeypatch.setattr(
+        "autoteam.account_deactivation.check_deactivated_mail",
+        lambda **kwargs: {"status": "ok", "matched": 0, "errors": [], "matches": []},
+    )
+    monkeypatch.setattr("autoteam.account_oauth.run_account_oauth_login", fake_oauth)
+    monkeypatch.setattr(
+        api,
+        "_start_task",
+        lambda command, func, params, *args, **kwargs: _run_rt_recovery_test_task(command, func, params, *args, **kwargs),
+    )
+
+    result = api.post_accounts_rt_recovery_start(
+        api.RtRecoveryStartParams(emails=["proxy-retry@example.com"])
+    )
+
+    assert result["result"]["completed"] == 1
+    assert result["result"]["failed"] == 0
+    assert proxies_seen == ["socks5://proxy-a:1080", "socks5://proxy-b:1080"]
+
+
+def test_post_accounts_rt_recovery_start_unauthorized_password_error_does_not_proxy_retry(monkeypatch):
+    accounts_data = [
+        {
+            "email": "bad-password@example.com",
+            "registration_status": "registered",
+            "status": "standby",
+            "password": "wrong-secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 7,
+        }
+    ]
+    saved = []
+    proxies_seen = []
+
+    class FakeMoEmailClient:
+        def login(self):
+            return "ok"
+
+        def recreate_permanent_email(self, email):
+            return {"email": email, "account_id": "mailbox-existing", "raw_account": {}, "reused": True}
+
+    def fake_oauth(email, **kwargs):
+        from autoteam import outbound_proxy
+
+        proxies_seen.append(outbound_proxy.current_proxy_url())
+        raise RuntimeError(
+            "401 Client Error: Unauthorized invalid_username_or_password password_rejected login_rejected"
+        )
+
+    _reset_test_outbound_proxy(monkeypatch, "socks5://proxy-a:1080,socks5://proxy-b:1080")
+    monkeypatch.setenv("RT_RECOVERY_OAUTH_RETRY_ATTEMPTS", "3")
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: accounts_data)
+    monkeypatch.setattr("autoteam.accounts.save_accounts", lambda data: saved.append(list(data)))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr("autoteam.mo_email.MoEmailClient", FakeMoEmailClient)
+    monkeypatch.setattr(
+        "autoteam.account_deactivation.check_deactivated_mail",
+        lambda **kwargs: {"status": "ok", "matched": 0, "errors": [], "matches": []},
+    )
+    monkeypatch.setattr("autoteam.account_oauth.run_account_oauth_login", fake_oauth)
+    monkeypatch.setattr(
+        api,
+        "_start_task",
+        lambda command, func, params, *args, **kwargs: _run_rt_recovery_test_task(command, func, params, *args, **kwargs),
+    )
+
+    result = api.post_accounts_rt_recovery_start(
+        api.RtRecoveryStartParams(emails=["bad-password@example.com"])
+    )
+
+    assert result["result"]["completed"] == 0
+    assert result["result"]["failed"] == 1
+    assert len(proxies_seen) == 1
+    assert proxies_seen[0] in {"socks5://proxy-a:1080", "socks5://proxy-b:1080"}
+    assert result["result"]["results"][0]["status"] == "failed"
+    assert "invalid_username_or_password" in result["result"]["results"][0]["error"]
+    assert accounts_data[0]["last_rt_recovery_error"].startswith("401 Client Error")
+    assert saved
+
+
+def test_post_accounts_rt_recovery_start_deactivated_check_proxy_error_retries_and_continues(monkeypatch):
+    accounts_data = [
+        {
+            "email": "deact-proxy@example.com",
+            "registration_status": "registered",
+            "status": "standby",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 7,
+        },
+        {
+            "email": "next-deact@example.com",
+            "registration_status": "registered",
+            "status": "standby",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 8,
+        },
+    ]
+    saved = []
+    proxies_seen = []
+    oauth_calls = []
+
+    class FakeMoEmailClient:
+        def login(self):
+            return "ok"
+
+        def recreate_permanent_email(self, email):
+            return {"email": email, "account_id": f"mailbox-{email.split('@')[0]}", "raw_account": {}}
+
+    def fake_check_deactivated_mail(**kwargs):
+        from autoteam import outbound_proxy
+
+        email = kwargs["emails"][0]
+        if email == "deact-proxy@example.com":
+            proxies_seen.append(outbound_proxy.current_proxy_url())
+            if len(proxies_seen) == 1:
+                raise requests.exceptions.ProxyError("mailbox proxy down")
+        return {"status": "ok", "matched": 0, "errors": [], "matches": []}
+
+    _reset_test_outbound_proxy(monkeypatch, "socks5://proxy-a:1080,socks5://proxy-b:1080")
+    monkeypatch.setenv("RT_RECOVERY_STEP_RETRY_ATTEMPTS", "2")
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: accounts_data)
+    monkeypatch.setattr("autoteam.accounts.save_accounts", lambda data: saved.append(list(data)))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr("autoteam.mo_email.MoEmailClient", FakeMoEmailClient)
+    monkeypatch.setattr("autoteam.account_deactivation.check_deactivated_mail", fake_check_deactivated_mail)
+    monkeypatch.setattr(
+        "autoteam.account_oauth.run_account_oauth_login",
+        lambda email, **kwargs: oauth_calls.append(email)
+        or {"email": email, "plan_type": "team", "rt_auth_file": f"/tmp/{email}.json"},
+    )
+    monkeypatch.setattr(
+        api,
+        "_start_task",
+        lambda command, func, params, *args, **kwargs: _run_rt_recovery_test_task(command, func, params, *args, **kwargs),
+    )
+
+    result = api.post_accounts_rt_recovery_start(
+        api.RtRecoveryStartParams(emails=["deact-proxy@example.com", "next-deact@example.com"])
+    )
+
+    assert result["result"]["completed"] == 2
+    assert result["result"]["failed"] == 0
+    assert proxies_seen == ["socks5://proxy-a:1080", "socks5://proxy-b:1080"]
+    assert oauth_calls == ["deact-proxy@example.com", "next-deact@example.com"]
+    assert saved
+
+
+def test_post_accounts_rt_recovery_start_deactivated_error_does_not_proxy_retry(monkeypatch):
+    accounts_data = [
+        {
+            "email": "oauth-dead-no-retry@example.com",
+            "registration_status": "registered",
+            "status": "standby",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 7,
+        }
+    ]
+    saved = []
+    removed = []
+    proxies_seen = []
+
+    class FakeMoEmailClient:
+        def login(self):
+            return "ok"
+
+        def recreate_permanent_email(self, email):
+            return {"email": email, "account_id": "mailbox-existing", "raw_account": {}, "reused": True}
+
+    def fake_oauth(email, **kwargs):
+        from autoteam import outbound_proxy
+
+        proxies_seen.append(outbound_proxy.current_proxy_url())
+        raise RuntimeError("OpenAI OAuth failed: deleted/deactivated account_deactivated")
+
+    _reset_test_outbound_proxy(monkeypatch, "socks5://proxy-a:1080,socks5://proxy-b:1080")
+    monkeypatch.setenv("RT_RECOVERY_OAUTH_RETRY_ATTEMPTS", "2")
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: accounts_data)
+    monkeypatch.setattr("autoteam.accounts.save_accounts", lambda data: saved.append(list(data)))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(api, "_run_with_chatgpt_session", lambda callback: callback("chatgpt"))
+    monkeypatch.setattr("autoteam.mo_email.MoEmailClient", FakeMoEmailClient)
+    monkeypatch.setattr(
+        "autoteam.account_deactivation.check_deactivated_mail",
+        lambda **kwargs: {"status": "ok", "matched": 0, "errors": [], "matches": []},
+    )
+    monkeypatch.setattr(
+        "autoteam.manager.remove_from_team",
+        lambda _chatgpt, email, **kwargs: removed.append((email, kwargs)) or f"removed:{email}",
+    )
+    monkeypatch.setattr("autoteam.account_oauth.run_account_oauth_login", fake_oauth)
+    monkeypatch.setattr(
+        api,
+        "_start_task",
+        lambda command, func, params, *args, **kwargs: {
+            "task_id": "task-rt",
+            "command": command,
+            "params": params,
+            "result": func(*args, **kwargs),
+        },
+    )
+
+    result = api.post_accounts_rt_recovery_start(
+        api.RtRecoveryStartParams(emails=["oauth-dead-no-retry@example.com"])
+    )
+
+    assert result["result"]["completed"] == 0
+    assert result["result"]["failed"] == 0
+    assert result["result"]["deactivated"] == 1
+    assert len(proxies_seen) == 1
+    assert proxies_seen[0] in {"socks5://proxy-a:1080", "socks5://proxy-b:1080"}
+    assert removed == [("oauth-dead-no-retry@example.com", {"return_status": True})]
+    assert accounts_data[0]["health_status"] == "deactivated"
+    assert accounts_data[0]["unavailable_reason"] == "account_deactivated"
+
+
+def test_post_accounts_rt_recovery_start_stops_when_deactivated_mail_matches(monkeypatch):
+    accounts_data = [
+        {
+            "email": "dead@example.com",
+            "registration_status": "registered",
+            "status": "active",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 7,
+        }
+    ]
+    saved = []
+    login_calls = []
+    removed = []
+
+    class FakeMoEmailClient:
+        def login(self):
+            return "ok"
+
+        def recreate_permanent_email(self, email):
+            return {"email": email, "account_id": "mailbox-new", "raw_account": {}}
+
+    def fake_check_deactivated_mail(**kwargs):
+        remover = kwargs["team_remover"]
+        removed.append(remover("dead@example.com", accounts_data[0]))
+        accounts_data[0].update(
+            {
+                "status": "unavailable",
+                "sync_disabled": True,
+                "unavailable_reason": "account_deactivated",
+            }
+        )
+        return {"status": "ok", "matched": 1, "marked": 1, "errors": [], "matches": [{"email": "dead@example.com"}]}
+
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: accounts_data)
+    monkeypatch.setattr("autoteam.accounts.save_accounts", lambda data: saved.append(list(data)))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(api, "_run_with_chatgpt_session", lambda callback: callback("chatgpt"))
+    monkeypatch.setattr("autoteam.mo_email.MoEmailClient", FakeMoEmailClient)
+    monkeypatch.setattr("autoteam.manager.remove_from_team", lambda _chatgpt, email, **kwargs: f"removed:{email}")
+    monkeypatch.setattr("autoteam.account_deactivation.check_deactivated_mail", fake_check_deactivated_mail)
+    monkeypatch.setattr("autoteam.account_oauth.run_account_oauth_login", lambda *args, **kwargs: login_calls.append(args))
+    monkeypatch.setattr(
+        api,
+        "_start_task",
+        lambda command, func, params, *args, **kwargs: {
+            "task_id": "task-rt",
+            "command": command,
+            "params": params,
+            "result": func(*args, **kwargs),
+        },
+    )
+
+    result = api.post_accounts_rt_recovery_start(api.RtRecoveryStartParams(emails=["dead@example.com"]))
+
+    assert result["result"]["completed"] == 0
+    assert result["result"]["deactivated"] == 1
+    assert login_calls == []
+    assert removed == ["removed:dead@example.com"]
+    assert accounts_data[0]["status"] == "unavailable"
+    assert accounts_data[0]["mail_account_id"] == "mailbox-new"
+
+
+def test_post_accounts_rt_recovery_start_marks_oauth_deactivated_and_releases_team(monkeypatch):
+    accounts_data = [
+        {
+            "email": "oauth-dead@example.com",
+            "registration_status": "registered",
+            "status": "standby",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 7,
+        }
+    ]
+    saved = []
+    removed = []
+
+    class FakeMoEmailClient:
+        def login(self):
+            return "ok"
+
+        def recreate_permanent_email(self, email):
+            assert email == "oauth-dead@example.com"
+            return {"email": email, "account_id": "mailbox-existing", "raw_account": {}, "reused": True}
+
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: accounts_data)
+    monkeypatch.setattr("autoteam.accounts.save_accounts", lambda data: saved.append(list(data)))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(api, "_run_with_chatgpt_session", lambda callback: callback("chatgpt"))
+    monkeypatch.setattr("autoteam.mo_email.MoEmailClient", FakeMoEmailClient)
+    monkeypatch.setattr(
+        "autoteam.account_deactivation.check_deactivated_mail",
+        lambda **kwargs: {"status": "ok", "matched": 0, "errors": [], "matches": []},
+    )
+    monkeypatch.setattr(
+        "autoteam.manager.remove_from_team",
+        lambda _chatgpt, email, **kwargs: removed.append((email, kwargs)) or f"removed:{email}",
+    )
+    monkeypatch.setattr(
+        "autoteam.account_oauth.run_account_oauth_login",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("OpenAI OAuth failed: deleted/deactivated account_deactivated")
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "_start_task",
+        lambda command, func, params, *args, **kwargs: {
+            "task_id": "task-rt",
+            "command": command,
+            "params": params,
+            "result": func(*args, **kwargs),
+        },
+    )
+
+    result = api.post_accounts_rt_recovery_start(
+        api.RtRecoveryStartParams(emails=["oauth-dead@example.com"])
+    )
+
+    assert result["result"]["completed"] == 0
+    assert result["result"]["failed"] == 0
+    assert result["result"]["deactivated"] == 1
+    assert result["result"]["results"][0]["status"] == "deactivated"
+    assert removed == [("oauth-dead@example.com", {"return_status": True})]
+    assert accounts_data[0]["status"] == "unavailable"
+    assert accounts_data[0]["health_status"] == "deactivated"
+    assert accounts_data[0]["sync_disabled"] is True
+    assert accounts_data[0]["unavailable_reason"] == "account_deactivated"
+    assert accounts_data[0]["seat_release"]["result"] == "removed:oauth-dead@example.com"
+    assert accounts_data[0]["last_rt_recovery_error"] == "OpenAI OAuth failed: deleted/deactivated account_deactivated"
+    assert saved
+
+
+def test_post_accounts_rt_recovery_start_keeps_regular_oauth_errors_failed(monkeypatch):
+    accounts_data = [
+        {
+            "email": "oauth-phone@example.com",
+            "registration_status": "registered",
+            "status": "standby",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 7,
+        }
+    ]
+    saved = []
+    removed = []
+
+    class FakeMoEmailClient:
+        def login(self):
+            return "ok"
+
+        def recreate_permanent_email(self, email):
+            assert email == "oauth-phone@example.com"
+            return {"email": email, "account_id": "mailbox-existing", "raw_account": {}, "reused": True}
+
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: accounts_data)
+    monkeypatch.setattr("autoteam.accounts.save_accounts", lambda data: saved.append(list(data)))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(api, "_run_with_chatgpt_session", lambda callback: callback("chatgpt"))
+    monkeypatch.setattr("autoteam.mo_email.MoEmailClient", FakeMoEmailClient)
+    monkeypatch.setattr(
+        "autoteam.account_deactivation.check_deactivated_mail",
+        lambda **kwargs: {"status": "ok", "matched": 0, "errors": [], "matches": []},
+    )
+    monkeypatch.setattr(
+        "autoteam.manager.remove_from_team",
+        lambda _chatgpt, email, **kwargs: removed.append((email, kwargs)) or f"removed:{email}",
+    )
+    monkeypatch.setattr(
+        "autoteam.account_oauth.run_account_oauth_login",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("OpenAI OAuth failed: phone_required network retry exhausted")
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "_start_task",
+        lambda command, func, params, *args, **kwargs: {
+            "task_id": "task-rt",
+            "command": command,
+            "params": params,
+            "result": func(*args, **kwargs),
+        },
+    )
+
+    result = api.post_accounts_rt_recovery_start(
+        api.RtRecoveryStartParams(emails=["oauth-phone@example.com"])
+    )
+
+    assert result["result"]["completed"] == 0
+    assert result["result"]["failed"] == 1
+    assert result["result"]["deactivated"] == 0
+    assert result["result"]["results"][0]["status"] == "failed"
+    assert removed == []
+    assert accounts_data[0]["status"] == "standby"
+    assert accounts_data[0].get("health_status") != "deactivated"
+    assert accounts_data[0].get("unavailable_reason") != "account_deactivated"
+    assert accounts_data[0].get("sync_disabled") is not True
+    assert accounts_data[0]["last_rt_recovery_error"] == "OpenAI OAuth failed: phone_required network retry exhausted"
+    assert saved
+
+
+def test_post_accounts_rt_recovery_start_records_mailbox_recreate_failure(monkeypatch):
+    accounts_data = [
+        {
+            "email": "fail@example.com",
+            "registration_status": "registered",
+            "status": "standby",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 7,
+        }
+    ]
+    saved = []
+    login_calls = []
+
+    class FakeMoEmailClient:
+        def login(self):
+            return "ok"
+
+        def recreate_permanent_email(self, email):
+            raise RuntimeError("mailbox recreate failed")
+
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: accounts_data)
+    monkeypatch.setattr("autoteam.accounts.save_accounts", lambda data: saved.append(list(data)))
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr("autoteam.mo_email.MoEmailClient", FakeMoEmailClient)
+    monkeypatch.setattr("autoteam.account_oauth.run_account_oauth_login", lambda *args, **kwargs: login_calls.append(args))
+    monkeypatch.setattr(
+        api,
+        "_start_task",
+        lambda command, func, params, *args, **kwargs: {
+            "task_id": "task-rt",
+            "command": command,
+            "params": params,
+            "result": func(*args, **kwargs),
+        },
+    )
+
+    result = api.post_accounts_rt_recovery_start(api.RtRecoveryStartParams(emails=["fail@example.com"]))
+
+    assert result["result"]["failed"] == 1
+    assert "mailbox recreate failed" in result["result"]["results"][0]["error"]
+    assert login_calls == []
+    assert accounts_data[0]["last_rt_recovery_error"] == "mailbox recreate failed"
+    assert accounts_data[0]["last_rt_recovery_failed_at"]
+    assert saved
+
+
+def test_post_accounts_rt_recovery_start_rejects_sold_and_not_registered_before_task(monkeypatch):
+    accounts_data = [
+        {
+            "email": "sold@example.com",
+            "registration_status": "registered",
+            "status": "sold",
+            "usage_status": "sold",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 7,
+        },
+        {
+            "email": "new@example.com",
+            "registration_status": "planned",
+            "status": "pending",
+            "password": "secret",
+            "mail_provider": "mo_email",
+            "mail_account_id": 8,
+        },
+    ]
+
+    monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: accounts_data)
+    monkeypatch.setattr(api, "_is_main_account_email", lambda _email: False)
+    monkeypatch.setattr(api, "_start_task", lambda *args, **kwargs: pytest.fail("RT recovery task should not start"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        api.post_accounts_rt_recovery_start(
+            api.RtRecoveryStartParams(emails=["sold@example.com", "new@example.com"])
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "sold@example.com: 已售账号不自动恢复" in exc_info.value.detail
+    assert "new@example.com: 注册未完成" in exc_info.value.detail
+
+
+def test_rt_recovery_retryable_error_classification_preserves_account_semantics():
+    semantic_errors = [
+        RuntimeError("account_deactivated after proxy retry"),
+        RuntimeError("deleted account network retry exhausted"),
+        RuntimeError("OpenAI OAuth failed: phone_required network retry exhausted"),
+        RuntimeError("HTTP 401 from authorize/continue through proxy"),
+        RuntimeError("401 Client Error: Unauthorized for url"),
+        RuntimeError("invalid_username_or_password while proxy is slow"),
+        RuntimeError("password_rejected after read timeout"),
+        RuntimeError("login_rejected after proxy failure"),
+        RuntimeError("账号未注册 network timeout"),
+        RuntimeError("注册未完成 proxy failure"),
+    ]
+
+    for exc in semantic_errors:
+        assert api._is_rt_recovery_retryable_oauth_error(exc) is False
+
+    assert api._is_rt_recovery_retryable_oauth_error(requests.exceptions.ProxyError("proxy down")) is True
+    assert api._is_rt_recovery_retryable_oauth_error(requests.exceptions.ReadTimeout("read timeout")) is True
+
+
+def test_rt_recovery_defaults_are_fast_fail_when_env_unset(monkeypatch):
+    for name in (
+        "RT_RECOVERY_OAUTH_TIMEOUT_SECONDS",
+        "RT_RECOVERY_OAUTH_RETRY_ATTEMPTS",
+        "RT_RECOVERY_STEP_TIMEOUT_SECONDS",
+        "RT_RECOVERY_STEP_RETRY_ATTEMPTS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert api._rt_recovery_oauth_timeout_seconds() == 60.0
+    assert api._rt_recovery_oauth_retry_attempts() == 1
+    assert api._rt_recovery_step_timeout_seconds() == 60.0
+    assert api._rt_recovery_step_retry_attempts() == 1
+
+
+def test_rt_recovery_defaults_remain_env_overridable(monkeypatch):
+    monkeypatch.delenv("RT_RECOVERY_STEP_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("RT_RECOVERY_STEP_RETRY_ATTEMPTS", raising=False)
+    monkeypatch.setenv("RT_RECOVERY_OAUTH_TIMEOUT_SECONDS", "180")
+    monkeypatch.setenv("RT_RECOVERY_OAUTH_RETRY_ATTEMPTS", "4")
+
+    assert api._rt_recovery_oauth_timeout_seconds() == 180.0
+    assert api._rt_recovery_oauth_retry_attempts() == 4
+    assert api._rt_recovery_step_timeout_seconds() == 180.0
+    assert api._rt_recovery_step_retry_attempts() == 4
+
+    monkeypatch.setenv("RT_RECOVERY_STEP_TIMEOUT_SECONDS", "30")
+    monkeypatch.setenv("RT_RECOVERY_STEP_RETRY_ATTEMPTS", "2")
+    assert api._rt_recovery_step_timeout_seconds() == 30.0
+    assert api._rt_recovery_step_retry_attempts() == 2
 
 
 def test_post_account_usage_status_allows_normal_inventory_only(monkeypatch):

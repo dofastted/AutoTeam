@@ -15,10 +15,10 @@ body,
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   background:
-    radial-gradient(circle at top left, rgba(59, 130, 246, 0.22), transparent 28%),
-    radial-gradient(circle at top right, rgba(14, 165, 233, 0.18), transparent 24%),
-    radial-gradient(circle at bottom center, rgba(168, 85, 247, 0.14), transparent 26%),
-    linear-gradient(180deg, #020617 0%, #0b1120 48%, #020617 100%);
+    radial-gradient(ellipse at top, rgba(94, 106, 210, 0.18), transparent 34%),
+    radial-gradient(circle at left 20%, rgba(20, 184, 166, 0.1), transparent 24%),
+    radial-gradient(circle at right 82%, rgba(244, 114, 182, 0.08), transparent 24%),
+    linear-gradient(180deg, #050506 0%, #0a0a0c 48%, #020203 100%);
   color: #e5eefb;
 }
 
@@ -63,7 +63,7 @@ body::before {
 
 @layer components {
   .glass-card {
-    @apply rounded-2xl border border-white/10 bg-slate-950/65 shadow-[0_20px_60px_-30px_rgba(59,130,246,0.38)] backdrop-blur-xl;
+    @apply rounded-2xl border border-white/10 bg-slate-950/65 shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_18px_50px_-30px_rgba(94,106,210,0.52),0_26px_80px_-44px_rgba(0,0,0,0.92)] backdrop-blur-xl;
   }
 
   .glass-card-soft {
@@ -71,7 +71,7 @@ body::before {
   }
 
   .section-heading {
-    @apply text-xl font-semibold tracking-tight text-white;
+    @apply text-xl font-semibold text-white;
   }
 
   .section-subtitle {
@@ -79,23 +79,23 @@ body::before {
   }
 
   .input-dark {
-    @apply w-full rounded-xl border border-white/10 bg-slate-900/80 px-3 py-2.5 text-sm text-white placeholder:text-slate-500 focus:border-blue-400/50 focus:outline-none focus:ring-2 focus:ring-blue-500/20;
+    @apply w-full rounded-xl border border-white/10 bg-slate-900/80 px-3 py-2.5 text-sm text-white placeholder:text-slate-500 focus:border-indigo-400/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/25;
   }
 
   .textarea-dark {
-    @apply w-full rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-sm text-white placeholder:text-slate-500 focus:border-blue-400/50 focus:outline-none focus:ring-2 focus:ring-blue-500/20;
+    @apply w-full rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-sm text-white placeholder:text-slate-500 focus:border-indigo-400/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/25;
   }
 
   .btn-primary {
-    @apply inline-flex items-center justify-center rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-4 py-2 text-sm font-medium text-white shadow-[0_12px_32px_-12px_rgba(59,130,246,0.8)] transition hover:from-blue-500 hover:to-cyan-400 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none;
+    @apply inline-flex items-center justify-center rounded-xl bg-[#5E6AD2] px-4 py-2 text-sm font-medium text-white shadow-[0_0_0_1px_rgba(94,106,210,0.5),0_12px_34px_-16px_rgba(94,106,210,0.95),inset_0_1px_0_rgba(255,255,255,0.18)] transition hover:bg-[#6872D9] focus:outline-none focus:ring-2 focus:ring-indigo-400/60 focus:ring-offset-2 focus:ring-offset-[#050506] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none;
   }
 
   .btn-secondary {
-    @apply inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-white/15 hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-indigo-400/50 focus:ring-offset-2 focus:ring-offset-[#050506] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .btn-danger {
-    @apply inline-flex items-center justify-center rounded-xl border border-rose-500/20 bg-rose-500/10 px-4 py-2 text-sm font-medium text-rose-200 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex items-center justify-center rounded-xl border border-rose-500/20 bg-rose-500/10 px-4 py-2 text-sm font-medium text-rose-200 transition hover:bg-rose-500/20 focus:outline-none focus:ring-2 focus:ring-rose-400/50 focus:ring-offset-2 focus:ring-offset-[#050506] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .pill-tab {
@@ -108,5 +108,110 @@ body::before {
 
   .status-badge {
     @apply inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-slate-300;
+  }
+
+  .account-workspace {
+    @apply relative isolate overflow-hidden rounded-2xl border border-white/[0.06] bg-[#050506]/95 p-3 shadow-[0_0_0_1px_rgba(255,255,255,0.03),0_28px_90px_-56px_rgba(0,0,0,0.95)] md:p-5;
+  }
+
+  .account-workspace__ambient {
+    @apply pointer-events-none absolute inset-0 -z-10;
+    background:
+      radial-gradient(ellipse at top, rgba(94, 106, 210, 0.2), transparent 34%),
+      linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px),
+      linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01));
+    background-size: auto, 64px 64px, 64px 64px, auto;
+  }
+
+  .account-workspace__hero {
+    @apply relative mb-4 flex flex-col gap-5 overflow-hidden rounded-2xl border border-white/[0.06] bg-gradient-to-b from-white/[0.08] to-white/[0.02] px-5 py-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] lg:flex-row lg:items-end lg:justify-between;
+  }
+
+  .account-hero-actions {
+    @apply grid w-full shrink-0 gap-3 sm:grid-cols-[1fr_auto] lg:w-[360px] lg:grid-cols-1;
+  }
+
+  .account-workspace__grid {
+    @apply grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)];
+  }
+
+  .account-control-rail {
+    @apply space-y-5 rounded-2xl border border-white/[0.06] bg-white/[0.035] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-xl;
+  }
+
+  .account-view-button {
+    @apply flex w-full items-start gap-3 rounded-xl border border-transparent px-3 py-3 text-left text-slate-400 transition hover:border-white/10 hover:bg-white/[0.05] hover:text-white focus:outline-none focus:ring-2 focus:ring-indigo-400/50 focus:ring-offset-2 focus:ring-offset-[#050506];
+  }
+
+  .account-view-button--active {
+    @apply border-indigo-400/30 bg-indigo-500/15 text-white shadow-[0_0_24px_-18px_rgba(94,106,210,0.9),inset_0_1px_0_rgba(255,255,255,0.08)];
+  }
+
+  .account-view-button__icon {
+    @apply flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-white/[0.05] font-mono text-xs text-slate-300;
+  }
+
+  .account-category-button {
+    @apply flex w-full items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.03] px-3 py-2.5 text-left text-slate-400 transition hover:border-white/10 hover:bg-white/[0.06] hover:text-white focus:outline-none focus:ring-2 focus:ring-indigo-400/50 focus:ring-offset-2 focus:ring-offset-[#050506];
+  }
+
+  .account-category-button--active {
+    @apply border-indigo-400/30 bg-indigo-500/15 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.08)];
+  }
+
+  .account-category-button__dot {
+    @apply h-2.5 w-2.5 shrink-0 rounded-full shadow-[0_0_12px_currentColor];
+  }
+
+  .account-boundary-card {
+    @apply rounded-2xl border border-white/[0.06] bg-black/20 px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)];
+  }
+
+  .account-panel-switcher {
+    @apply grid gap-2 rounded-2xl border border-white/[0.06] bg-white/[0.035] p-1.5 backdrop-blur sm:inline-grid sm:grid-cols-3;
+  }
+
+  .account-panel-tab {
+    @apply rounded-xl px-4 py-2 text-sm font-medium text-slate-400 transition hover:bg-white/[0.06] hover:text-white focus:outline-none focus:ring-2 focus:ring-indigo-400/50 focus:ring-offset-2 focus:ring-offset-[#050506];
+  }
+
+  .account-panel-tab--active {
+    @apply bg-indigo-500/15 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.08)];
+  }
+
+  .account-section-head {
+    @apply flex flex-col gap-3 rounded-2xl border border-white/[0.06] bg-gradient-to-b from-white/[0.07] to-white/[0.025] px-5 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] lg:flex-row lg:items-start lg:justify-between;
+  }
+
+  .account-section-kicker {
+    @apply font-mono text-xs uppercase text-indigo-200/80;
+  }
+
+  .account-section-title {
+    @apply mt-1 text-xl font-semibold text-white;
+  }
+
+  .account-section-copy {
+    @apply mt-2 max-w-3xl text-sm leading-6 text-slate-400;
+  }
+
+  .account-section-badge {
+    @apply inline-flex w-fit shrink-0 rounded-full border border-indigo-300/20 bg-indigo-500/10 px-3 py-1 text-xs font-medium text-indigo-100;
+  }
+
+  .account-code {
+    @apply rounded-md border border-white/10 bg-white/[0.06] px-1.5 py-0.5 font-mono text-xs text-slate-200;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
   }
 }

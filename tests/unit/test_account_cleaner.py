@@ -1,5 +1,5 @@
-import re
 import json
+import re
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -525,7 +525,8 @@ def test_cleanup_accounts_apply_true_creates_backup_and_rewrites_file(tmp_path):
     written = json.loads(accounts_file.read_text(encoding="utf-8"))
     assert isinstance(written, list)
     assert written[0]["schema_version"] == 2
-    assert written[0]["category"] == "registered"
+    assert written[0]["category"] == "inventory"
+    assert written[0]["usage_status"] == "inventory"
     assert written[0]["credentials"]["oauth_rt"]["file"] == str(oauth_file)
 
 
@@ -612,11 +613,32 @@ def test_cleaner_dry_run_reports_missing_password_missing_rt_and_session_auth_fi
 
     scan = report["scan"]
     assert scan["summary"]["missing_password"] == 1
-    assert scan["summary"]["missing_rt_auth_file"] == 1
+    assert scan["summary"]["missing_rt_auth_file"] == 0
     assert scan["summary"]["session_used_as_auth_file"] == 1
     assert scan["issues"]["missing_password"][0]["email"] == "missing-password@example.com"
-    assert scan["issues"]["missing_rt_auth_file"][0]["email"] == "session-only@example.com"
     assert scan["issues"]["session_used_as_auth_file"][0]["credential_field"] == "auth_file"
+
+
+def test_scan_accounts_reports_raw_inventory_missing_uploadable_rt(tmp_path):
+    session_file = tmp_path / "codex-session-only@example.com-team-01-session.json"
+    session_file.write_text(json.dumps({"credential_source": "chatgpt_session"}), encoding="utf-8")
+
+    report = account_cleaner.scan_accounts(
+        [
+            {
+                "id": "session-only",
+                "email": "session-only@example.com",
+                "registration_status": "registered",
+                "health_status": "valid",
+                "usage_status": "inventory",
+                "password": "pw-session",
+                "auth_file": str(session_file),
+            }
+        ]
+    )
+
+    assert report["summary"]["missing_rt_auth_file"] == 1
+    assert report["issues"]["missing_rt_auth_file"][0]["email"] == "session-only@example.com"
 
 
 def test_cleaner_sold_sync_enabled_dry_run_and_apply_fix(tmp_path):

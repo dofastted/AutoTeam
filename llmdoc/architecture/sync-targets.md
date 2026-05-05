@@ -105,6 +105,13 @@ HTTP 入口：
 - `/api/accounts/mark-unusable/account-deactivated`: 按 `auths/unusable/account_deactivated` 标记本地账号不可用。
 - `/api/sync/sub2api`: 只上传本地 OAuth RT 文件到 Sub2API，账号池操作页和同步中心的 Sub2API 推送按钮使用这个入口。
 
+RT 恢复入口不属于远端同步入口：
+
+- `/api/accounts/rt-recovery/scan`: 只扫描缺 RT、401 需要重取 RT、已失效和不可恢复账号，不写远端。
+- `/api/accounts/rt-recovery/start`: 人工启动恢复任务。流程会先重建 MoEmail、查 Deactivated 邮件，命中则本地标记失效并释放 Team 席位；未命中才获取 OAuth RT。该入口只写本地账号和 auth 文件，不自动上传 CPA / Sub2API。
+- `/api/accounts/rt-recovery/mark-deactivated`: 把扫描出的 deactivated 账号标记不可用，并按实现参数释放 Team 席位；它不是 CPA / Sub2API 删除入口。
+- `/api/accounts/{email}/rt-recovery`: 单账号恢复入口，边界与批量 start 相同。
+
 反向同步 `sync_from_cpa` 是恢复入口：
 
 - 下载 CPA 中的 `codex-*.json`。

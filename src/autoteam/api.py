@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import threading
 import time
 import uuid
@@ -20,6 +21,13 @@ from autoteam.config import API_KEY
 from autoteam.textio import parse_env_line, read_text, write_text
 
 logger = logging.getLogger(__name__)
+
+RT_RECOVERY_OAUTH_TIMEOUT_SECONDS_ENV = "RT_RECOVERY_OAUTH_TIMEOUT_SECONDS"
+RT_RECOVERY_OAUTH_RETRY_ATTEMPTS_ENV = "RT_RECOVERY_OAUTH_RETRY_ATTEMPTS"
+RT_RECOVERY_STEP_TIMEOUT_SECONDS_ENV = "RT_RECOVERY_STEP_TIMEOUT_SECONDS"
+RT_RECOVERY_STEP_RETRY_ATTEMPTS_ENV = "RT_RECOVERY_STEP_RETRY_ATTEMPTS"
+DEFAULT_RT_RECOVERY_OAUTH_TIMEOUT_SECONDS = 60.0
+DEFAULT_RT_RECOVERY_OAUTH_RETRY_ATTEMPTS = 1
 
 app = FastAPI(
     title="AutoTeam API",
@@ -194,6 +202,10 @@ _ALL_RUNTIME_ENV_KEYS = [
     "OUTBOUND_PROXY_BYPASS",
     "OUTBOUND_PROXY_STRATEGY",
     "OUTBOUND_PROXY_FAILOVER",
+    "RT_RECOVERY_STEP_TIMEOUT_SECONDS",
+    "RT_RECOVERY_STEP_RETRY_ATTEMPTS",
+    "RT_RECOVERY_OAUTH_TIMEOUT_SECONDS",
+    "RT_RECOVERY_OAUTH_RETRY_ATTEMPTS",
     "PROXY_NODE_ENABLED",
     "PROXY_NODE_PROVIDER",
     "PROXY_NODE_API_KEY",
@@ -1251,6 +1263,522 @@ def _start_task(command: str, func, params: dict, *args, **kwargs) -> dict:
     return task
 
 
+class RtRecoveryStepTimeoutError(TimeoutError):
+    """Raised when one account RT recovery step exceeds the configured limit."""
+
+
+class RtRecoveryOauthTimeoutError(RtRecoveryStepTimeoutError):
+    """Raised when one account OAuth recovery exceeds the configured limit."""
+
+
+def _env_float(name: str, default: float, *, minimum: float | None = None) -> float:
+    raw = os.environ.get(name, "")
+    try:
+        value = float(str(raw).strip()) if str(raw).strip() else float(default)
+    except (TypeError, ValueError):
+        value = float(default)
+    if minimum is not None:
+        value = max(float(minimum), value)
+    return value
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw = os.environ.get(name, "")
+    try:
+        value = int(str(raw).strip()) if str(raw).strip() else int(default)
+    except (TypeError, ValueError):
+        value = int(default)
+    if minimum is not None:
+        value = max(int(minimum), value)
+    if maximum is not None:
+        value = min(int(maximum), value)
+    return value
+
+
+def _rt_recovery_oauth_timeout_seconds() -> float:
+    return _env_float(
+        RT_RECOVERY_OAUTH_TIMEOUT_SECONDS_ENV,
+        DEFAULT_RT_RECOVERY_OAUTH_TIMEOUT_SECONDS,
+        minimum=0.01,
+    )
+
+
+def _rt_recovery_oauth_retry_attempts() -> int:
+    return _env_int(
+        RT_RECOVERY_OAUTH_RETRY_ATTEMPTS_ENV,
+        DEFAULT_RT_RECOVERY_OAUTH_RETRY_ATTEMPTS,
+        minimum=1,
+        maximum=10,
+    )
+
+
+def _rt_recovery_step_timeout_seconds() -> float:
+    return _env_float(
+        RT_RECOVERY_STEP_TIMEOUT_SECONDS_ENV,
+        _rt_recovery_oauth_timeout_seconds(),
+        minimum=0.01,
+    )
+
+
+def _rt_recovery_step_retry_attempts() -> int:
+    return _env_int(
+        RT_RECOVERY_STEP_RETRY_ATTEMPTS_ENV,
+        _rt_recovery_oauth_retry_attempts(),
+        minimum=1,
+        maximum=10,
+    )
+
+
+def _is_rt_recovery_account_semantic_error(exc: BaseException) -> bool:
+    text = str(exc or "").strip().lower()
+    if not text:
+        return False
+    semantic_markers = (
+        "account_deactivated",
+        "deactivated",
+        "deleted",
+        "phone_required",
+        "add-phone",
+        "add_phone",
+        "手机号",
+        "http 401",
+        "http/1.1 401",
+        "http/2 401",
+        "401 client error",
+        "status=401",
+        "status_code=401",
+        "status 401",
+        "401 unauthorized",
+        "unauthorized",
+        "invalid_username_or_password",
+        "invalid username or password",
+        "invalid username/password",
+        "invalid password",
+        "password_rejected",
+        "password rejected",
+        "login_rejected",
+        "login rejected",
+        "no_valid_organizations",
+        "未进入有效组织",
+        "未注册",
+        "注册未完成",
+    )
+    return any(marker in text for marker in semantic_markers)
+
+
+def _is_rt_recovery_retryable_step_error(exc: BaseException) -> bool:
+    if isinstance(exc, RtRecoveryStepTimeoutError):
+        return True
+    if _is_rt_recovery_account_semantic_error(exc):
+        return False
+
+    try:
+        import requests
+    except Exception:  # pragma: no cover - requests is a runtime dependency
+        requests = None
+
+    if requests is not None and isinstance(
+        exc,
+        (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.ConnectTimeout,
+            requests.exceptions.ProxyError,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.Timeout,
+        ),
+    ):
+        return True
+
+    text = str(exc or "").strip().lower()
+    retryable_markers = (
+        "timeout",
+        "timed out",
+        "超时",
+        "proxy",
+        "代理",
+        "socks",
+        "connection reset",
+        "connection aborted",
+        "connection refused",
+        "connection error",
+        "connect timeout",
+        "read timeout",
+        "network",
+        "temporary failure",
+        "name resolution",
+        "dns",
+    )
+    return any(marker in text for marker in retryable_markers)
+
+
+def _is_rt_recovery_retryable_oauth_error(exc: BaseException) -> bool:
+    return _is_rt_recovery_retryable_step_error(exc)
+
+
+def _run_rt_recovery_step_attempt(
+    func,
+    *args,
+    step_label: str,
+    timeout_seconds: float,
+    proxy_url: str,
+    timeout_error_cls: type[RtRecoveryStepTimeoutError] = RtRecoveryStepTimeoutError,
+    **kwargs,
+):
+    result_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+
+    def _target():
+        try:
+            with outbound_proxy.task_proxy_context(proxy_url):
+                result_queue.put(("ok", func(*args, **kwargs)))
+        except BaseException as exc:
+            result_queue.put(("error", exc))
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    thread.join(timeout=max(0.01, float(timeout_seconds or DEFAULT_RT_RECOVERY_OAUTH_TIMEOUT_SECONDS)))
+    if thread.is_alive():
+        raise timeout_error_cls(f"{step_label}超过 {timeout_seconds:g} 秒")
+    status, payload = result_queue.get()
+    if status == "ok":
+        return payload
+    raise payload
+
+
+def _run_rt_recovery_step_with_retry(
+    func,
+    email: str,
+    *,
+    step_name: str,
+    step_label: str,
+    attempts: int | None = None,
+    timeout_seconds: float | None = None,
+    retryable_error_checker=None,
+    timeout_error_cls: type[RtRecoveryStepTimeoutError] = RtRecoveryStepTimeoutError,
+    result_validator=None,
+    **kwargs,
+):
+    attempts = attempts if attempts is not None else _rt_recovery_step_retry_attempts()
+    timeout_seconds = timeout_seconds if timeout_seconds is not None else _rt_recovery_step_timeout_seconds()
+    retryable_error_checker = retryable_error_checker or _is_rt_recovery_retryable_step_error
+    errors: list[str] = []
+
+    for attempt in range(1, attempts + 1):
+        pool = ["" if item == "direct" else item for item in outbound_proxy.configured_proxy_pool()]
+        current_proxy = outbound_proxy.current_proxy_url()
+        proxy_before = current_proxy if current_proxy in pool else outbound_proxy.select_proxy()
+        proxy_before = proxy_before or "direct"
+        try:
+            result = _run_rt_recovery_step_attempt(
+                func,
+                email,
+                step_label=step_label,
+                timeout_seconds=timeout_seconds,
+                proxy_url="" if proxy_before == "direct" else proxy_before,
+                timeout_error_cls=timeout_error_cls,
+                **kwargs,
+            )
+            if result_validator:
+                result_validator(result)
+            return result
+        except BaseException as exc:
+            if isinstance(exc, SystemExit | KeyboardInterrupt):
+                raise
+            error_text = str(exc) or exc.__class__.__name__
+            errors.append(error_text)
+            if not retryable_error_checker(exc) or attempt >= attempts:
+                if len(errors) > 1:
+                    raise RuntimeError(f"{error_text}; retry_errors={errors}") from exc
+                raise
+            next_proxy = outbound_proxy.rotate_task_proxy() or "direct"
+            logger.warning(
+                "[RT恢复] %s 网络错误，切换出口代理后重试 email=%s attempt=%s/%s proxy=%s -> %s error=%s",
+                step_name,
+                email,
+                attempt,
+                attempts,
+                proxy_before,
+                next_proxy,
+                error_text,
+            )
+
+    raise RuntimeError(f"{step_name}失败: {errors[-1] if errors else 'unknown'}")
+
+
+def _run_rt_recovery_oauth_attempt(func, *args, timeout_seconds: float, proxy_url: str, **kwargs):
+    return _run_rt_recovery_step_attempt(
+        func,
+        *args,
+        step_label="OAuth 恢复",
+        timeout_seconds=timeout_seconds,
+        proxy_url=proxy_url,
+        timeout_error_cls=RtRecoveryOauthTimeoutError,
+        **kwargs,
+    )
+
+
+def _run_rt_recovery_oauth_with_retry(func, email: str, **kwargs) -> dict:
+    def _validate_oauth_result(result):
+        if not isinstance(result, dict):
+            raise RuntimeError(f"OAuth 恢复返回异常结果: {type(result).__name__}")
+
+    return _run_rt_recovery_step_with_retry(
+        func,
+        email,
+        step_name="OAuth 恢复",
+        step_label="OAuth 恢复",
+        attempts=_rt_recovery_oauth_retry_attempts(),
+        timeout_seconds=_rt_recovery_oauth_timeout_seconds(),
+        retryable_error_checker=_is_rt_recovery_retryable_oauth_error,
+        timeout_error_cls=RtRecoveryOauthTimeoutError,
+        result_validator=_validate_oauth_result,
+        **kwargs,
+    )
+
+
+def _start_rt_recovery_task(
+    emails: list[str],
+    *,
+    force: bool,
+    check_quota_snapshot: bool,
+    command: str,
+) -> dict:
+    """Start a task that reacquires OAuth RT files without remote upload."""
+    from autoteam import accounts
+    from autoteam.account_rt_recovery import (
+        classify_rt_recovery_account,
+        prepare_account_for_rt_recovery,
+    )
+
+    normalized = [_normalized_email(email) for email in emails if _normalized_email(email)]
+    if not normalized:
+        raise HTTPException(status_code=400, detail="email 不能为空")
+    if any(_is_main_account_email(email) for email in normalized):
+        raise HTTPException(status_code=400, detail="主号不属于账号池 RT 恢复对象")
+
+    account_items = accounts.load_accounts()
+    missing = [email for email in normalized if not accounts.find_account(account_items, email)]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"账号不存在: {', '.join(missing[:5])}")
+
+    blocked = []
+    for email in normalized:
+        acc = accounts.find_account(account_items, email)
+        scan = classify_rt_recovery_account(acc)
+        if not scan["recoverable"]:
+            blocked.append(f"{email}: {scan['reason']}")
+        elif scan["sync_disabled"] and not force:
+            blocked.append(f"{email}: 账号已停止同步，恢复时需要 force=true")
+    if blocked:
+        raise HTTPException(status_code=400, detail="；".join(blocked[:5]))
+
+    def _run():
+        from autoteam.account_deactivation import check_deactivated_mail
+        from autoteam.account_models import HEALTH_DEACTIVATED, USAGE_INVENTORY
+        from autoteam.account_oauth import run_account_oauth_login
+        from autoteam.mail_provider import MAIL_PROVIDER_MO_EMAIL, build_account_mail_fields, get_account_mail_provider
+        from autoteam.manager import remove_from_team
+        from autoteam.mo_email import MoEmailClient
+
+        results = []
+        mo_email_client = None
+
+        def _record_rt_recovery_error(item_email: str, message: str) -> None:
+            refreshed_items = accounts.load_accounts()
+            refreshed = accounts.find_account(refreshed_items, item_email)
+            if refreshed is not None:
+                refreshed["last_rt_recovery_error"] = message
+                refreshed["last_rt_recovery_failed_at"] = int(time.time())
+                accounts.save_accounts(refreshed_items)
+
+        def _is_oauth_deactivated_error(exc: Exception) -> bool:
+            text = str(exc or "").strip().lower()
+            if not text:
+                return False
+            return any(marker in text for marker in ("account_deactivated", "deactivated", "deleted"))
+
+        def _mark_oauth_deactivated(item_email: str, message: str) -> tuple[dict | None, dict]:
+            refreshed_items = accounts.load_accounts()
+            refreshed = accounts.find_account(refreshed_items, item_email)
+            now = time.time()
+            release_result = {"attempted": False, "result": None, "error": None}
+            if refreshed is None:
+                return None, release_result
+
+            refreshed["status"] = accounts.STATUS_UNAVAILABLE
+            refreshed["health_status"] = HEALTH_DEACTIVATED
+            refreshed["invalid_reason"] = "account_deactivated"
+            refreshed["sync_disabled"] = True
+            refreshed["unavailable_reason"] = "account_deactivated"
+            refreshed["unavailable_at"] = now
+            refreshed["invalid_at"] = now
+            refreshed["updated_at"] = now
+            refreshed["last_rt_recovery_error"] = message
+            refreshed["last_rt_recovery_failed_at"] = int(now)
+            if str(refreshed.get("usage_status") or "").strip().lower() == USAGE_INVENTORY:
+                refreshed["usage_status"] = "normal"
+
+            try:
+                release_result["attempted"] = True
+                release_result["result"] = _team_remover_factory(remove_from_team)(item_email, refreshed)
+            except Exception as release_exc:
+                release_result["error"] = str(release_exc)
+            refreshed["seat_release"] = release_result
+            accounts.save_accounts(refreshed_items)
+            return refreshed, release_result
+
+        for item_email in normalized:
+            oauth_started = False
+            latest_items = accounts.load_accounts()
+            latest = accounts.find_account(latest_items, item_email)
+            if not latest:
+                results.append({"email": item_email, "status": "skipped", "error": "账号不存在"})
+                continue
+
+            prep = prepare_account_for_rt_recovery(latest, force=force)
+            if prep.get("reason"):
+                results.append(
+                    {
+                        "email": item_email,
+                        "status": "skipped",
+                        "category": prep.get("category"),
+                        "error": prep.get("reason"),
+                    }
+                )
+                continue
+            if prep.get("changed"):
+                accounts.save_accounts(latest_items)
+
+            try:
+                logger.info("[RT恢复] 开始处理账号: %s", item_email)
+                if get_account_mail_provider(latest) != MAIL_PROVIDER_MO_EMAIL:
+                    raise RuntimeError("RT 恢复只支持 MoEmail 邮箱重建")
+                if mo_email_client is None:
+                    mo_email_client = MoEmailClient()
+                    mo_email_client.login()
+
+                logger.info("[RT恢复] 重建永久邮箱: %s", item_email)
+                recreated = _run_rt_recovery_step_with_retry(
+                    mo_email_client.recreate_permanent_email,
+                    item_email,
+                    step_name="邮箱重建",
+                    step_label="邮箱重建",
+                )
+                latest_items = accounts.load_accounts()
+                latest = accounts.find_account(latest_items, item_email)
+                if not latest:
+                    results.append({"email": item_email, "status": "skipped", "error": "账号不存在"})
+                    continue
+                latest.update(build_account_mail_fields(recreated.get("account_id"), MAIL_PROVIDER_MO_EMAIL))
+                latest["mailbox_recreated_at"] = int(time.time())
+                latest["mailbox_recreate_result"] = {
+                    "provider": MAIL_PROVIDER_MO_EMAIL,
+                    "email": recreated.get("email"),
+                    "account_id": recreated.get("account_id"),
+                    "expiry_time": 0,
+                }
+                accounts.save_accounts(latest_items)
+
+                logger.info("[RT恢复] 检查 Deactivated 邮件: %s", item_email)
+                def _check_deactivated_mail_for_account(_email: str, **kwargs):
+                    return check_deactivated_mail(**kwargs)
+
+                deactivation_result = _run_rt_recovery_step_with_retry(
+                    _check_deactivated_mail_for_account,
+                    item_email,
+                    step_name="Deactivated 邮件检查",
+                    step_label="Deactivated 邮件检查",
+                    keyword="deactivated",
+                    size=30,
+                    statuses=["active", "exhausted", "standby", "pending"],
+                    emails=[item_email],
+                    apply=True,
+                    release_team=True,
+                    release_all_matched_team=True,
+                    dispose_mailbox=True,
+                    include_targeted_accounts=True,
+                    team_remover=_team_remover_factory(remove_from_team),
+                )
+                if deactivation_result.get("errors"):
+                    raise RuntimeError(f"Deactivated 邮件检查失败: {deactivation_result['errors'][:3]}")
+                if deactivation_result.get("matched", 0):
+                    results.append(
+                        {
+                            "email": item_email,
+                            "status": "deactivated",
+                            "category": prep.get("category"),
+                            "mailbox_recreated": True,
+                            "mail_account_id": recreated.get("account_id"),
+                            "deactivation": deactivation_result,
+                        }
+                    )
+                    continue
+
+                latest_items = accounts.load_accounts()
+                latest = accounts.find_account(latest_items, item_email)
+                if not latest:
+                    results.append({"email": item_email, "status": "skipped", "error": "账号不存在"})
+                    continue
+                oauth_started = True
+                logger.info("[RT恢复] 开始 OAuth RT 获取: %s", item_email)
+                oauth_result = _run_rt_recovery_oauth_with_retry(
+                    run_account_oauth_login,
+                    item_email,
+                    account=latest,
+                    check_quota_snapshot=check_quota_snapshot,
+                )
+                results.append(
+                    {
+                        "email": item_email,
+                        "status": "completed",
+                        "category": prep.get("category"),
+                        "mailbox_recreated": True,
+                        "mail_account_id": recreated.get("account_id"),
+                        "plan_type": oauth_result.get("plan_type") or oauth_result.get("plan"),
+                        "rt_auth_file": oauth_result.get("rt_auth_file"),
+                        "cpa_archive_file": oauth_result.get("cpa_archive_file"),
+                    }
+                )
+            except Exception as exc:
+                if oauth_started and _is_oauth_deactivated_error(exc):
+                    latest, release_result = _mark_oauth_deactivated(item_email, str(exc))
+                    results.append(
+                        {
+                            "email": item_email,
+                            "status": "deactivated",
+                            "category": prep.get("category"),
+                            "error": str(exc),
+                            "reason": "account_deactivated",
+                            "seat_release": release_result,
+                            "mail_account_id": latest.get("mail_account_id") if latest else None,
+                        }
+                    )
+                    continue
+                _record_rt_recovery_error(item_email, str(exc))
+                results.append(
+                    {
+                        "email": item_email,
+                        "status": "failed",
+                        "category": prep.get("category"),
+                        "error": str(exc),
+                    }
+                )
+
+        completed = sum(1 for item in results if item["status"] == "completed")
+        failed = sum(1 for item in results if item["status"] == "failed")
+        skipped = sum(1 for item in results if item["status"] == "skipped")
+        deactivated = sum(1 for item in results if item["status"] == "deactivated")
+        return {
+            "total": len(results),
+            "completed": completed,
+            "failed": failed,
+            "skipped": skipped,
+            "deactivated": deactivated,
+            "results": results,
+        }
+
+    return _start_task(command, _run, {"emails": normalized, "force": force})
+
+
 # ---------------------------------------------------------------------------
 # 响应模型
 # ---------------------------------------------------------------------------
@@ -1397,6 +1925,21 @@ class RepairOauthParams(BaseModel):
     note: str = ""
 
 
+class RtRecoveryMarkParams(BaseModel):
+    emails: list[str] | None = None
+
+
+class RtRecoverySingleParams(BaseModel):
+    force: bool = True
+
+
+class RtRecoveryStartParams(BaseModel):
+    emails: list[str]
+    force: bool = True
+    check_quota_snapshot: bool = True
+    max_accounts: int = 50
+
+
 def _normalized_email(value: str | None) -> str:
     return (value or "").strip().lower()
 
@@ -1450,11 +1993,52 @@ def _display_account_status(acc: dict, quota_snapshot: dict | None = None) -> st
     return "active" if _resolve_status_auth_file(acc) else status
 
 
-def _sanitize_account(acc: dict, quota_snapshot: dict | None = None) -> dict:
+_SUB2API_PRESENCE_CACHE: dict[str, object] = {"expires_at": 0.0, "emails": None}
+_SUB2API_PRESENCE_CACHE_TTL = 300
+_REMOTE_DEPENDENT_ACCOUNT_CATEGORIES = {"in_use", "inventory", "registered", ""}
+
+
+def _load_sub2api_presence_emails(*, force: bool = False) -> set[str] | None:
+    from autoteam.sync_targets import SYNC_TARGET_SUB2API, is_sync_target_enabled
+
+    if not is_sync_target_enabled(SYNC_TARGET_SUB2API, os.environ):
+        return None
+    now = time.time()
+    cached_emails = _SUB2API_PRESENCE_CACHE.get("emails")
+    if not force and cached_emails is not None and now < float(_SUB2API_PRESENCE_CACHE.get("expires_at") or 0):
+        return set(cached_emails)
+    try:
+        from autoteam.sub2api_sync import list_openai_oauth_account_emails
+
+        emails = list_openai_oauth_account_emails()
+        _SUB2API_PRESENCE_CACHE["emails"] = set(emails)
+        _SUB2API_PRESENCE_CACHE["expires_at"] = now + _SUB2API_PRESENCE_CACHE_TTL
+        return emails
+    except Exception as exc:
+        logger.warning("[账号分类] 无法读取 Sub2API 账号列表，使用本地 remote.sub2api 状态: %s", exc)
+        return None
+
+
+def _derive_account_category(acc: dict, sub2api_emails: set[str] | None = None) -> str:
+    from autoteam.account_classifier import derive_category
+
+    if sub2api_emails is None:
+        return derive_category(acc)
+    email = str(acc.get("email") or "").strip().lower()
+    return derive_category(acc, sub2api_present=bool(email and email in sub2api_emails))
+
+
+def _sanitize_account(
+    acc: dict,
+    quota_snapshot: dict | None = None,
+    *,
+    sub2api_emails: set[str] | None = None,
+) -> dict:
     """脱敏账号信息（去掉 password 等敏感字段）"""
     sanitized = {k: v for k, v in acc.items() if k not in ("password", "cloudmail_account_id", "mail_account_id")}
     sanitized["is_main_account"] = _is_main_account_email(acc.get("email"))
     sanitized["status"] = _display_account_status(acc, quota_snapshot)
+    sanitized["category"] = _derive_account_category(acc, sub2api_emails)
     return sanitized
 
 
@@ -2806,7 +3390,6 @@ def get_accounts(
         CATEGORY_NOT_REGISTERED,
         CATEGORY_REGISTERED,
         CATEGORY_SOLD,
-        derive_category,
     )
     from autoteam.accounts import load_accounts
 
@@ -2853,9 +3436,14 @@ def get_accounts(
         raise HTTPException(status_code=400, detail="sort 非法")
 
     accounts = load_accounts()
+    sub2api_emails = (
+        _load_sub2api_presence_emails()
+        if normalized_category in _REMOTE_DEPENDENT_ACCOUNT_CATEGORIES
+        else None
+    )
     filtered_accounts = []
     for acc in accounts:
-        if normalized_category and derive_category(acc) != normalized_category:
+        if normalized_category and _derive_account_category(acc, sub2api_emails) != normalized_category:
             continue
         if normalized_query:
             email = (acc.get("email") or "").lower()
@@ -2870,7 +3458,7 @@ def get_accounts(
     total = len(filtered_accounts)
     start = (page - 1) * page_size
     end = start + page_size
-    items = [_sanitize_account(acc) for acc in filtered_accounts[start:end]]
+    items = [_sanitize_account(acc, sub2api_emails=sub2api_emails) for acc in filtered_accounts[start:end]]
 
     return {
         "items": items,
@@ -2887,7 +3475,6 @@ def get_accounts(
 @app.get("/api/accounts/{email}")
 def get_account_detail(email: str):
     """获取单个账号的聚合详情"""
-    from autoteam.account_classifier import derive_category
     from autoteam.account_credentials import identify_credential_file
     from autoteam.account_health import is_invalid, is_quota_exhausted
     from autoteam.account_remote import default_remote_block, summarize_remote
@@ -2934,9 +3521,12 @@ def get_account_detail(email: str):
         if matched_status:
             remote[kind]["status"] = matched_status
 
+    sub2api_emails = _load_sub2api_presence_emails()
+    category = "main" if is_main else _derive_account_category(acc, sub2api_emails)
+
     return {
-        "account": _sanitize_account(acc),
-        "category": "main" if is_main else derive_category(acc),
+        "account": _sanitize_account(acc, sub2api_emails=sub2api_emails),
+        "category": category,
         "credentials": {
             "rt_auth_file": build_credential(acc.get("rt_auth_file")),
             "session_auth_file": build_credential(acc.get("session_auth_file")),
@@ -3014,6 +3604,77 @@ def post_accounts_clean_apply():
         "result": result,
         "report_after": report_after,
     }
+
+
+@app.post("/api/accounts/rt-recovery/scan")
+def post_accounts_rt_recovery_scan():
+    """扫描注册完成但缺 RT、401 需重取 RT、Deactivated 需标记失效的账号。"""
+    from autoteam.account_rt_recovery import scan_rt_recovery_accounts
+    from autoteam.admin_state import get_admin_email
+
+    try:
+        report = scan_rt_recovery_accounts(main_email=get_admin_email())
+    except Exception as exc:
+        logger.exception("[API] RT 恢复扫描失败")
+        raise HTTPException(status_code=500, detail=f"RT 恢复扫描失败: {exc}") from exc
+
+    return {"report": report}
+
+
+@app.post("/api/accounts/rt-recovery/mark-deactivated")
+def post_accounts_rt_recovery_mark_deactivated(params: RtRecoveryMarkParams = RtRecoveryMarkParams()):
+    """把错误文本含 Deactivated 的账号标记为不可用。"""
+    from autoteam import accounts
+    from autoteam.account_cleaner import backup_accounts_file
+    from autoteam.account_rt_recovery import mark_deactivated_invalid_accounts
+
+    try:
+        account_items = accounts.load_accounts()
+        result = mark_deactivated_invalid_accounts(account_items, emails=params.emails)
+        backup_path = None
+        if result.get("changed"):
+            backup_path = backup_accounts_file()
+            accounts.save_accounts(account_items)
+    except Exception as exc:
+        logger.exception("[API] Deactivated 标记失败")
+        raise HTTPException(status_code=500, detail=f"Deactivated 标记失败: {exc}") from exc
+
+    return {
+        "message": f"已标记 {result.get('changed', 0)} 个 Deactivated 账号",
+        "backup_path": str(backup_path) if backup_path else "",
+        "result": result,
+    }
+
+
+@app.post("/api/accounts/{email}/rt-recovery", status_code=202)
+def post_account_rt_recovery(email: str, params: RtRecoverySingleParams = RtRecoverySingleParams()):
+    """对单个账号重新获取 OAuth RT，不上传远端。"""
+    email = email.strip().lower()
+    return _start_rt_recovery_task(
+        [email],
+        force=bool(params.force),
+        check_quota_snapshot=True,
+        command=f"rt-recovery:{email}",
+    )
+
+
+@app.post("/api/accounts/rt-recovery/start", status_code=202)
+def post_accounts_rt_recovery_start(params: RtRecoveryStartParams):
+    """批量重新获取 OAuth RT，不上传远端。"""
+    emails = [_normalized_email(email) for email in params.emails or [] if _normalized_email(email)]
+    if not emails:
+        raise HTTPException(status_code=400, detail="emails 不能为空")
+    deduped = list(dict.fromkeys(emails))
+    if params.max_accounts < 1 or params.max_accounts > 200:
+        raise HTTPException(status_code=400, detail="max_accounts 必须在 1 到 200 之间")
+    if len(deduped) > params.max_accounts:
+        raise HTTPException(status_code=400, detail=f"一次最多恢复 {params.max_accounts} 个账号")
+    return _start_rt_recovery_task(
+        deduped,
+        force=bool(params.force),
+        check_quota_snapshot=bool(params.check_quota_snapshot),
+        command=f"rt-recovery-batch:{len(deduped)}",
+    )
 
 
 @app.get("/api/accounts/{email}/codex-auth")

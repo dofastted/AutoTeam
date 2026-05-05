@@ -24,9 +24,10 @@ STATUS_SOLD = "sold"  # 已售出，保留 Team 席位但停止同步和轮转
 # 业务属性。不要复用 status，status 仍只表达 Team/生命周期。
 USAGE_NORMAL = "normal"  # 普通轮转账号
 USAGE_INVENTORY = "inventory"  # CPA 库存账号
+USAGE_IN_USE = "in_use"  # 已分配使用
 USAGE_SELF_USE = "self_use"  # 自用，本地保留，远端下架
 USAGE_SOLD = "sold"  # 已售出，本地保留，远端下架
-VALID_USAGE_STATUSES = {USAGE_NORMAL, USAGE_INVENTORY, USAGE_SELF_USE, USAGE_SOLD}
+VALID_USAGE_STATUSES = {USAGE_NORMAL, USAGE_INVENTORY, USAGE_IN_USE, USAGE_SELF_USE, USAGE_SOLD}
 
 # 注册与 CPA 阶段结果
 REGISTRATION_STATUS_PENDING = "pending"
@@ -264,7 +265,7 @@ def update_account(email, **kwargs):
 def mark_account_usage_status(email, usage_status, **kwargs):
     """更新账号业务属性。sold/self_use 应走专用函数，因为需要远端下架记录。"""
     usage_status = (usage_status or "").strip().lower()
-    if usage_status not in {USAGE_NORMAL, USAGE_INVENTORY}:
+    if usage_status not in {USAGE_NORMAL, USAGE_INVENTORY, USAGE_IN_USE}:
         raise ValueError(f"不允许直接设置业务属性: {usage_status}")
     return update_account(email, usage_status=usage_status, **kwargs)
 

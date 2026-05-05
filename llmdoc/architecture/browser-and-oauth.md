@@ -58,3 +58,26 @@ API 模式下，Playwright 相关操作通过 `src/autoteam/api.py` (`_Playwrigh
 完成后会保存 OAuth RT 文件，按 `plan_type` 和额度结果更新本地账号状态。它不自动同步 CPA / Sub2API；远端上传由同步中心或对应同步接口单独触发。
 
 `src/autoteam/api.py` (`post_account_login`): 仪表盘的单账号登录按钮使用本地 OAuth 验证账号。该接口只要求账号对应邮箱 provider 配置，不要求 CPA / Sub2API 配置；成功后写 `auth_file`、`rt_auth_file`，并保留已有 `session_auth_file`。默认拒绝已售出或 `sync_disabled=true` 的账号；排查已标记失效账号时可显式传 `force=true` 重新跑本地 OAuth 验证。若 OAuth 页面返回 `account_deactivated`，账号会写为 `status=unavailable`、`sync_disabled=true`、`unavailable_reason=account_deactivated`。
+
+## 账号池 RT 恢复
+
+`src/autoteam/account_rt_recovery.py`: 扫描缺 RT 或 401 需要重取 RT 的已注册账号，排除主号、已售、未注册和无密码账号。
+
+`src/autoteam/api.py` (`POST /api/accounts/rt-recovery/start`): RT 恢复是人工启动的后台任务，不会自动上传 CPA / Sub2API。每个账号按固定顺序处理：
+
+- `src/autoteam/mo_email.py` (`MoEmailClient.recreate_permanent_email`): 先按原邮箱 local-part 重建 MoEmail 邮箱，`expiryTime=0`，并写回新的 `mail_account_id`。
+- `src/autoteam/account_deactivation.py` (`check_deactivated_mail`): 只查当前邮箱的邮件，命中 `Deactivated` / `deactivated` 时写 `status=unavailable`、`sync_disabled=true`、`unavailable_reason=account_deactivated`。
+- Deactivated 命中后，通过 `src/autoteam/api.py` (`_team_remover_factory`) 复用 `src/autoteam/manager.py` (`remove_from_team`) 释放 Team 席位，然后停止当前账号，不再跑 OAuth。
+- 未命中 Deactivated 时，才调用 `src/autoteam/account_oauth.py` (`run_account_oauth_login`) 获取新的 OAuth RT。
+
+邮箱重建、Deactivated 查信和 OAuth 阶段都由 `src/autoteam/api.py` (`_run_rt_recovery_step_with_retry`) 包总超时和代理重试；OAuth 保留兼容入口 `_run_rt_recovery_oauth_with_retry`：
+
+- `RT_RECOVERY_STEP_TIMEOUT_SECONDS` 控制邮箱重建和 Deactivated 查信单次 attempt 总等待时间。未设置时沿用 `RT_RECOVERY_OAUTH_TIMEOUT_SECONDS`，再未设置默认 60 秒。
+- `RT_RECOVERY_STEP_RETRY_ATTEMPTS` 控制邮箱重建和 Deactivated 查信 attempt 次数。未设置时沿用 `RT_RECOVERY_OAUTH_RETRY_ATTEMPTS`，再未设置默认 1 次，范围 `1..10`。
+- `RT_RECOVERY_OAUTH_TIMEOUT_SECONDS` 控制单次 OAuth attempt 总等待时间，默认 60 秒。
+- `RT_RECOVERY_OAUTH_RETRY_ATTEMPTS` 控制单账号最多 OAuth attempt 次数，默认 1 次，范围 `1..10`。
+- 单次 attempt 超时后当前账号记为失败或进入下一次代理重试，批量任务不会卡住后续账号。
+- 只有网络、代理、超时类错误会调用 `outbound_proxy.rotate_task_proxy()` 切换出口代理后重试。
+- `account_deactivated` / `deleted`、`phone_required`、`HTTP 401`、`invalid_username_or_password`、`password_rejected`、`login_rejected`、未注册、注册未完成、无有效组织等账号语义错误不会触发代理重试。
+
+邮箱重建、查信或 OAuth 任一步失败时，账号会记录 `last_rt_recovery_error` 和 `last_rt_recovery_failed_at`。批量启动前仍需要人工确认，因为该流程会访问邮箱、启动 OAuth，并可能改变 Team 成员。

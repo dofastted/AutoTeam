@@ -103,16 +103,26 @@
 5. `inventory`
 6. `registered`
 
-这是当前仓库真实实现，原因是 `registration_status != registered` 的判断写在 `in_use` / `inventory` 之前，见 `src/autoteam/account_classifier.py:54-64`。
+这是当前仓库真实实现，原因是 `registration_status != registered` 的判断写在 `in_use` / `inventory` 之前。`in_use` 还必须满足可用性和 Sub2API 存在性，见 `src/autoteam/account_classifier.py` (`derive_category`, `is_usable_account`)。
+
+使用中分类不是只看 `usage_status=in_use`。还要同时满足：
+
+- `registration_status` 已完成或可接受
+- `status` 不是 `pending` / `unavailable` / `sold`
+- `health_status` 不在 `invalid` / `deactivated` / `risk` / `risk_blocked` / `http401` / `sync_error`
+- 没有 401 / token invalid / account deactivated 等错误字段或原因
+- 存在 OAuth RT
+- `sync_disabled` 不是真
+- Sub2API 真实存在，来自实时 `sub2api_present` 或 `remote.sub2api.status=present/uploaded`
 
 库存分类不是只看 `usage_status=inventory`。还要同时满足：
 
 - `cpa_status=success`
-- `health_status=valid`
-- `rt_auth_file` 存在
+- 账号可用
+- OAuth RT 存在
 - `sync_disabled` 不是真
 
-见 `src/autoteam/account_classifier.py:58-63`。
+见 `src/autoteam/account_classifier.py` (`is_usable_account`, `derive_category`)。
 
 ## 4. 业务约束与当前实现的差异
 
@@ -120,16 +130,17 @@
 
 1. `sold`
 2. `invalid`
-3. `in_use`
-4. `inventory`
-5. `registered`
-6. `not_registered`
+3. `not_registered`
+4. `in_use`
+5. `inventory`
+6. `registered`
 
-当前代码还没有完全做到这一点，因为 `not_registered` 提前于 `in_use` / `inventory`。如果后续要统一文档、接口和前端心智，先改 `src/autoteam/account_classifier.py` 和对应测试，再改这里。
+`not_registered` 必须高于 `in_use`。Sub2API 中有同邮箱账号也不能覆盖未注册状态。
 
 ## 5. 硬约束
 
-- `sold > invalid > in_use > inventory > registered > not_registered` 是业务讨论和后续对齐时不能改顺序的目标优先级
+- `sold > invalid > not_registered > in_use > inventory > registered` 是当前业务优先级
+- Sub2API 存在不等于 `in_use`。只有已注册、可用且 Sub2API 存在的账号才是 `in_use`
 - `quota_exhausted` 不等于 `invalid`。额度耗尽只会写 `health_status=quota_exhausted`，不会自动 `sync_disabled=true`，见 `src/autoteam/account_health.py:118-146`
 - 主号不能进库存流，见 `src/autoteam/account_inventory.py:103-120`、`src/autoteam/account_inventory.py:185-210`、`src/autoteam/account_inventory.py:270-277`
 - `AT-013` 兼容补丁当前在 `src/autoteam/account_lifecycle.py:24`：`legacy_accounts.REGISTRATION_STATUS_SUCCESS = REGISTRATION_REGISTERED`。后续如果要删，先审计 `accounts.REGISTRATION_STATUS_SUCCESS` 的调用点

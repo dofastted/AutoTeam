@@ -22,7 +22,7 @@ def _sample_accounts():
             "password": "secret",
             "registration_status": "registered",
             "health_status": "valid",
-            "usage_status": "normal",
+            "usage_status": "inventory",
             "cpa_status": "success",
             "rt_auth_file": "auths/bob-oauth.json",
             "sync_disabled": False,
@@ -39,6 +39,7 @@ def _sample_accounts():
             "cpa_status": "success",
             "rt_auth_file": "auths/alice-oauth.json",
             "sync_disabled": False,
+            "remote": {"sub2api": {"status": "present"}},
             "created_at": 150,
             "notes": "Alice note",
         },
@@ -56,6 +57,12 @@ def _sample_accounts():
 
 def _patch_load_accounts(monkeypatch, accounts_data):
     monkeypatch.setattr("autoteam.accounts.load_accounts", lambda: [dict(item) for item in accounts_data])
+    monkeypatch.setattr(api, "_load_sub2api_presence_emails", lambda: None)
+
+
+def _reset_sub2api_presence_cache():
+    api._SUB2API_PRESENCE_CACHE["emails"] = None
+    api._SUB2API_PRESENCE_CACHE["expires_at"] = 0.0
 
 
 def test_get_accounts_returns_paginated_response_by_default(monkeypatch):
@@ -77,6 +84,10 @@ def test_get_accounts_returns_paginated_response_by_default(monkeypatch):
         "zzz@example.com",
     ]
     assert "password" not in result["items"][0]
+    categories_by_email = {item["email"]: item["category"] for item in result["items"]}
+    assert categories_by_email["bob@example.com"] == "inventory"
+    assert categories_by_email["alice@example.com"] == "in_use"
+    assert categories_by_email["zzz@example.com"] == "not_registered"
 
 
 def test_get_accounts_filters_inventory_category(monkeypatch):
@@ -87,6 +98,89 @@ def test_get_accounts_filters_inventory_category(monkeypatch):
     assert result["total"] == 1
     assert result["category"] == "inventory"
     assert [item["email"] for item in result["items"]] == ["bob@example.com"]
+
+
+def test_get_accounts_uses_live_sub2api_presence_as_category_source(monkeypatch):
+    accounts_data = [
+        {
+            "email": "remote-present@example.com",
+            "registration_status": "registered",
+            "health_status": "valid",
+            "usage_status": "inventory",
+            "cpa_status": "success",
+            "rt_auth_file": "auths/remote-present-oauth.json",
+            "sync_disabled": False,
+            "remote": {"sub2api": {"status": "missing"}},
+            "updated_at": 20,
+        },
+        {
+            "email": "stale-present@example.com",
+            "registration_status": "registered",
+            "health_status": "valid",
+            "usage_status": "in_use",
+            "cpa_status": "success",
+            "rt_auth_file": "auths/stale-present-oauth.json",
+            "sync_disabled": False,
+            "remote": {"sub2api": {"status": "present"}},
+            "updated_at": 10,
+        },
+        {
+            "email": "planned@example.com",
+            "registration_status": "planned",
+            "health_status": "unknown",
+            "usage_status": "in_use",
+            "cpa_status": "success",
+            "rt_auth_file": "auths/planned-oauth.json",
+            "sync_disabled": False,
+            "remote": {"sub2api": {"status": "present"}},
+            "updated_at": 30,
+        },
+        {
+            "email": "invalid@example.com",
+            "registration_status": "registered",
+            "health_status": "valid",
+            "usage_status": "in_use",
+            "cpa_status": "success",
+            "rt_auth_file": "auths/invalid-oauth.json",
+            "sync_disabled": False,
+            "unavailable_reason": "http_401",
+            "remote": {"sub2api": {"status": "present"}},
+            "updated_at": 40,
+        },
+    ]
+    _patch_load_accounts(monkeypatch, accounts_data)
+    monkeypatch.setattr(api, "_load_sub2api_presence_emails", lambda: {"remote-present@example.com"})
+
+    in_use = api.get_accounts(category="in_use", sort="email_asc")
+    inventory = api.get_accounts(category="inventory", sort="email_asc")
+    not_registered = api.get_accounts(category="not_registered", sort="email_asc")
+    invalid = api.get_accounts(category="invalid", sort="email_asc")
+
+    assert [item["email"] for item in in_use["items"]] == ["remote-present@example.com"]
+    assert [item["email"] for item in inventory["items"]] == ["stale-present@example.com"]
+    assert [item["email"] for item in not_registered["items"]] == ["planned@example.com"]
+    assert [item["email"] for item in invalid["items"]] == ["invalid@example.com"]
+
+
+def test_load_sub2api_presence_emails_uses_short_cache(monkeypatch):
+    _reset_sub2api_presence_cache()
+    calls = {"count": 0}
+
+    monkeypatch.setattr("autoteam.sync_targets.is_sync_target_enabled", lambda target, env: True)
+
+    def fake_list_emails():
+        calls["count"] += 1
+        return {"cached@example.com"}
+
+    monkeypatch.setattr("autoteam.sub2api_sync.list_openai_oauth_account_emails", fake_list_emails)
+
+    first = api._load_sub2api_presence_emails()
+    second = api._load_sub2api_presence_emails()
+
+    assert first == {"cached@example.com"}
+    assert second == {"cached@example.com"}
+    assert calls["count"] == 1
+    _reset_sub2api_presence_cache()
 
 
 def test_get_accounts_category_all_matches_default(monkeypatch):
@@ -211,12 +305,12 @@ def test_get_accounts_filters_each_supported_category(monkeypatch):
             "cpa_status": "pending",
             "updated_at": 10,
         },
-        {
-            "email": "inventory@example.com",
-            "registration_status": "registered",
-            "health_status": "valid",
-            "usage_status": "normal",
-            "cpa_status": "success",
+            {
+                "email": "inventory@example.com",
+                "registration_status": "registered",
+                "health_status": "valid",
+                "usage_status": "inventory",
+                "cpa_status": "success",
             "rt_auth_file": "auths/inventory-oauth.json",
             "sync_disabled": False,
             "updated_at": 20,
@@ -229,6 +323,7 @@ def test_get_accounts_filters_each_supported_category(monkeypatch):
             "cpa_status": "success",
             "rt_auth_file": "auths/inuse-oauth.json",
             "sync_disabled": False,
+            "remote": {"sub2api": {"status": "present"}},
             "updated_at": 30,
         },
         {
