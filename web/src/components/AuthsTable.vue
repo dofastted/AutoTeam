@@ -1,12 +1,28 @@
 <template>
   <div class="space-y-4">
-    <!-- 筛选条 -->
-    <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+    <div class="glass-card overflow-hidden">
+      <div class="border-b border-white/10 px-4 py-4 sm:px-5">
+        <div class="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+          <div>
+            <div class="section-heading text-lg">auth 文件记录</div>
+            <div class="section-subtitle">
+              只读文件扫描视图。筛选和排序直接传给 /api/auths/accounts。
+            </div>
+          </div>
+          <div class="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-300">
+            <span class="h-2 w-2 rounded-full bg-indigo-300 shadow-[0_0_14px_rgba(129,140,248,0.85)]"></span>
+            共 <span class="font-semibold text-white">{{ total }}</span> 个邮箱
+            <span v-if="loading" class="text-indigo-200">加载中...</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="px-4 py-4 sm:px-5">
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
         <div>
-          <label class="block text-xs text-gray-500 mb-1">分类</label>
+          <label class="mb-1.5 block text-xs font-medium text-slate-500">分类</label>
           <select v-model="filterCategory" @change="applyFilters"
-            class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500">
+            class="input-dark">
             <option value="">全部（不含归档）</option>
             <option value="active">活跃</option>
             <option value="sold">已售</option>
@@ -17,27 +33,27 @@
           </select>
         </div>
         <div>
-          <label class="block text-xs text-gray-500 mb-1">OAuth 文件</label>
+          <label class="mb-1.5 block text-xs font-medium text-slate-500">OAuth 文件</label>
           <select v-model="filterOauth" @change="applyFilters"
-            class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500">
+            class="input-dark">
             <option value="">全部</option>
             <option value="true">有</option>
             <option value="false">无</option>
           </select>
         </div>
         <div>
-          <label class="block text-xs text-gray-500 mb-1">Session 文件</label>
+          <label class="mb-1.5 block text-xs font-medium text-slate-500">Session 文件</label>
           <select v-model="filterSession" @change="applyFilters"
-            class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500">
+            class="input-dark">
             <option value="">全部</option>
             <option value="true">有</option>
             <option value="false">无</option>
           </select>
         </div>
         <div>
-          <label class="block text-xs text-gray-500 mb-1">排序</label>
+          <label class="mb-1.5 block text-xs font-medium text-slate-500">排序</label>
           <select v-model="sort" @change="applyFilters"
-            class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500">
+            class="input-dark">
             <option value="email_asc">邮箱 ↑</option>
             <option value="email_desc">邮箱 ↓</option>
             <option value="expired_asc">过期 ↑</option>
@@ -46,54 +62,58 @@
           </select>
         </div>
         <div>
-          <label class="block text-xs text-gray-500 mb-1">搜索邮箱</label>
+          <label class="mb-1.5 block text-xs font-medium text-slate-500">搜索邮箱</label>
           <input v-model="searchQ" @keyup.enter="applyFilters" @blur="applyFilters" type="text"
             placeholder="包含的邮箱字符串..."
-            class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+            class="input-dark" />
         </div>
       </div>
 
-      <!-- facets -->
-      <div v-if="facets" class="mt-3 flex flex-wrap gap-2 text-xs">
-        <span class="px-2 py-1 rounded bg-gray-800 text-gray-300">活跃 <b class="text-green-400">{{ facets.active }}</b></span>
-        <span class="px-2 py-1 rounded bg-gray-800 text-gray-300">已售 <b class="text-cyan-300">{{ facets.sold }}</b></span>
-        <span class="px-2 py-1 rounded bg-gray-800 text-gray-300">可交易 <b class="text-emerald-400">{{ facets.tradable }}</b></span>
-        <span class="px-2 py-1 rounded bg-gray-800 text-gray-300">不可用 <b class="text-red-400">{{ facets.unusable }}</b></span>
-        <span class="px-2 py-1 rounded bg-gray-800 text-gray-300">归档 <b class="text-gray-400">{{ facets.archive }}</b></span>
+        <div v-if="facets" class="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+          <span
+            v-for="facet in facetItems"
+            :key="facet.key"
+            class="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-slate-400"
+          >
+            <span class="block text-slate-500">{{ facet.label }}</span>
+            <b class="mt-1 block text-base font-semibold" :class="facet.className">
+              {{ facets[facet.key] || 0 }}
+            </b>
+          </span>
+        </div>
       </div>
     </div>
 
-    <!-- 错误 -->
-    <div v-if="error" class="px-4 py-3 rounded-lg text-sm bg-red-500/10 text-red-400 border border-red-500/20">
+    <div v-if="error" class="rounded-2xl border border-rose-500/30 bg-rose-950/50 px-4 py-3 text-sm text-rose-100">
       {{ error }}
     </div>
 
-    <!-- 数据表 -->
-    <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-      <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
-        <div class="text-sm text-gray-400">
-          共 <span class="text-white font-medium">{{ total }}</span> 个账号
-          <span v-if="loading" class="ml-2 text-blue-400">加载中...</span>
+    <div class="glass-card overflow-hidden">
+      <div class="flex flex-col gap-3 border-b border-white/10 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+        <div class="text-sm text-slate-400">
+          文件盘点结果
+          <span class="mx-1 text-slate-600">/</span>
+          第 {{ page }} 页
         </div>
-        <div class="flex items-center gap-2">
-          <label class="text-xs text-gray-500">每页</label>
+        <div class="flex flex-wrap items-center gap-2">
+          <label class="text-xs text-slate-500">每页</label>
           <select v-model.number="pageSize" @change="onPageSizeChange"
-            class="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-gray-200">
+            class="input-dark w-24 py-2 text-xs">
             <option :value="20">20</option>
             <option :value="50">50</option>
             <option :value="100">100</option>
             <option :value="200">200</option>
           </select>
           <button @click="reload" :disabled="loading"
-            class="px-3 py-1 bg-gray-800 hover:bg-gray-700 text-xs rounded-lg border border-gray-700 transition disabled:opacity-50 text-gray-300">
+            class="btn-secondary px-3 py-2 text-xs">
             刷新
           </button>
         </div>
       </div>
       <div class="overflow-x-auto">
-        <table class="w-full text-sm">
+        <table class="min-w-full text-sm">
           <thead>
-            <tr class="text-gray-400 text-left border-b border-gray-800">
+            <tr class="border-b border-white/10 text-left text-slate-400">
               <th class="px-4 py-3 font-medium w-12">#</th>
               <th class="px-4 py-3 font-medium">邮箱</th>
               <th class="px-4 py-3 font-medium w-28">分类</th>
@@ -107,37 +127,37 @@
           </thead>
           <tbody>
             <tr v-for="(r, i) in records" :key="r.email + ':' + r.team_hash"
-              class="border-b border-gray-800/50 hover:bg-gray-800/30 transition">
-              <td class="px-4 py-3 text-gray-500">{{ pageStart + i + 1 }}</td>
-              <td class="px-4 py-3 font-mono text-xs text-gray-200">{{ r.email }}</td>
+              class="border-b border-white/5 transition hover:bg-white/[0.04]">
+              <td class="px-4 py-3 text-slate-500">{{ pageStart + i + 1 }}</td>
+              <td class="px-4 py-3 font-mono text-xs text-slate-100">{{ r.email }}</td>
               <td class="px-4 py-3">
-                <span class="px-2 py-0.5 rounded text-xs font-medium" :class="categoryClass(r.category)">
+                <span class="inline-flex rounded-full border px-2.5 py-1 text-xs font-medium" :class="categoryClass(r.category)">
                   {{ categoryLabel(r.category) }}
                 </span>
               </td>
               <td class="px-4 py-3 text-center">
-                <span class="px-2 py-0.5 rounded-full text-xs font-medium"
-                  :class="r.has_oauth ? 'bg-blue-500/10 text-blue-400' : 'bg-gray-700/50 text-gray-500'">
+                <span class="inline-flex rounded-full border px-2.5 py-1 text-xs font-medium"
+                  :class="r.has_oauth ? 'border-indigo-400/20 bg-indigo-500/10 text-indigo-200' : 'border-white/10 bg-white/[0.04] text-slate-500'">
                   {{ r.has_oauth ? '有' : '无' }}
                 </span>
               </td>
               <td class="px-4 py-3 text-center">
-                <span class="px-2 py-0.5 rounded-full text-xs font-medium"
-                  :class="r.has_session ? 'bg-purple-500/10 text-purple-400' : 'bg-gray-700/50 text-gray-500'">
+                <span class="inline-flex rounded-full border px-2.5 py-1 text-xs font-medium"
+                  :class="r.has_session ? 'border-violet-400/20 bg-violet-500/10 text-violet-200' : 'border-white/10 bg-white/[0.04] text-slate-500'">
                   {{ r.has_session ? '有' : '无' }}
                 </span>
               </td>
               <td class="px-4 py-3 text-center">
-                <span v-if="r.disabled === true" class="px-2 py-0.5 rounded-full text-xs bg-red-500/10 text-red-400">是</span>
-                <span v-else-if="r.disabled === false" class="px-2 py-0.5 rounded-full text-xs bg-green-500/10 text-green-400">否</span>
-                <span v-else class="text-xs text-gray-600">-</span>
+                <span v-if="r.disabled === true" class="inline-flex rounded-full border border-rose-400/20 bg-rose-500/10 px-2.5 py-1 text-xs text-rose-200">是</span>
+                <span v-else-if="r.disabled === false" class="inline-flex rounded-full border border-emerald-400/20 bg-emerald-500/10 px-2.5 py-1 text-xs text-emerald-200">否</span>
+                <span v-else class="text-xs text-slate-600">-</span>
               </td>
-              <td class="px-4 py-3 text-xs text-gray-400">{{ formatDate(r.expired) }}</td>
-              <td class="px-4 py-3 text-xs text-gray-400">{{ r.credential_source || '-' }}</td>
-              <td class="px-4 py-3 text-center text-xs text-gray-400">{{ r.file_count }}</td>
+              <td class="px-4 py-3 text-xs text-slate-400">{{ formatDate(r.expired) }}</td>
+              <td class="px-4 py-3 text-xs text-slate-400">{{ r.credential_source || '-' }}</td>
+              <td class="px-4 py-3 text-center text-xs text-slate-400">{{ r.file_count }}</td>
             </tr>
             <tr v-if="!records.length && !loading">
-              <td colspan="9" class="px-4 py-12 text-center text-gray-500 text-sm">
+              <td colspan="9" class="px-4 py-12 text-center text-sm text-slate-500">
                 没有符合条件的账号
               </td>
             </tr>
@@ -145,27 +165,26 @@
         </table>
       </div>
 
-      <!-- 翻页 -->
-      <div v-if="totalPages > 1" class="px-4 py-3 border-t border-gray-800 flex items-center justify-between">
-        <div class="text-xs text-gray-500">
+      <div v-if="totalPages > 1" class="flex flex-col gap-3 border-t border-white/10 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+        <div class="text-xs text-slate-500">
           显示 {{ pageStart + 1 }} - {{ pageEnd }} / {{ total }}
         </div>
-        <div class="flex items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2">
           <button @click="goToPage(1)" :disabled="page === 1 || loading"
-            class="px-2 py-1 text-xs rounded border border-gray-700 bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed">
+            class="btn-secondary px-2.5 py-1.5 text-xs">
             首页
           </button>
           <button @click="goToPage(page - 1)" :disabled="page === 1 || loading"
-            class="px-2 py-1 text-xs rounded border border-gray-700 bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed">
+            class="btn-secondary px-2.5 py-1.5 text-xs">
             上一页
           </button>
-          <span class="text-xs text-gray-400 px-2">{{ page }} / {{ totalPages }}</span>
+          <span class="px-2 text-xs text-slate-400">{{ page }} / {{ totalPages }}</span>
           <button @click="goToPage(page + 1)" :disabled="page >= totalPages || loading"
-            class="px-2 py-1 text-xs rounded border border-gray-700 bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed">
+            class="btn-secondary px-2.5 py-1.5 text-xs">
             下一页
           </button>
           <button @click="goToPage(totalPages)" :disabled="page >= totalPages || loading"
-            class="px-2 py-1 text-xs rounded border border-gray-700 bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed">
+            class="btn-secondary px-2.5 py-1.5 text-xs">
             末页
           </button>
         </div>
@@ -195,6 +214,14 @@ const total = ref(0)
 const facets = ref(null)
 const loading = ref(false)
 const error = ref('')
+
+const facetItems = [
+  { key: 'active', label: '活跃', className: 'text-emerald-200' },
+  { key: 'sold', label: '已售', className: 'text-cyan-200' },
+  { key: 'tradable', label: '可交易', className: 'text-lime-200' },
+  { key: 'unusable', label: '不可用', className: 'text-rose-200' },
+  { key: 'archive', label: '归档', className: 'text-slate-300' },
+]
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
 const pageStart = computed(() => (page.value - 1) * pageSize.value)
@@ -259,12 +286,12 @@ function categoryLabel(c) {
 
 function categoryClass(c) {
   return {
-    active: 'bg-green-500/10 text-green-400',
-    sold: 'bg-cyan-500/10 text-cyan-300',
-    tradable: 'bg-emerald-500/10 text-emerald-400',
-    unusable: 'bg-red-500/10 text-red-400',
-    archive: 'bg-gray-500/10 text-gray-400',
-  }[c] || 'bg-gray-500/10 text-gray-300'
+    active: 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200',
+    sold: 'border-cyan-400/20 bg-cyan-500/10 text-cyan-200',
+    tradable: 'border-lime-400/20 bg-lime-500/10 text-lime-200',
+    unusable: 'border-rose-400/20 bg-rose-500/10 text-rose-200',
+    archive: 'border-slate-400/20 bg-slate-500/10 text-slate-300',
+  }[c] || 'border-white/10 bg-white/[0.04] text-slate-300'
 }
 
 function formatDate(value) {

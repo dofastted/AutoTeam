@@ -93,8 +93,8 @@
     </div>
 
     <!-- 侧边栏 -->
-    <Sidebar :active="currentPage" :loading="loading"
-      @navigate="navigateTo" @refresh="refresh({ forceStatus: currentPage === 'dashboard' })" />
+    <Sidebar :active="visiblePage" :loading="loading"
+      @navigate="navigateTo" @refresh="refresh({ forceStatus: visiblePage === 'dashboard' })" />
 
     <!-- 主内容区 -->
     <div class="relative min-w-0 flex-1 overflow-y-auto pb-20 md:pb-8">
@@ -153,43 +153,40 @@
         </div>
 
       <!-- 页面内容 -->
-        <Dashboard v-if="currentPage === 'dashboard'"
+        <Dashboard v-if="visiblePage === 'dashboard'"
           :status="status" :loading="loading" :running-task="busyTask" :admin-status="adminStatus" @refresh="refresh" />
 
         <ConfigPage
-          v-else-if="currentPage === 'config'"
+          v-else-if="visiblePage === 'config'"
           :admin-status="adminStatus"
           :codex-status="codexStatus"
           @refresh="refresh"
           @admin-progress="onAdminProgress"
         />
 
-        <TeamMembers v-else-if="currentPage === 'team'" />
+        <TeamMembers v-else-if="visiblePage === 'team'" />
 
-        <PoolPage v-else-if="currentPage === 'pool'"
+        <PoolPage v-else-if="visiblePage === 'pool'"
           :running-task="busyTask" :admin-status="adminStatus"
           @task-started="onTaskStarted" @refresh="refresh" />
 
-        <SyncPage v-else-if="currentPage === 'sync'"
+        <SyncPage v-else-if="visiblePage === 'sync'"
           :running-task="busyTask" :admin-status="adminStatus"
           @task-started="onTaskStarted" @refresh="refresh" />
 
-        <OAuthPage v-else-if="currentPage === 'oauth'"
+        <OAuthPage v-else-if="visiblePage === 'oauth'"
           :manual-account-status="manualAccountStatus"
           :running-task="busyTask"
           @refresh="refresh"
           @progress="onAdminProgress" />
 
-        <AccountManagement v-else-if="currentPage === 'accounts'"
+        <AccountManagement v-else-if="visiblePage === 'accounts'"
           :loading="loading" @refresh="refresh" />
 
-        <AccountCleanPage v-else-if="currentPage === 'account-clean'"
-          :loading="loading" @refresh="refresh" />
-
-        <TaskHistoryPage v-else-if="currentPage === 'tasks'"
+        <TaskHistoryPage v-else-if="visiblePage === 'tasks'"
           :tasks="tasks" />
 
-        <LogViewer v-else-if="currentPage === 'logs'" />
+        <LogViewer v-else-if="visiblePage === 'logs'" />
       </div>
     </div>
   </div>
@@ -200,7 +197,6 @@ import { computed, defineAsyncComponent, ref, onMounted, onUnmounted, watch } fr
 import { api, setApiKey, clearApiKey } from './api.js'
 import Sidebar from './components/Sidebar.vue'
 import AccountManagement from './components/AccountManagement.vue'
-import AccountCleanPage from './components/AccountCleanPage.vue'
 
 const SetupPage = defineAsyncComponent(() => import('./components/SetupPage.vue'))
 const Dashboard = defineAsyncComponent(() => import('./components/Dashboard.vue'))
@@ -238,13 +234,13 @@ const pageTitles = {
   pool: '账号池操作',
   sync: '同步中心',
   oauth: 'OAuth 登录',
-  accounts: '账号管理中心',
-  'account-clean': '账号清理',
+  accounts: '账号工作台',
   tasks: '任务历史',
   logs: '日志',
 }
 
-const pageTitle = computed(() => pageTitles[currentPage.value] || 'AutoTeam')
+const visiblePage = computed(() => currentPage.value === 'account-clean' ? 'accounts' : currentPage.value)
+const pageTitle = computed(() => pageTitles[visiblePage.value] || 'AutoTeam')
 const busyTask = computed(() => {
   if (adminStatus.value?.login_in_progress) {
     return { command: 'admin-login' }
@@ -305,7 +301,7 @@ function doLogout() {
 }
 
 function needsStatusRefresh({ forceStatus = false } = {}) {
-  return forceStatus || currentPage.value === 'dashboard'
+  return forceStatus || visiblePage.value === 'dashboard'
 }
 
 async function refresh(options = {}) {
@@ -351,17 +347,18 @@ async function refresh(options = {}) {
 
 function onTaskStarted() {
   startPolling(10000)
-  refresh({ forceStatus: currentPage.value === 'dashboard' })
+  refresh({ forceStatus: visiblePage.value === 'dashboard' })
 }
 
 function onAdminProgress() {
   startPolling(10000)
-  refresh({ forceStatus: currentPage.value === 'dashboard' })
+  refresh({ forceStatus: visiblePage.value === 'dashboard' })
 }
 
 function navigateTo(page) {
-  if (currentPage.value === page) return
-  currentPage.value = page
+  const nextPage = page === 'account-clean' ? 'accounts' : page
+  if (currentPage.value === nextPage) return
+  currentPage.value = nextPage
 }
 
 async function forceStopAll() {
@@ -376,7 +373,7 @@ async function forceStopAll() {
     stopAllNotice.value = taskCount || flowCount
       ? `已请求停止 ${taskCount} 个任务、${flowCount} 个流程`
       : '当前没有需要停止的工作'
-    await refresh({ forceStatus: currentPage.value === 'dashboard' })
+    await refresh({ forceStatus: visiblePage.value === 'dashboard' })
     startPolling(10000)
   } catch (e) {
     stopAllError.value = e.message || '停止失败'
@@ -435,8 +432,12 @@ onMounted(async () => {
 })
 
 watch(currentPage, () => {
+  if (currentPage.value === 'account-clean') {
+    currentPage.value = 'accounts'
+    return
+  }
   if (authenticated.value) {
-    refresh({ forceStatus: currentPage.value === 'dashboard' })
+    refresh({ forceStatus: visiblePage.value === 'dashboard' })
   }
 })
 
